@@ -1,44 +1,50 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Check,
-  ChevronRight,
-  CircleStop,
-  Clock3,
-  Command,
-  Folder,
-  History,
-  LoaderCircle,
-  Minus,
-  Play,
-  Settings,
-  ShieldCheck,
-  Sparkles,
-  X,
-} from 'lucide-react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Check, CircleStop, Clock3, Folder, LoaderCircle, Minus, Play, Settings, X } from 'lucide-react';
 import type { BuddySettings, TaskRecord, TaskStatus, ToolCall } from '../electron/types';
 
-const active = new Set<TaskStatus>(['queued', 'planning', 'awaiting_approval', 'running']);
-const labels: Record<TaskStatus, string> = {
+const activeStatuses = new Set<TaskStatus>(['queued', 'planning', 'awaiting_approval', 'running']);
+const statusLabels: Record<TaskStatus, string> = {
   queued: 'Queued',
   planning: 'Planning',
-  awaiting_approval: 'Needs approval',
+  awaiting_approval: 'Approval needed',
   running: 'Running',
-  completed: 'Complete',
+  completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Stopped',
 };
+const suggestions = [
+  ['Disk usage', 'Show disk usage'],
+  ['List files', 'List files'],
+  ['Processes', 'Show running processes'],
+  ['Git status', 'Run git status'],
+] as const;
+const timeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
+
 function describe(call: ToolCall) {
   if (call.kind === 'shell') return [call.command, ...call.args].join(' ');
   if (call.kind === 'browser') return call.url;
   return `${call.operation} ${call.path}`;
 }
 
-function StatusIcon({ status }: { status: TaskStatus }) {
-  if (status === 'completed') return <Check size={14} />;
-  if (status === 'failed' || status === 'cancelled') return <X size={14} />;
-  if (status === 'awaiting_approval') return <AlertTriangle size={14} />;
-  return <LoaderCircle className="spin" size={14} />;
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function progressMessage(status: TaskStatus) {
+  if (status === 'queued') return 'Queued';
+  if (status === 'planning') return 'Preparing task';
+  if (status === 'awaiting_approval') return 'Waiting for approval';
+  if (status === 'running') return 'Running';
+  return 'No output was produced';
+}
+
+function StatusIcon({ status, size = 14 }: { status: TaskStatus; size?: number }) {
+  if (status === 'completed') return <Check aria-hidden="true" size={size} />;
+  if (status === 'failed') return <X aria-hidden="true" size={size} />;
+  if (status === 'cancelled') return <CircleStop aria-hidden="true" size={size} />;
+  if (status === 'awaiting_approval') return <AlertTriangle aria-hidden="true" size={size} />;
+  if (status === 'queued') return <Clock3 aria-hidden="true" size={size} />;
+  return <LoaderCircle aria-hidden="true" className="spin" size={size} />;
 }
 
 export default function App() {
@@ -47,237 +53,480 @@ export default function App() {
   const [prompt, setPrompt] = useState('');
   const [settings, setSettings] = useState<BuddySettings>();
   const [showSettings, setShowSettings] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
+  const [actionError, setActionError] = useState<string>();
+  const [settingsError, setSettingsError] = useState<string>();
+  const [savingSettings, setSavingSettings] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const output = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    void Promise.all([window.buddy.listTasks(), window.buddy.getSettings()]).then(([history, config]) => {
+  const settingsButton = useRef<HTMLButtonElement>(null);
+  const settingsPanel = useRef<HTMLElement>(null);
+  const firstSetting = useRef<HTMLSelectElement>(null);
+  const savedSettings = useRef<BuddySettings | undefined>(undefined);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(undefined);
+    try {
+      const [history, config] = await Promise.all([window.buddy.listTasks(), window.buddy.getSettings()]);
       setTasks(history);
       setSettings(config);
-      setSelected(history[0]?.id);
-    });
-    return window.buddy.onTask((task) => {
-      setTasks((old) => [task, ...old.filter((x) => x.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt));
+      savedSettings.current = config;
+      setSelected((current) => (current && history.some((item) => item.id === current) ? current : history[0]?.id));
+    } catch (error) {
+      setLoadError(errorMessage(error, 'Linux Buddy could not load its local state.'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const initialLoad = window.setTimeout(() => void load(), 0);
+    const removeTaskListener = window.buddy.onTask((task) => {
+      setTasks((current) =>
+        [task, ...current.filter((item) => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt),
+      );
       setSelected((id) => id || task.id);
     });
-  }, []);
-  useEffect(() => {
-    output.current?.scrollTo({ top: output.current.scrollHeight, behavior: 'smooth' });
-  }, [tasks, selected]);
+    const removeFocusListener = window.buddy.onFocusInput(() => {
+      setShowSettings(false);
+      input.current?.focus();
+    });
+    return () => {
+      window.clearTimeout(initialLoad);
+      removeTaskListener();
+      removeFocusListener();
+    };
+  }, [load]);
+
   const task = useMemo(() => tasks.find((item) => item.id === selected), [tasks, selected]);
+  const outputLength = task?.output.length ?? 0;
+  const taskStatus = task?.status;
+
+  useEffect(() => {
+    if (!output.current) return;
+    output.current.scrollTop = output.current.scrollHeight;
+  }, [outputLength, selected, taskStatus]);
+
+  const closeSettings = useCallback(() => {
+    setShowSettings(false);
+    settingsButton.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!showSettings) return;
+    firstSetting.current?.focus();
+    const closeFromOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (settingsPanel.current?.contains(target) || settingsButton.current?.contains(target)) return;
+      setShowSettings(false);
+    };
+    document.addEventListener('pointerdown', closeFromOutside);
+    return () => document.removeEventListener('pointerdown', closeFromOutside);
+  }, [showSettings]);
+
+  useEffect(() => {
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      if (showSettings) closeSettings();
+      else void window.buddy.hide();
+    };
+    document.addEventListener('keydown', onEscape);
+    return () => document.removeEventListener('keydown', onEscape);
+  }, [closeSettings, showSettings]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     const value = prompt.trim();
-    if (!value) return;
+    if (!value || submitting) return;
+    setActionError(undefined);
+    setSubmitting(true);
     setPrompt('');
-    const created = await window.buddy.submit(value);
-    setSelected(created.id);
+    try {
+      const created = await window.buddy.submit(value);
+      setSelected(created.id);
+    } catch (error) {
+      setPrompt(value);
+      setActionError(errorMessage(error, 'The task could not be started.'));
+      input.current?.focus();
+    } finally {
+      setSubmitting(false);
+    }
   }
-  async function update(next: Partial<BuddySettings>) {
-    if (!settings) return;
+
+  async function updateSettings(next: Partial<BuddySettings>) {
+    if (!settings || savingSettings) return;
     const value = { ...settings, ...next };
     setSettings(value);
-    await window.buddy.updateSettings(next);
+    setSettingsError(undefined);
+    setSavingSettings(true);
+    try {
+      await window.buddy.updateSettings(next);
+      savedSettings.current = value;
+    } catch (error) {
+      if (savedSettings.current) setSettings(savedSettings.current);
+      setSettingsError(errorMessage(error, 'Settings could not be saved.'));
+    } finally {
+      setSavingSettings(false);
+    }
   }
+
+  async function cancelTask(id: string) {
+    setActionError(undefined);
+    try {
+      await window.buddy.cancel(id);
+    } catch (error) {
+      setActionError(errorMessage(error, 'The task could not be stopped.'));
+    }
+  }
+
+  async function resolveApproval(id: string, approved: boolean) {
+    setActionError(undefined);
+    try {
+      await window.buddy.approve(id, approved);
+    } catch (error) {
+      setActionError(errorMessage(error, 'The approval response could not be sent.'));
+    }
+  }
+
+  function fillSuggestion(value: string) {
+    setPrompt(value);
+    setActionError(undefined);
+    input.current?.focus();
+  }
+
   return (
     <main className="shell">
-      <section className="buddy">
+      <section className="buddy" aria-label="Linux Buddy">
         <header className="titlebar">
           <div className="brand">
-            <div className="orb">
-              <Sparkles size={16} />
-            </div>
-            <div>
-              <strong>Linux Buddy</strong>
-              <span>local desktop agent</span>
-            </div>
+            <span className="brand-mark" aria-hidden="true">
+              &gt;_
+            </span>
+            <strong>Linux Buddy</strong>
           </div>
           <div className="window-actions">
-            <span className="shortcut">
-              <Command size={11} /> Ctrl Shift Space
-            </span>
-            <button aria-label="Settings" onClick={() => setShowSettings(!showSettings)}>
-              <Settings size={17} />
+            <kbd className="shortcut">Ctrl ⇧ Space</kbd>
+            <button
+              ref={settingsButton}
+              className="icon-button"
+              type="button"
+              aria-label="Settings"
+              aria-controls="settings-panel"
+              aria-expanded={showSettings}
+              disabled={!settings}
+              onClick={() => (showSettings ? closeSettings() : setShowSettings(true))}
+            >
+              <Settings aria-hidden="true" size={16} strokeWidth={1.8} />
             </button>
-            <button aria-label="Hide" onClick={() => window.buddy.hide()}>
-              <Minus size={18} />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Hide Linux Buddy"
+              onClick={() => window.buddy.hide()}
+            >
+              <Minus aria-hidden="true" size={17} strokeWidth={1.8} />
             </button>
           </div>
         </header>
+
         {showSettings && settings && (
-          <aside className="settings-panel">
-            <div className="settings-title">
-              <ShieldCheck size={17} />
-              <strong>Assistant settings</strong>
-            </div>
-            <label>
-              Provider
-              <select
-                value={settings.provider}
-                onChange={(e) => void update({ provider: e.target.value as BuddySettings['provider'] })}
-              >
-                <option value="demo">Demo · no key</option>
-                <option value="codex">Codex CLI</option>
-              </select>
-            </label>
-            <label>
-              Working directory
-              <div className="field-icon">
-                <Folder size={15} />
-                <input
-                  value={settings.defaultCwd}
-                  onChange={(e) => setSettings({ ...settings, defaultCwd: e.target.value })}
-                  onBlur={(e) => void update({ defaultCwd: e.target.value })}
-                />
+          <aside
+            ref={settingsPanel}
+            id="settings-panel"
+            className="settings-panel"
+            role="dialog"
+            aria-labelledby="settings-title"
+            aria-busy={savingSettings}
+          >
+            <div className="settings-heading">
+              <div>
+                <h2 id="settings-title">Settings</h2>
+                <span>{savingSettings ? 'Saving…' : 'On this device'}</span>
               </div>
+              <button className="icon-button" type="button" aria-label="Close settings" onClick={closeSettings}>
+                <X aria-hidden="true" size={15} />
+              </button>
+            </div>
+            <label className="field-label" htmlFor="provider">
+              Provider
             </label>
-            <label className="toggle">
+            <select
+              ref={firstSetting}
+              id="provider"
+              value={settings.provider}
+              disabled={savingSettings}
+              onChange={(event) => void updateSettings({ provider: event.target.value as BuddySettings['provider'] })}
+            >
+              <option value="demo">Demo (offline)</option>
+              <option value="codex">Codex CLI</option>
+            </select>
+
+            <label className="field-label" htmlFor="working-directory">
+              Working directory
+            </label>
+            <div className="field-with-icon">
+              <Folder aria-hidden="true" size={14} />
+              <input
+                id="working-directory"
+                value={settings.defaultCwd}
+                disabled={savingSettings}
+                spellCheck="false"
+                onChange={(event) => setSettings({ ...settings, defaultCwd: event.target.value })}
+                onBlur={(event) => void updateSettings({ defaultCwd: event.target.value })}
+              />
+            </div>
+
+            <label className="checkbox-row">
               <input
                 type="checkbox"
                 checked={settings.launchAtLogin}
-                onChange={(e) => void update({ launchAtLogin: e.target.checked })}
+                disabled={savingSettings}
+                onChange={(event) => void updateSettings({ launchAtLogin: event.target.checked })}
               />
-              <span /> Launch at login
+              <span>
+                <strong>Launch at login</strong>
+                <small>Start Linux Buddy when you sign in.</small>
+              </span>
             </label>
-            <p>Commands run as argv without a shell. Consequential actions always pause for approval.</p>
+
+            {settingsError && (
+              <p className="settings-error" role="alert">
+                {settingsError}
+              </p>
+            )}
+            <p className="settings-note">Commands run without a shell. Changes pause for approval.</p>
           </aside>
         )}
-        <form className="composer" onSubmit={submit}>
-          <div className="prompt-orb">
-            <Sparkles size={18} />
-          </div>
-          <textarea
-            ref={input}
-            rows={1}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                e.currentTarget.form?.requestSubmit();
-              }
-            }}
-            placeholder="Ask Buddy to inspect files, run a command, or open a page…"
-          />
-          <button className="run" aria-label="Run" disabled={!prompt.trim()}>
-            <Play size={16} fill="currentColor" />
-          </button>
-        </form>
-        <div className="suggestions">
-          <button onClick={() => setPrompt('Show disk usage')}>
-            <span>Disk space</span>
-          </button>
-          <button onClick={() => setPrompt('List files')}>
-            <span>List files</span>
-          </button>
-          <button onClick={() => setPrompt('Show running processes')}>
-            <span>Processes</span>
-          </button>
-          <button onClick={() => setPrompt('Run git status')}>
-            <span>Git status</span>
-          </button>
-        </div>
-        <div className="workspace">
-          <nav className="history">
-            <div className="section-label">
-              <History size={13} /> Recent
+
+        <section className="command-area" aria-label="New task">
+          <form className="composer" onSubmit={submit}>
+            <textarea
+              ref={input}
+              rows={1}
+              value={prompt}
+              autoFocus
+              disabled={submitting}
+              aria-label="Task or command"
+              placeholder="Type a task or command"
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+            />
+            <button
+              className="run"
+              aria-label={submitting ? 'Starting task' : 'Run task'}
+              disabled={!prompt.trim() || submitting}
+            >
+              {submitting ? (
+                <LoaderCircle aria-hidden="true" className="spin" size={16} />
+              ) : (
+                <Play aria-hidden="true" size={14} fill="currentColor" />
+              )}
+            </button>
+          </form>
+          <div className="composer-meta">
+            <div className="suggestions" aria-label="Example tasks">
+              <span>Try</span>
+              {suggestions.map(([label, value]) => (
+                <button type="button" key={label} onClick={() => fillSuggestion(value)}>
+                  {label}
+                </button>
+              ))}
             </div>
-            {tasks.length === 0 ? (
-              <div className="empty-history">Your completed work will appear here.</div>
+            <span className="enter-hint">
+              <kbd>Enter</kbd> to run
+            </span>
+          </div>
+          {actionError && (
+            <div className="action-error" role="alert">
+              <AlertTriangle aria-hidden="true" size={14} />
+              <span>{actionError}</span>
+              <button type="button" aria-label="Dismiss error" onClick={() => setActionError(undefined)}>
+                <X aria-hidden="true" size={13} />
+              </button>
+            </div>
+          )}
+        </section>
+
+        <div className="workspace">
+          <nav className="history" aria-label="Task history">
+            <div className="section-heading">
+              <h2>Tasks</h2>
+              {!loading && !loadError && <span>{tasks.length}</span>}
+            </div>
+            {loading ? (
+              <div className="history-state">
+                <LoaderCircle aria-hidden="true" className="spin" size={14} />
+                Loading tasks
+              </div>
+            ) : loadError ? (
+              <div className="history-state history-error">
+                <span>Tasks unavailable</span>
+                <button type="button" onClick={() => void load()}>
+                  Retry
+                </button>
+              </div>
+            ) : tasks.length === 0 ? (
+              <div className="history-state">No tasks yet</div>
             ) : (
               tasks.map((item) => (
                 <button
+                  type="button"
                   className={item.id === selected ? 'task selected' : 'task'}
                   key={item.id}
+                  aria-current={item.id === selected ? 'true' : undefined}
                   onClick={() => setSelected(item.id)}
                 >
-                  <span className={`status ${item.status}`}>
-                    <StatusIcon status={item.status} />
+                  <span className={`status-icon ${item.status}`}>
+                    <StatusIcon status={item.status} size={13} />
                   </span>
                   <span className="task-copy">
                     <strong>{item.prompt}</strong>
                     <small>
-                      <Clock3 size={10} />{' '}
-                      {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ·{' '}
-                      {labels[item.status]}
+                      <time dateTime={new Date(item.createdAt).toISOString()}>
+                        {timeFormatter.format(item.createdAt)}
+                      </time>
+                      <span aria-hidden="true">·</span>
+                      {statusLabels[item.status]}
                     </small>
                   </span>
-                  <ChevronRight size={14} />
                 </button>
               ))
             )}
           </nav>
+
           <article className="detail">
-            {task ? (
+            {loading ? (
+              <div className="empty-state">
+                <LoaderCircle aria-hidden="true" className="spin" size={17} />
+                <h2>Loading tasks</h2>
+              </div>
+            ) : loadError ? (
+              <div className="empty-state error-state">
+                <AlertTriangle aria-hidden="true" size={18} />
+                <h2>Could not load local data</h2>
+                <p>{loadError}</p>
+                <button type="button" onClick={() => void load()}>
+                  Try again
+                </button>
+              </div>
+            ) : task ? (
               <>
-                <div className="detail-head">
-                  <div>
-                    <span className={`pill ${task.status}`}>
-                      <StatusIcon status={task.status} /> {labels[task.status]}
-                    </span>
-                    <h2>{task.prompt}</h2>
+                <header className="detail-head">
+                  <div className="task-heading">
+                    <div className="task-meta">
+                      <span className={`status-label ${task.status}`} aria-live="polite">
+                        <StatusIcon status={task.status} size={13} />
+                        {statusLabels[task.status]}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <time dateTime={new Date(task.createdAt).toISOString()}>
+                        {timeFormatter.format(task.createdAt)}
+                      </time>
+                      <span aria-hidden="true">·</span>
+                      <span>{task.provider}</span>
+                    </div>
+                    <h1>{task.prompt}</h1>
                   </div>
-                  {active.has(task.status) && (
-                    <button className="stop" onClick={() => void window.buddy.cancel(task.id)}>
-                      <CircleStop size={15} /> Stop
+                  {activeStatuses.has(task.status) && (
+                    <button className="stop" type="button" onClick={() => void cancelTask(task.id)}>
+                      <CircleStop aria-hidden="true" size={14} />
+                      Stop
                     </button>
                   )}
-                </div>
+                </header>
+
                 {task.approval && (
-                  <div className="approval">
-                    <div className="approval-icon">
-                      <AlertTriangle size={20} />
-                    </div>
-                    <div>
-                      <strong>Approval required</strong>
+                  <section className="approval" aria-labelledby="approval-title" aria-live="polite">
+                    <AlertTriangle className="approval-icon" aria-hidden="true" size={18} />
+                    <div className="approval-copy">
+                      <h2 id="approval-title">Approval required</h2>
                       <p>{task.approval.reason}</p>
                       <code>{describe(task.approval.call)}</code>
                       <div className="approval-actions">
-                        <button className="deny" onClick={() => void window.buddy.approve(task.approval!.id, false)}>
+                        <button
+                          className="deny"
+                          type="button"
+                          onClick={() => void resolveApproval(task.approval!.id, false)}
+                        >
                           Deny
                         </button>
-                        <button className="allow" onClick={() => void window.buddy.approve(task.approval!.id, true)}>
+                        <button
+                          className="allow"
+                          type="button"
+                          onClick={() => void resolveApproval(task.approval!.id, true)}
+                        >
                           Allow once
                         </button>
                       </div>
                     </div>
+                  </section>
+                )}
+
+                {task.error && (
+                  <div className="task-error" role="alert">
+                    <AlertTriangle aria-hidden="true" size={15} />
+                    <div>
+                      <strong>Task failed</strong>
+                      <span>{task.error}</span>
+                    </div>
                   </div>
                 )}
-                <div className="output" ref={output}>
-                  {task.output.length ? (
-                    task.output.map((line, i) => (
-                      <div className="line" key={`${i}-${line}`}>
-                        <span>{String(i + 1).padStart(2, '0')}</span>
-                        <code>{line}</code>
+
+                <section className="output-section" aria-label="Task output">
+                  <div className="output-heading">
+                    <h2>Output</h2>
+                    <span>
+                      {task.output.length
+                        ? `${task.output.length} ${task.output.length === 1 ? 'line' : 'lines'}`
+                        : 'Live'}
+                    </span>
+                  </div>
+                  <div className="output" ref={output} tabIndex={0}>
+                    {task.output.length ? (
+                      task.output.map((line, index) => (
+                        <div className="line" key={`${index}-${line}`}>
+                          <span>{String(index + 1).padStart(2, '0')}</span>
+                          <code>{line}</code>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="waiting">
+                        {activeStatuses.has(task.status) && task.status !== 'awaiting_approval' && (
+                          <StatusIcon status={task.status} size={15} />
+                        )}
+                        <span>{progressMessage(task.status)}</span>
                       </div>
-                    ))
-                  ) : (
-                    <div className="waiting">
-                      <LoaderCircle className="spin" /> Starting task…
-                    </div>
-                  )}
-                  {task.error && (
-                    <div className="error">
-                      <AlertTriangle size={15} /> {task.error}
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                </section>
               </>
             ) : (
-              <div className="empty">
-                <div className="empty-orb">
-                  <Sparkles />
-                </div>
-                <h2>Ready when you are</h2>
-                <p>Try “Show disk usage” or “Run git status”.</p>
+              <div className="empty-state">
+                <h2>{tasks.length ? 'Select a task' : 'No tasks yet'}</h2>
+                <p>
+                  {tasks.length
+                    ? 'Choose a task to inspect its output.'
+                    : 'Enter a request above. Output and approvals will appear here.'}
+                </p>
               </div>
             )}
           </article>
         </div>
-        <footer>
-          <span>
-            <span className="online" /> Background service ready
+
+        <footer className="statusbar">
+          <span className="service-status">
+            <span className="service-dot" /> Local service ready
           </span>
-          <span>Outputs are bounded · secrets redacted</span>
+          <span>Changes pause for approval</span>
         </footer>
       </section>
     </main>

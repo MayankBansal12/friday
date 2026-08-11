@@ -14,4 +14,9 @@ contextBridge.exposeInMainWorld('buddy', {
     ipcRenderer.on('task:changed', handler);
     return () => ipcRenderer.removeListener('task:changed', handler);
   },
+  onFocusInput: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('window:focus-input', handler);
+    return () => ipcRenderer.removeListener('window:focus-input', handler);
+  },
 });

@@ -2,6 +2,7 @@
   "name": "linux-buddy",
   "version": "0.1.0",
   "description": "A safe, Linux-first floating desktop assistant",
+  "desktopName": "linux-buddy.desktop",
   "main": "dist-electron/main/index.js",
   "type": "module",
   "scripts": {
@@ -22,6 +23,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "directories": {
@@ -31,7 +33,9 @@
       "target": [
         "dir"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "icon": "assets/icon.png",
+      "syncDesktopName": true
     }
   },
   "dependencies": {

@@ -47,14 +47,14 @@ export class DemoProvider implements AgentProvider {
     }
     const open = text.match(/^(?:open|browse(?: to)?)\s+(https?:\/\/\S+)$/i);
     if (open) return [{ kind: 'browser', url: open[1] }];
-    const read = text.match(/^(?:read|show)\s+(?:file\s+)?(.+)$/i);
-    if (read) return [{ kind: 'file', operation: 'read', path: resolve(context.cwd, read[1]), maxBytes: 64_000 }];
-    const list = text.match(/^(?:list|show)\s+(?:files|directory)(?:\s+(?:in\s+)?(.+))?$/i);
-    if (list) return [{ kind: 'file', operation: 'list', path: resolve(context.cwd, list[1] || '.') }];
     if (/process|what.*running/i.test(text))
       return [{ kind: 'shell', command: 'ps', args: ['aux'], cwd: context.cwd, timeoutMs: 10_000 }];
     if (/disk|storage/i.test(text))
       return [{ kind: 'shell', command: 'df', args: ['-h'], cwd: context.cwd, timeoutMs: 10_000 }];
+    const read = text.match(/^(?:read|show)\s+(?:file\s+)?(.+)$/i);
+    if (read) return [{ kind: 'file', operation: 'read', path: resolve(context.cwd, read[1]), maxBytes: 64_000 }];
+    const list = text.match(/^(?:list|show)\s+(?:files|directory)(?:\s+(?:in\s+)?(.+))?$/i);
+    if (list) return [{ kind: 'file', operation: 'list', path: resolve(context.cwd, list[1] || '.') }];
     return [{ kind: 'shell', command: 'uname', args: ['-a'], cwd: context.cwd, timeoutMs: 10_000 }];
   }
 }

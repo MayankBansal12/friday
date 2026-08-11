@@ -11,6 +11,7 @@ declare global {
       updateSettings(value: Partial<BuddySettings>): Promise<void>;
       hide(): Promise<void>;
       onTask(callback: (task: TaskRecord) => void): () => void;
+      onFocusInput(callback: () => void): () => void;
     };
   }
 }
