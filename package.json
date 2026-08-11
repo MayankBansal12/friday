@@ -1,0 +1,68 @@
+{
+  "name": "linux-buddy",
+  "version": "0.1.0",
+  "description": "A safe, Linux-first floating desktop assistant",
+  "main": "dist-electron/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "build": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
+    "build:unpacked": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "build": {
+    "appId": "dev.linuxbuddy.app",
+    "productName": "Linux Buddy",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "concurrently": "latest",
+    "cross-env": "latest",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "9.39.1",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest",
+    "prettier": "latest",
+    "typescript": "6.0.2",
+    "typescript-eslint": "latest",
+    "vite": "latest",
+    "vitest": "latest",
+    "wait-on": "latest"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "author": "Linux Buddy Contributors <noreply@linux-buddy.local>",
+  "homepage": "https://github.com/mayank/linux-buddy"
+}
