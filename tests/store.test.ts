@@ -18,11 +18,11 @@ describe('task persistence', () => {
     const task: TaskRecord = {
       id: '1',
       prompt: 'hello',
-      provider: 'demo',
       status: 'completed',
       createdAt: 1,
       updatedAt: 2,
-      output: ['safe'],
+      response: 'Done.',
+      steps: [],
     };
     await store.save([task]);
     expect(await store.load()).toEqual([task]);

@@ -1,71 +1,75 @@
-# Linux Buddy
+# Friday
 
-A Linux-first floating desktop assistant MVP. Press **Ctrl+Shift+Space**, type a request, and Buddy plans typed tools, runs them in its background Electron process, streams progress, asks before consequential actions, and keeps durable local history even when its window is hidden.
+Friday is a voice-first Linux desktop agent. Press **Ctrl+Shift+Space**, speak naturally, and say **“Friday”** before the request. Audio is transcribed locally with the Canary model already installed through Handy; only the words after the wake word are sent to a Pi agent running on OpenCode Go.
 
-## Run it
+Example:
 
-Requirements: Linux, Node.js 22+, pnpm, and a graphical X11/Wayland session.
+> “...anything before this is ignored... Friday, open my downloads and sort the screenshots into a folder.”
+
+Friday can inspect and control the visible desktop, use applications and the browser, work with files, and run terminal tools. Its interface shows a conversational answer and concise activity instead of dumping command output. It works autonomously and asks only before consequential actions such as deletion, privilege escalation, purchases, sending, publishing, or exposing sensitive information.
+
+## Requirements
+
+- Linux graphical session (X11 is currently required for mouse/keyboard control)
+- Node.js 22+ and pnpm
+- `pi` 0.80+ on `PATH`
+- `handy` with the `canary-180m-flash` model installed
+- `ffmpeg`
+- `OPENCODE_API_KEY`
+
+The target machine already has Pi, Handy, FFmpeg, and the Canary Q8 model. `pnpm dev` passes Electron `--no-sandbox` because this host blocks Chromium user namespaces and the pnpm SUID helper is not root-owned. This exception is for local development only; use `pnpm dev:sandboxed` on a host with a correctly configured Chromium sandbox.
+
+## Run
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Production build and launch:
+Build the unpacked desktop app:
 
 ```bash
 pnpm build
 ./release/linux-unpacked/linux-buddy
 ```
 
-The window hides instead of terminating; use its tray menu to quit. Toggle **Launch at login** in Settings to use Electron's desktop autostart integration.
+The window hides instead of quitting. Use the tray menu to quit. The shortcut always opens Friday and starts listening.
 
-## Requests and providers
+## Voice flow
 
-The default `demo` provider needs no key and supports useful offline phrases:
+1. The shortcut or tray icon opens Friday and enables the microphone.
+2. Silence closes each local utterance and sends it to Handy's batch Canary transcription.
+3. Speech before the configured wake word is discarded.
+4. If the user says only “Friday,” the next utterance becomes the command.
+5. A detected request starts a Pi RPC session with the selected `opencode-go` model.
+6. Pi streams assistant text, tools, completion, and native confirmation requests into the UI.
 
-- `Show disk usage`, `Show running processes`, `List files`
-- `Read README.md`, `Open https://example.com`
-- `Run git status` or any single executable plus arguments
+Canary audio is not sent to a speech service. The recognized command is sent to OpenCode Go for the agent run. When a task requires visual desktop interaction, Friday also sends the captured screenshot to the selected OpenCode Go model; the authenticated bridge itself remains loopback-only.
 
-Shell syntax (`|`, `;`, redirects, command substitution) is rejected. Commands execute directly as a typed command/argv pair with an explicit working directory, capped timeout, cancellation signal, and bounded/redacted output.
+## Desktop tools and safety
 
-For richer natural-language planning, this machine's authenticated Codex CLI is supported:
+Friday's Pi extension exposes two typed tools:
+
+- `desktop_observe`: captures the desktop for the vision-capable model.
+- `desktop_action`: clicks, types, presses keys, scrolls, or opens a path/URL.
+
+The bridge binds to a random loopback port and requires a per-launch 256-bit bearer token. The token is passed only to the Pi child process. The extension enforces confirmation for high-risk shell patterns and asks the model to declare consequential GUI actions through Pi's confirmation protocol. Stop aborts the active Pi turn and terminates it if needed.
+
+## Configuration
+
+Environment overrides:
 
 ```bash
-LINUX_BUDDY_PROVIDER=codex pnpm dev
-# Optional custom location:
-LINUX_BUDDY_CODEX_BIN=/path/to/codex LINUX_BUDDY_PROVIDER=codex pnpm dev
+OPENCODE_API_KEY=...
+LINUX_BUDDY_MODEL=kimi-k2.6
+LINUX_BUDDY_WAKE_WORD=Friday
+LINUX_BUDDY_STT_MODEL=handy-computer/canary-180m-flash-gguf/canary-180m-flash-Q8_0.gguf
+LINUX_BUDDY_PI_BIN=pi
+LINUX_BUDDY_HANDY_BIN=handy
+LINUX_BUDDY_FFMPEG_BIN=ffmpeg
 ```
 
-The Codex process only produces schema-validated tool plans in read-only mode. Linux Buddy—not model text—applies policy and executes each typed call. No credentials are stored by the app. `.env` files are gitignored.
-
-## Safety model
-
-- Known inspection commands and ordinary file listing/reading run immediately.
-- Unknown state-changing commands, destructive commands, privilege escalation, publishing/network transfer, and potentially sensitive paths require explicit **Allow once** approval.
-- `su` and `pkexec` are blocked. External URLs are restricted to HTTP(S).
-- The prominent **Stop** button aborts provider and process execution. Child commands use no shell and are killed on timeout.
-- History is an atomic, versioned JSON database at Electron's private app-data path (`~/.config/linux-buddy/tasks.json` on typical Linux installations), written mode `0600`. This is the SQLite-equivalent persistence layer for the MVP and is isolated behind `TaskStore` for a future SQLite migration.
-
-## Architecture
-
-```text
-React palette (sandboxed renderer)
-       │ typed IPC through context-isolated preload
-       ▼
-Electron main / durable TaskService ── atomic TaskStore
-       │
-       ├── Provider: deterministic demo or Codex CLI planner
-       ├── Policy: risk classification and approval gate
-       └── Tools: shell argv, bounded file inspection, open HTTP(S) URL
-```
-
-Closing the UI hides it while Electron's main process continues active jobs. Restart recovery marks any truly interrupted jobs failed instead of leaving them stuck. The provider and typed `ToolCall` union are deliberate extension points for Ollama/OpenAI-compatible providers, AT-SPI desktop tools, screen context, and browser automation.
-
-## Stack decision
-
-Electron was selected after inspecting the target host. Node 24 and GTK 3 are installed, while Rust/Cargo and WebKitGTK development packages are absent. Tauri 2 would require both a new language toolchain and native system packages before compiling; Electron provides a runnable MVP now without sacrificing the isolated main-process service, global shortcut, tray, or autostart requirements. Tauri remains viable if installed size becomes more important than the current zero-system-setup build.
+The UI also supports wake word, working folder, model, and launch-at-login settings.
 
 ## Quality checks
 
@@ -76,13 +80,3 @@ pnpm typecheck
 pnpm test
 pnpm build
 ```
-
-Tests cover low/high-risk command decisions, sensitive paths, atomic persistence, successful execution, approval, denial, and final lifecycle state.
-
-## Short roadmap
-
-1. Wayland `xdg-desktop-portal` ScreenCast/PipeWire capture with explicit per-session consent; add OCR and bounded screenshot context.
-2. Non-interactive, click-through overlay surfaces for highlights and task feedback across monitors.
-3. AT-SPI accessibility-tree inspection and typed, approval-aware native UI actions.
-4. Playwright browser bridge with a visible controlled profile, domain allowlists, and confirmation before form submission/publishing.
-5. SQLite WAL storage, resumable task checkpoints, system notifications with action buttons, and optional user service packaging.

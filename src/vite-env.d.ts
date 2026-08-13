@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
-import type { BuddySettings, TaskRecord } from '../electron/types';
+import type { BuddySettings, ListeningState, TaskRecord, TranscriptResult } from '../electron/types';
+
 declare global {
   interface Window {
     buddy: {
@@ -7,12 +8,15 @@ declare global {
       submit(prompt: string): Promise<TaskRecord>;
       cancel(id: string): Promise<void>;
       approve(id: string, approved: boolean): Promise<void>;
+      transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult>;
       getSettings(): Promise<BuddySettings>;
       updateSettings(value: Partial<BuddySettings>): Promise<void>;
       hide(): Promise<void>;
+      listening(state: ListeningState): void;
       onTask(callback: (task: TaskRecord) => void): () => void;
-      onFocusInput(callback: () => void): () => void;
+      onListen(callback: () => void): () => void;
     };
   }
 }
+
 export {};

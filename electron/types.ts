@@ -1,34 +1,44 @@
-export type TaskStatus = 'queued' | 'planning' | 'awaiting_approval' | 'running' | 'completed' | 'failed' | 'cancelled';
-export type Risk = 'low' | 'medium' | 'high' | 'blocked';
+export type RunStatus = 'queued' | 'thinking' | 'acting' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
 
-export type ShellTool = { kind: 'shell'; command: string; args: string[]; cwd: string; timeoutMs: number };
-export type FileTool = { kind: 'file'; operation: 'list' | 'read' | 'stat'; path: string; maxBytes?: number };
-export type BrowserTool = { kind: 'browser'; url: string };
-export type ToolCall = ShellTool | FileTool | BrowserTool;
+export interface AgentStep {
+  id: string;
+  kind: 'thought' | 'tool' | 'result' | 'status';
+  title: string;
+  detail?: string;
+  status: 'running' | 'done' | 'failed';
+  createdAt: number;
+}
 
 export interface Approval {
   id: string;
-  taskId: string;
-  reason: string;
-  risk: Risk;
-  call: ToolCall;
+  title: string;
+  message: string;
   createdAt: number;
 }
 
 export interface TaskRecord {
   id: string;
   prompt: string;
-  status: TaskStatus;
-  provider: string;
+  status: RunStatus;
   createdAt: number;
   updatedAt: number;
-  output: string[];
+  response?: string;
   error?: string;
+  steps: AgentStep[];
   approval?: Approval;
 }
 
 export interface BuddySettings {
-  provider: 'demo' | 'codex';
   defaultCwd: string;
   launchAtLogin: boolean;
+  wakeWord: string;
+  model: string;
+}
+
+export type ListeningState = 'idle' | 'listening' | 'transcribing' | 'armed' | 'error';
+
+export interface TranscriptResult {
+  text: string;
+  wakeDetected: boolean;
+  command?: string;
 }

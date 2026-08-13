@@ -6,7 +6,7 @@
   "main": "dist-electron/main/index.js",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron --no-sandbox .\"",
     "build": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
     "build:unpacked": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
@@ -14,7 +14,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:sandboxed": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\""
   },
   "build": {
     "appId": "dev.linuxbuddy.app",
@@ -39,7 +40,9 @@
     }
   },
   "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
     "@vitejs/plugin-react": "latest",
+    "dotenv": "^17.4.2",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest"

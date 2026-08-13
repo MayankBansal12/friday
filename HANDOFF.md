@@ -1,24 +1,24 @@
-# Handoff: restrained desktop UI shipped
+# Friday implementation handoff
 
-Linux Buddy is a complete Linux-first Electron MVP with a finished design-engineering pass. The renderer is now a dense, neutral desktop tool with clear task history, readable live output, deliberate approvals, an unmistakable Stop action, settings, and explicit loading, empty, and error states.
+Linux Buddy's fixed command planner and terminal-output UI have been replaced by a voice-first desktop agent.
 
-## Design and interaction state
+Implemented:
 
-- Keyboard invocation is instant. The window has no open or close animation and the composer regains focus whenever the shortcut shows it.
-- Motion is limited to 120 ms transform-only press feedback and the status spinner. Hover states are pointer-gated, and reduced motion replaces rotation with an opacity pulse.
-- The interface uses neutral surfaces, quiet system typography, precise borders and spacing, and a single restrained blue focus/status accent. There are no gradients, glows, or sparkle/orb decoration.
-- Settings support keyboard focus, Escape, click-outside dismissal, save/error feedback, and a typed IPC focus listener.
-- Approval, running, completed, stopped, failed, loading, and empty states were exercised in the real Electron renderer at both 720×760 and the 560×540 minimum size.
-- A custom `>_` application icon is packaged and used by the tray. The Linux desktop filename, app ID, and `StartupWMClass` are synchronized.
+- Shortcut-triggered continuous microphone listening with utterance segmentation.
+- Local Handy/Canary transcription and wake-word extraction.
+- Pi RPC agent runs using the built-in `opencode-go` provider.
+- Vision screenshots plus Linux mouse, keyboard, scroll, and open actions through nut.js.
+- Native Pi confirmation requests and enforced high-risk shell gates.
+- Conversational UI with activity, approvals, Stop, history, and settings.
+- Private token-authenticated loopback desktop bridge.
+- Packaged runtime copying of the standalone Pi extension from the Electron ASAR.
 
-## Verification on echio-staging
+Status: ready for user manual testing. Automated and authenticated integration checks pass. Manual UX validation remaining:
 
-- `pnpm format:check`, `pnpm lint`, and `pnpm typecheck`: pass
-- `pnpm test`: 5 files / 16 tests pass
-- `pnpm build`: Vite production build and `release/linux-unpacked` Electron build pass
-- `release/linux-buddy_0.1.0_amd64.deb`: produced (97 MB)
-- Final Debian artifact SHA-256: `c444d6d7a8fd80b814cdbfd4e8d8433ec6b79ac70b318e17b0a4ff30dbe80a9a`
-- The final `.deb` was installed temporarily and launched from `/opt/Linux Buddy` without `--no-sandbox`. Its renderer reported `--enable-sandbox`, `NoNewPrivs: 1`, and seccomp mode 2. The temporary install was then removed and the unpacked release restored.
-- Chromium received `GlobalShortcutsPortal` and `GlobalShortcutsPortalPreferredTrigger`. This headless Debian host has no Wayland session or `xdg-desktop-portal` service, so the desktop consent dialog cannot be exercised here; the X11 registration path succeeded under Xvfb.
+1. Real microphone transcription accuracy and silence thresholds.
+2. One file task, one browser task, and one multi-step GUI task.
+3. A consequential action that produces Allow once / Don't allow.
+4. Stop during a running shell tool and during a GUI workflow.
+5. X11 desktop coordinate accuracy at the user's real scaling setting.
 
-The safe typed-tool boundary remains intact. The only provider change fixes the documented “Show disk usage” and “Show running processes” demo phrases, with regression coverage.
+Wayland native input is not yet supported by nut.js; desktop mouse/keyboard control currently targets X11.

@@ -1,532 +1,600 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, CircleStop, Clock3, Folder, LoaderCircle, Minus, Play, Settings, X } from 'lucide-react';
-import type { BuddySettings, TaskRecord, TaskStatus, ToolCall } from '../electron/types';
+import {
+  Check,
+  ChevronDown,
+  CircleStop,
+  Clock3,
+  LoaderCircle,
+  Mic,
+  MicOff,
+  Minus,
+  Send,
+  Settings,
+  ShieldAlert,
+  Sparkles,
+  X,
+} from 'lucide-react';
+import type { BuddySettings, ListeningState, TaskRecord } from '../electron/types';
 
-const activeStatuses = new Set<TaskStatus>(['queued', 'planning', 'awaiting_approval', 'running']);
-const statusLabels: Record<TaskStatus, string> = {
-  queued: 'Queued',
-  planning: 'Planning',
-  awaiting_approval: 'Approval needed',
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Stopped',
-};
-const suggestions = [
-  ['Disk usage', 'Show disk usage'],
-  ['List files', 'List files'],
-  ['Processes', 'Show running processes'],
-  ['Git status', 'Run git status'],
-] as const;
-const timeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
-
-function describe(call: ToolCall) {
-  if (call.kind === 'shell') return [call.command, ...call.args].join(' ');
-  if (call.kind === 'browser') return call.url;
-  return `${call.operation} ${call.path}`;
-}
+const activeStatuses = new Set(['queued', 'thinking', 'acting', 'awaiting_approval']);
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function progressMessage(status: TaskStatus) {
-  if (status === 'queued') return 'Queued';
-  if (status === 'planning') return 'Preparing task';
-  if (status === 'awaiting_approval') return 'Waiting for approval';
-  if (status === 'running') return 'Running';
-  return 'No output was produced';
-}
-
-function StatusIcon({ status, size = 14 }: { status: TaskStatus; size?: number }) {
-  if (status === 'completed') return <Check aria-hidden="true" size={size} />;
-  if (status === 'failed') return <X aria-hidden="true" size={size} />;
-  if (status === 'cancelled') return <CircleStop aria-hidden="true" size={size} />;
-  if (status === 'awaiting_approval') return <AlertTriangle aria-hidden="true" size={size} />;
-  if (status === 'queued') return <Clock3 aria-hidden="true" size={size} />;
-  return <LoaderCircle aria-hidden="true" className="spin" size={size} />;
+function statusCopy(state: ListeningState, wakeWord: string) {
+  if (state === 'listening') return `Listening for “${wakeWord}”`;
+  if (state === 'armed') return 'I’m listening — what should I do?';
+  if (state === 'transcribing') return 'Understanding you…';
+  if (state === 'error') return 'Voice input unavailable';
+  return `Say “${wakeWord}” after opening Friday`;
 }
 
 export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [selected, setSelected] = useState<string>();
-  const [prompt, setPrompt] = useState('');
   const [settings, setSettings] = useState<BuddySettings>();
+  const [prompt, setPrompt] = useState('');
+  const [listenState, setListenState] = useState<ListeningState>('idle');
+  const [heard, setHeard] = useState('');
+  const [voiceLevel, setVoiceLevel] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showActivity, setShowActivity] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [loadError, setLoadError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
-  const [settingsError, setSettingsError] = useState<string>();
-  const [savingSettings, setSavingSettings] = useState(false);
-  const input = useRef<HTMLTextAreaElement>(null);
-  const output = useRef<HTMLDivElement>(null);
-  const settingsButton = useRef<HTMLButtonElement>(null);
-  const settingsPanel = useRef<HTMLElement>(null);
-  const firstSetting = useRef<HTMLSelectElement>(null);
-  const savedSettings = useRef<BuddySettings | undefined>(undefined);
+  const [submitting, setSubmitting] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError(undefined);
-    try {
-      const [history, config] = await Promise.all([window.buddy.listTasks(), window.buddy.getSettings()]);
-      setTasks(history);
-      setSettings(config);
-      savedSettings.current = config;
-      setSelected((current) => (current && history.some((item) => item.id === current) ? current : history[0]?.id));
-    } catch (error) {
-      setLoadError(errorMessage(error, 'Linux Buddy could not load its local state.'));
-    } finally {
-      setLoading(false);
-    }
+  const streamRef = useRef<MediaStream | undefined>(undefined);
+  const recorderRef = useRef<MediaRecorder | undefined>(undefined);
+  const audioContextRef = useRef<AudioContext | undefined>(undefined);
+  const animationRef = useRef<number | undefined>(undefined);
+  const generationRef = useRef(0);
+  const beginSegmentRef = useRef<
+    ((stream: MediaStream, analyser: AnalyserNode, generation: number) => void) | undefined
+  >(undefined);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
+
+  const task = useMemo(() => tasks.find((item) => item.id === selected) ?? tasks[0], [selected, tasks]);
+  const wakeWord = settings?.wakeWord || 'Friday';
+  const running = task ? activeStatuses.has(task.status) : false;
+
+  const updateListening = useCallback((state: ListeningState) => {
+    setListenState(state);
+    window.buddy.listening(state);
   }, []);
 
-  useEffect(() => {
-    const initialLoad = window.setTimeout(() => void load(), 0);
-    const removeTaskListener = window.buddy.onTask((task) => {
-      setTasks((current) =>
-        [task, ...current.filter((item) => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt),
+  const stopListening = useCallback(() => {
+    generationRef.current += 1;
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    void audioContextRef.current?.close();
+    recorderRef.current = undefined;
+    streamRef.current = undefined;
+    audioContextRef.current = undefined;
+    setVoiceLevel(0);
+    updateListening('idle');
+  }, [updateListening]);
+
+  const beginSegment = useCallback(
+    (stream: MediaStream, analyser: AnalyserNode, generation: number) => {
+      if (generation !== generationRef.current || !stream.active) return;
+      const chunks: Blob[] = [];
+      const supported = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].find((type) =>
+        MediaRecorder.isTypeSupported(type),
       );
-      setSelected((id) => id || task.id);
+      const recorder = new MediaRecorder(stream, supported ? { mimeType: supported } : undefined);
+      recorderRef.current = recorder;
+      let hasSpeech = false;
+      let silenceStarted = 0;
+      const startedAt = performance.now();
+      const samples = new Uint8Array(analyser.fftSize);
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) chunks.push(event.data);
+      };
+      recorder.onstop = async () => {
+        if (generation !== generationRef.current || !stream.active) return;
+        if (!hasSpeech) {
+          beginSegmentRef.current?.(stream, analyser, generation);
+          return;
+        }
+        updateListening('transcribing');
+        try {
+          const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+          const result = await window.buddy.transcribe(await blob.arrayBuffer(), blob.type);
+          if (generation !== generationRef.current) return;
+          if (result.text) setHeard(result.text);
+          if (result.command) {
+            stopListening();
+            setPrompt('');
+            setSubmitting(true);
+            try {
+              const created = await window.buddy.submit(result.command);
+              setSelected(created.id);
+              setShowActivity(true);
+            } catch (error) {
+              setActionError(errorMessage(error, 'Friday could not start that task.'));
+            } finally {
+              setSubmitting(false);
+            }
+            return;
+          }
+          updateListening(result.wakeDetected ? 'armed' : 'listening');
+          beginSegmentRef.current?.(stream, analyser, generation);
+        } catch (error) {
+          setActionError(errorMessage(error, 'Local speech transcription failed.'));
+          updateListening('error');
+        }
+      };
+      recorder.start(250);
+      const monitor = () => {
+        if (generation !== generationRef.current || recorder.state !== 'recording') return;
+        analyser.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const value of samples) {
+          const normalized = (value - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const rms = Math.sqrt(sum / samples.length);
+        setVoiceLevel(Math.min(1, rms * 9));
+        const now = performance.now();
+        if (rms > 0.025) {
+          hasSpeech = true;
+          silenceStarted = 0;
+        } else if (hasSpeech) {
+          if (!silenceStarted) silenceStarted = now;
+          if (now - silenceStarted > 850) {
+            recorder.stop();
+            return;
+          }
+        } else if (now - startedAt > 10_000) {
+          recorder.stop();
+          return;
+        }
+        if (now - startedAt > 25_000) {
+          recorder.stop();
+          return;
+        }
+        animationRef.current = requestAnimationFrame(monitor);
+      };
+      animationRef.current = requestAnimationFrame(monitor);
+    },
+    [stopListening, updateListening],
+  );
+
+  useEffect(() => {
+    beginSegmentRef.current = beginSegment;
+  }, [beginSegment]);
+
+  const startListening = useCallback(async () => {
+    if (streamRef.current?.active) return;
+    setActionError(undefined);
+    setHeard('');
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+      });
+      if (generation !== generationRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.72;
+      context.createMediaStreamSource(stream).connect(analyser);
+      streamRef.current = stream;
+      audioContextRef.current = context;
+      updateListening('listening');
+      beginSegment(stream, analyser, generation);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Allow microphone access to talk to Friday.'));
+      updateListening('error');
+    }
+  }, [beginSegment, updateListening]);
+
+  useEffect(() => {
+    let disposed = false;
+    void Promise.all([window.buddy.listTasks(), window.buddy.getSettings()])
+      .then(([history, config]) => {
+        if (disposed) return;
+        setTasks(history);
+        setSettings(config);
+        setSelected(history[0]?.id);
+      })
+      .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
+      .finally(() => setLoading(false));
+    const removeTask = window.buddy.onTask((next) => {
+      setTasks((current) =>
+        [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
+      );
+      setSelected((current) => current || next.id);
     });
-    const removeFocusListener = window.buddy.onFocusInput(() => {
-      setShowSettings(false);
-      input.current?.focus();
-    });
+    const removeListen = window.buddy.onListen(() => void startListening());
     return () => {
-      window.clearTimeout(initialLoad);
-      removeTaskListener();
-      removeFocusListener();
+      disposed = true;
+      removeTask();
+      removeListen();
+      stopListening();
     };
-  }, [load]);
-
-  const task = useMemo(() => tasks.find((item) => item.id === selected), [tasks, selected]);
-  const outputLength = task?.output.length ?? 0;
-  const taskStatus = task?.status;
+  }, [startListening, stopListening]);
 
   useEffect(() => {
-    if (!output.current) return;
-    output.current.scrollTop = output.current.scrollHeight;
-  }, [outputLength, selected, taskStatus]);
-
-  const closeSettings = useCallback(() => {
-    setShowSettings(false);
-    settingsButton.current?.focus();
-  }, []);
+    if (!conversationRef.current) return;
+    conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
+  }, [task?.response, task?.steps.length, task?.status]);
 
   useEffect(() => {
-    if (!showSettings) return;
-    firstSetting.current?.focus();
-    const closeFromOutside = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (settingsPanel.current?.contains(target) || settingsButton.current?.contains(target)) return;
-      setShowSettings(false);
-    };
-    document.addEventListener('pointerdown', closeFromOutside);
-    return () => document.removeEventListener('pointerdown', closeFromOutside);
-  }, [showSettings]);
-
-  useEffect(() => {
-    const onEscape = (event: KeyboardEvent) => {
+    const keydown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      event.preventDefault();
-      if (showSettings) closeSettings();
+      if (showSettings) setShowSettings(false);
+      else if (listenState !== 'idle') stopListening();
       else void window.buddy.hide();
     };
-    document.addEventListener('keydown', onEscape);
-    return () => document.removeEventListener('keydown', onEscape);
-  }, [closeSettings, showSettings]);
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, [listenState, showSettings, stopListening]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const value = prompt.trim();
     if (!value || submitting) return;
-    setActionError(undefined);
+    stopListening();
     setSubmitting(true);
+    setActionError(undefined);
     setPrompt('');
     try {
       const created = await window.buddy.submit(value);
       setSelected(created.id);
+      setShowActivity(true);
     } catch (error) {
       setPrompt(value);
-      setActionError(errorMessage(error, 'The task could not be started.'));
-      input.current?.focus();
+      setActionError(errorMessage(error, 'Friday could not start that task.'));
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function updateSettings(next: Partial<BuddySettings>) {
-    if (!settings || savingSettings) return;
+  async function saveSettings(next: Partial<BuddySettings>) {
+    if (!settings) return;
     const value = { ...settings, ...next };
     setSettings(value);
-    setSettingsError(undefined);
-    setSavingSettings(true);
     try {
       await window.buddy.updateSettings(next);
-      savedSettings.current = value;
     } catch (error) {
-      if (savedSettings.current) setSettings(savedSettings.current);
-      setSettingsError(errorMessage(error, 'Settings could not be saved.'));
-    } finally {
-      setSavingSettings(false);
+      setActionError(errorMessage(error, 'Settings could not be saved.'));
     }
-  }
-
-  async function cancelTask(id: string) {
-    setActionError(undefined);
-    try {
-      await window.buddy.cancel(id);
-    } catch (error) {
-      setActionError(errorMessage(error, 'The task could not be stopped.'));
-    }
-  }
-
-  async function resolveApproval(id: string, approved: boolean) {
-    setActionError(undefined);
-    try {
-      await window.buddy.approve(id, approved);
-    } catch (error) {
-      setActionError(errorMessage(error, 'The approval response could not be sent.'));
-    }
-  }
-
-  function fillSuggestion(value: string) {
-    setPrompt(value);
-    setActionError(undefined);
-    input.current?.focus();
   }
 
   return (
     <main className="shell">
-      <section className="buddy" aria-label="Linux Buddy">
+      <section className="friday" aria-label="Friday desktop agent">
         <header className="titlebar">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              &gt;_
+          <button
+            className="brand"
+            type="button"
+            onClick={() => setShowHistory((value) => !value)}
+            aria-expanded={showHistory}
+          >
+            <span className="brand-glyph">
+              <Sparkles size={14} />
             </span>
-            <strong>Linux Buddy</strong>
-          </div>
-          <div className="window-actions">
-            <kbd className="shortcut">Ctrl ⇧ Space</kbd>
-            <button
-              ref={settingsButton}
-              className="icon-button"
-              type="button"
-              aria-label="Settings"
-              aria-controls="settings-panel"
-              aria-expanded={showSettings}
-              disabled={!settings}
-              onClick={() => (showSettings ? closeSettings() : setShowSettings(true))}
-            >
-              <Settings aria-hidden="true" size={16} strokeWidth={1.8} />
+            <span>Friday</span>
+            <ChevronDown size={13} className={showHistory ? 'rotated' : ''} />
+          </button>
+          <div className="title-actions">
+            <span className={`connection ${listenState !== 'idle' ? 'live' : ''}`}>
+              {listenState !== 'idle' ? 'Mic on' : 'Ready'}
+            </span>
+            <button className="icon-button" type="button" aria-label="Settings" onClick={() => setShowSettings(true)}>
+              <Settings size={16} />
             </button>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Hide Linux Buddy"
-              onClick={() => window.buddy.hide()}
-            >
-              <Minus aria-hidden="true" size={17} strokeWidth={1.8} />
+            <button className="icon-button" type="button" aria-label="Hide Friday" onClick={() => window.buddy.hide()}>
+              <Minus size={17} />
             </button>
           </div>
         </header>
 
-        {showSettings && settings && (
-          <aside
-            ref={settingsPanel}
-            id="settings-panel"
-            className="settings-panel"
-            role="dialog"
-            aria-labelledby="settings-title"
-            aria-busy={savingSettings}
-          >
-            <div className="settings-heading">
-              <div>
-                <h2 id="settings-title">Settings</h2>
-                <span>{savingSettings ? 'Saving…' : 'On this device'}</span>
-              </div>
-              <button className="icon-button" type="button" aria-label="Close settings" onClick={closeSettings}>
-                <X aria-hidden="true" size={15} />
-              </button>
-            </div>
-            <label className="field-label" htmlFor="provider">
-              Provider
-            </label>
-            <select
-              ref={firstSetting}
-              id="provider"
-              value={settings.provider}
-              disabled={savingSettings}
-              onChange={(event) => void updateSettings({ provider: event.target.value as BuddySettings['provider'] })}
-            >
-              <option value="demo">Demo (offline)</option>
-              <option value="codex">Codex CLI</option>
-            </select>
-
-            <label className="field-label" htmlFor="working-directory">
-              Working directory
-            </label>
-            <div className="field-with-icon">
-              <Folder aria-hidden="true" size={14} />
-              <input
-                id="working-directory"
-                value={settings.defaultCwd}
-                disabled={savingSettings}
-                spellCheck="false"
-                onChange={(event) => setSettings({ ...settings, defaultCwd: event.target.value })}
-                onBlur={(event) => void updateSettings({ defaultCwd: event.target.value })}
-              />
-            </div>
-
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={settings.launchAtLogin}
-                disabled={savingSettings}
-                onChange={(event) => void updateSettings({ launchAtLogin: event.target.checked })}
-              />
-              <span>
-                <strong>Launch at login</strong>
-                <small>Start Linux Buddy when you sign in.</small>
-              </span>
-            </label>
-
-            {settingsError && (
-              <p className="settings-error" role="alert">
-                {settingsError}
-              </p>
+        {showHistory && (
+          <aside className="history-popover">
+            <div className="popover-label">Recent tasks</div>
+            {tasks.length ? (
+              tasks.slice(0, 8).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={item.id === task?.id ? 'history-item selected' : 'history-item'}
+                  onClick={() => {
+                    setSelected(item.id);
+                    setShowHistory(false);
+                  }}
+                >
+                  <span>{item.prompt}</span>
+                  <small>{item.status.replace('_', ' ')}</small>
+                </button>
+              ))
+            ) : (
+              <p className="empty-history">Your completed work will appear here.</p>
             )}
-            <p className="settings-note">Commands run without a shell. Changes pause for approval.</p>
           </aside>
         )}
 
-        <section className="command-area" aria-label="New task">
+        {showSettings && settings && (
+          <aside className="settings-panel" role="dialog" aria-label="Friday settings">
+            <div className="panel-heading">
+              <div>
+                <strong>Settings</strong>
+                <small>Kept on this device</small>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Close settings"
+                onClick={() => setShowSettings(false)}
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <label>
+              Wake word
+              <input
+                value={settings.wakeWord}
+                onChange={(event) => setSettings({ ...settings, wakeWord: event.target.value })}
+                onBlur={(event) => void saveSettings({ wakeWord: event.target.value || 'Friday' })}
+              />
+            </label>
+            <label>
+              Working folder
+              <input
+                value={settings.defaultCwd}
+                onChange={(event) => setSettings({ ...settings, defaultCwd: event.target.value })}
+                onBlur={(event) => void saveSettings({ defaultCwd: event.target.value })}
+              />
+            </label>
+            <label>
+              OpenCode Go model
+              <select value={settings.model} onChange={(event) => void saveSettings({ model: event.target.value })}>
+                <option value="kimi-k2.6">Kimi K2.6</option>
+                <option value="kimi-k2.7-code">Kimi K2.7 Code</option>
+                <option value="glm-5.2">GLM 5.2</option>
+                <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+              </select>
+            </label>
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.launchAtLogin}
+                onChange={(event) => void saveSettings({ launchAtLogin: event.target.checked })}
+              />
+              <span>
+                <strong>Launch at login</strong>
+                <small>Keep Friday one shortcut away.</small>
+              </span>
+            </label>
+          </aside>
+        )}
+
+        <div className="conversation" ref={conversationRef}>
+          {!task && !loading ? (
+            <section className="welcome">
+              <div
+                className={`voice-orb ${listenState}`}
+                style={{ '--voice-level': voiceLevel } as React.CSSProperties}
+              >
+                <div className="orb-core">
+                  <Mic size={24} />
+                </div>
+                <i />
+                <i />
+                <i />
+              </div>
+              <h1>{listenState === 'armed' ? 'Yes?' : 'Ready when you are'}</h1>
+              <p>{statusCopy(listenState, wakeWord)}</p>
+              {heard && <blockquote>“{heard}”</blockquote>}
+              <button
+                className="listen-button"
+                type="button"
+                onClick={() =>
+                  listenState === 'idle' || listenState === 'error' ? void startListening() : stopListening()
+                }
+              >
+                {listenState === 'idle' || listenState === 'error' ? (
+                  <>
+                    <Mic size={16} /> Start listening
+                  </>
+                ) : (
+                  <>
+                    <MicOff size={16} /> Stop listening
+                  </>
+                )}
+              </button>
+              <span className="privacy-note">Canary transcription stays on this computer</span>
+            </section>
+          ) : task ? (
+            <div className="thread">
+              <div className="user-message">
+                <span>You</span>
+                <p>{task.prompt}</p>
+              </div>
+              <div className="assistant-message">
+                <div className="assistant-name">
+                  <span className="mini-glyph">
+                    <Sparkles size={11} />
+                  </span>
+                  Friday
+                </div>
+                {task.response ? (
+                  <p>{task.response}</p>
+                ) : task.status === 'failed' ? null : (
+                  <div className="thinking">
+                    <LoaderCircle className="spin" size={15} />
+                    Thinking through the task…
+                  </div>
+                )}
+              </div>
+
+              {task.steps.length > 0 && (
+                <section className="activity-card">
+                  <button
+                    type="button"
+                    className="activity-heading"
+                    onClick={() => setShowActivity((value) => !value)}
+                    aria-expanded={showActivity}
+                  >
+                    <span>
+                      {task.status === 'completed' ? (
+                        <Check size={14} />
+                      ) : task.status === 'failed' ? (
+                        <X size={14} />
+                      ) : (
+                        <LoaderCircle className="spin" size={14} />
+                      )}{' '}
+                      {task.status === 'completed'
+                        ? 'Completed'
+                        : task.status === 'failed'
+                          ? 'Stopped with an issue'
+                          : 'Working on your computer'}
+                    </span>
+                    <ChevronDown size={14} className={showActivity ? 'rotated' : ''} />
+                  </button>
+                  {showActivity && (
+                    <div className="steps">
+                      {task.steps.map((step) => (
+                        <div className={`step ${step.status}`} key={step.id}>
+                          <span>
+                            {step.status === 'running' ? (
+                              <LoaderCircle className="spin" size={12} />
+                            ) : step.status === 'failed' ? (
+                              <X size={12} />
+                            ) : (
+                              <Check size={12} />
+                            )}
+                          </span>
+                          <p>{step.title}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {task.approval && (
+                <section className="approval-card">
+                  <div className="approval-icon">
+                    <ShieldAlert size={19} />
+                  </div>
+                  <div>
+                    <strong>{task.approval.title}</strong>
+                    <p>{task.approval.message}</p>
+                    <div className="approval-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => void window.buddy.approve(task.approval!.id, false)}
+                      >
+                        Don’t allow
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => void window.buddy.approve(task.approval!.id, true)}
+                      >
+                        Allow once
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {task.error && (
+                <div className="error-card">
+                  <X size={15} />
+                  <div>
+                    <strong>Friday couldn’t finish</strong>
+                    <p>{task.error}</p>
+                  </div>
+                </div>
+              )}
+              {task.status === 'cancelled' && (
+                <div className="stopped-note">
+                  <CircleStop size={14} /> Task stopped
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="loading">
+              <LoaderCircle className="spin" />
+              Loading Friday…
+            </div>
+          )}
+        </div>
+
+        {actionError && (
+          <div className="action-error" role="alert">
+            {actionError}
+            <button type="button" onClick={() => setActionError(undefined)}>
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
+        <footer className="composer-area">
+          {listenState !== 'idle' && !running && (
+            <div className="listening-strip">
+              <span className="listening-dot" />
+              <span>{statusCopy(listenState, wakeWord)}</span>
+              {heard && <em>“{heard}”</em>}
+            </div>
+          )}
           <form className="composer" onSubmit={submit}>
             <textarea
-              ref={input}
+              ref={inputRef}
               rows={1}
               value={prompt}
-              autoFocus
-              disabled={submitting}
-              aria-label="Task or command"
-              placeholder="Type a task or command"
+              placeholder={running ? 'Add another request…' : 'Ask Friday to do something…'}
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
                   event.currentTarget.form?.requestSubmit();
                 }
               }}
             />
             <button
-              className="run"
-              aria-label={submitting ? 'Starting task' : 'Run task'}
-              disabled={!prompt.trim() || submitting}
+              className={`mic-button ${listenState !== 'idle' ? 'active' : ''}`}
+              type="button"
+              aria-label={listenState === 'idle' ? 'Start listening' : 'Stop listening'}
+              onClick={() =>
+                listenState === 'idle' || listenState === 'error' ? void startListening() : stopListening()
+              }
             >
-              {submitting ? (
-                <LoaderCircle aria-hidden="true" className="spin" size={16} />
-              ) : (
-                <Play aria-hidden="true" size={14} fill="currentColor" />
-              )}
+              {listenState === 'idle' || listenState === 'error' ? <Mic size={18} /> : <MicOff size={18} />}
             </button>
-          </form>
-          <div className="composer-meta">
-            <div className="suggestions" aria-label="Example tasks">
-              <span>Try</span>
-              {suggestions.map(([label, value]) => (
-                <button type="button" key={label} onClick={() => fillSuggestion(value)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            <span className="enter-hint">
-              <kbd>Enter</kbd> to run
-            </span>
-          </div>
-          {actionError && (
-            <div className="action-error" role="alert">
-              <AlertTriangle aria-hidden="true" size={14} />
-              <span>{actionError}</span>
-              <button type="button" aria-label="Dismiss error" onClick={() => setActionError(undefined)}>
-                <X aria-hidden="true" size={13} />
+            {running ? (
+              <button className="stop-button" type="button" onClick={() => task && void window.buddy.cancel(task.id)}>
+                <CircleStop size={16} /> Stop
               </button>
-            </div>
-          )}
-        </section>
-
-        <div className="workspace">
-          <nav className="history" aria-label="Task history">
-            <div className="section-heading">
-              <h2>Tasks</h2>
-              {!loading && !loadError && <span>{tasks.length}</span>}
-            </div>
-            {loading ? (
-              <div className="history-state">
-                <LoaderCircle aria-hidden="true" className="spin" size={14} />
-                Loading tasks
-              </div>
-            ) : loadError ? (
-              <div className="history-state history-error">
-                <span>Tasks unavailable</span>
-                <button type="button" onClick={() => void load()}>
-                  Retry
-                </button>
-              </div>
-            ) : tasks.length === 0 ? (
-              <div className="history-state">No tasks yet</div>
             ) : (
-              tasks.map((item) => (
-                <button
-                  type="button"
-                  className={item.id === selected ? 'task selected' : 'task'}
-                  key={item.id}
-                  aria-current={item.id === selected ? 'true' : undefined}
-                  onClick={() => setSelected(item.id)}
-                >
-                  <span className={`status-icon ${item.status}`}>
-                    <StatusIcon status={item.status} size={13} />
-                  </span>
-                  <span className="task-copy">
-                    <strong>{item.prompt}</strong>
-                    <small>
-                      <time dateTime={new Date(item.createdAt).toISOString()}>
-                        {timeFormatter.format(item.createdAt)}
-                      </time>
-                      <span aria-hidden="true">·</span>
-                      {statusLabels[item.status]}
-                    </small>
-                  </span>
-                </button>
-              ))
+              <button
+                className="send-button"
+                type="submit"
+                disabled={!prompt.trim() || submitting}
+                aria-label="Send request"
+              >
+                <Send size={17} />
+              </button>
             )}
-          </nav>
-
-          <article className="detail">
-            {loading ? (
-              <div className="empty-state">
-                <LoaderCircle aria-hidden="true" className="spin" size={17} />
-                <h2>Loading tasks</h2>
-              </div>
-            ) : loadError ? (
-              <div className="empty-state error-state">
-                <AlertTriangle aria-hidden="true" size={18} />
-                <h2>Could not load local data</h2>
-                <p>{loadError}</p>
-                <button type="button" onClick={() => void load()}>
-                  Try again
-                </button>
-              </div>
-            ) : task ? (
-              <>
-                <header className="detail-head">
-                  <div className="task-heading">
-                    <div className="task-meta">
-                      <span className={`status-label ${task.status}`} aria-live="polite">
-                        <StatusIcon status={task.status} size={13} />
-                        {statusLabels[task.status]}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <time dateTime={new Date(task.createdAt).toISOString()}>
-                        {timeFormatter.format(task.createdAt)}
-                      </time>
-                      <span aria-hidden="true">·</span>
-                      <span>{task.provider}</span>
-                    </div>
-                    <h1>{task.prompt}</h1>
-                  </div>
-                  {activeStatuses.has(task.status) && (
-                    <button className="stop" type="button" onClick={() => void cancelTask(task.id)}>
-                      <CircleStop aria-hidden="true" size={14} />
-                      Stop
-                    </button>
-                  )}
-                </header>
-
-                {task.approval && (
-                  <section className="approval" aria-labelledby="approval-title" aria-live="polite">
-                    <AlertTriangle className="approval-icon" aria-hidden="true" size={18} />
-                    <div className="approval-copy">
-                      <h2 id="approval-title">Approval required</h2>
-                      <p>{task.approval.reason}</p>
-                      <code>{describe(task.approval.call)}</code>
-                      <div className="approval-actions">
-                        <button
-                          className="deny"
-                          type="button"
-                          onClick={() => void resolveApproval(task.approval!.id, false)}
-                        >
-                          Deny
-                        </button>
-                        <button
-                          className="allow"
-                          type="button"
-                          onClick={() => void resolveApproval(task.approval!.id, true)}
-                        >
-                          Allow once
-                        </button>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                {task.error && (
-                  <div className="task-error" role="alert">
-                    <AlertTriangle aria-hidden="true" size={15} />
-                    <div>
-                      <strong>Task failed</strong>
-                      <span>{task.error}</span>
-                    </div>
-                  </div>
-                )}
-
-                <section className="output-section" aria-label="Task output">
-                  <div className="output-heading">
-                    <h2>Output</h2>
-                    <span>
-                      {task.output.length
-                        ? `${task.output.length} ${task.output.length === 1 ? 'line' : 'lines'}`
-                        : 'Live'}
-                    </span>
-                  </div>
-                  <div className="output" ref={output} tabIndex={0}>
-                    {task.output.length ? (
-                      task.output.map((line, index) => (
-                        <div className="line" key={`${index}-${line}`}>
-                          <span>{String(index + 1).padStart(2, '0')}</span>
-                          <code>{line}</code>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="waiting">
-                        {activeStatuses.has(task.status) && task.status !== 'awaiting_approval' && (
-                          <StatusIcon status={task.status} size={15} />
-                        )}
-                        <span>{progressMessage(task.status)}</span>
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </>
-            ) : (
-              <div className="empty-state">
-                <h2>{tasks.length ? 'Select a task' : 'No tasks yet'}</h2>
-                <p>
-                  {tasks.length
-                    ? 'Choose a task to inspect its output.'
-                    : 'Enter a request above. Output and approvals will appear here.'}
-                </p>
-              </div>
-            )}
-          </article>
-        </div>
-
-        <footer className="statusbar">
-          <span className="service-status">
-            <span className="service-dot" /> Local service ready
-          </span>
-          <span>Changes pause for approval</span>
+          </form>
+          <div className="footer-meta">
+            <span>
+              <Clock3 size={11} /> Ctrl ⇧ Space
+            </span>
+            <span>Local voice • Pi agent</span>
+          </div>
         </footer>
       </section>
     </main>
