@@ -31,4 +31,18 @@ describe('Friday wake word', () => {
   it('supports a custom wake word and punctuation', () => {
     expect(detectWakeCommand('Computer—show me downloads', 'Computer', false).result.command).toBe('show me downloads');
   });
+
+  it('accepts direct speech during an explicitly started listening session', () => {
+    expect(detectWakeCommand('open my calendar', 'Friday', false, true).result).toEqual({
+      text: 'open my calendar',
+      wakeDetected: false,
+      command: 'open my calendar',
+    });
+  });
+
+  it('does not submit the wake word itself in direct mode', () => {
+    const wake = detectWakeCommand('Friday', 'Friday', false, true);
+    expect(wake.result.command).toBeUndefined();
+    expect(wake.armed).toBe(true);
+  });
 });

@@ -14,7 +14,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import type { BuddySettings, ListeningState, TaskRecord } from '../electron/types';
+import type { BuddySettings, ListeningState, TaskRecord, TranscriptResult } from '../electron/types';
 
 const activeStatuses = new Set(['queued', 'thinking', 'acting', 'awaiting_approval']);
 
@@ -23,7 +23,7 @@ function errorMessage(error: unknown, fallback: string) {
 }
 
 function statusCopy(state: ListeningState, wakeWord: string) {
-  if (state === 'listening') return `Listening for “${wakeWord}”`;
+  if (state === 'listening') return `Listening — speak your request (or say “${wakeWord}”)`;
   if (state === 'armed') return 'I’m listening — what should I do?';
   if (state === 'transcribing') return 'Understanding you…';
   if (state === 'error') return 'Voice input unavailable';
@@ -103,7 +103,14 @@ export default function App() {
         updateListening('transcribing');
         try {
           const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-          const result = await window.buddy.transcribe(await blob.arrayBuffer(), blob.type);
+          const audio = await blob.arrayBuffer();
+          let result: TranscriptResult;
+          try {
+            result = await window.buddy.transcribe(audio, blob.type);
+          } catch {
+            if (generation !== generationRef.current || !stream.active) return;
+            result = await window.buddy.transcribe(audio, blob.type);
+          }
           if (generation !== generationRef.current) return;
           if (result.text) setHeard(result.text);
           if (result.command) {
@@ -125,7 +132,12 @@ export default function App() {
           beginSegmentRef.current?.(stream, analyser, generation);
         } catch (error) {
           setActionError(errorMessage(error, 'Local speech transcription failed.'));
-          updateListening('error');
+          if (generation === generationRef.current && stream.active) {
+            updateListening('listening');
+            beginSegmentRef.current?.(stream, analyser, generation);
+          } else {
+            updateListening('error');
+          }
         }
       };
       recorder.start(250);
@@ -183,12 +195,30 @@ export default function App() {
         return;
       }
       const context = new AudioContext();
+      await context.resume();
       const analyser = context.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.72;
       context.createMediaStreamSource(stream).connect(analyser);
       streamRef.current = stream;
       audioContextRef.current = context;
+      stream.getAudioTracks().forEach((track) => {
+        track.addEventListener(
+          'ended',
+          () => {
+            if (generation !== generationRef.current) return;
+            generationRef.current += 1;
+            recorderRef.current = undefined;
+            streamRef.current = undefined;
+            void context.close();
+            audioContextRef.current = undefined;
+            setVoiceLevel(0);
+            setActionError('The microphone disconnected. Start listening to reconnect it.');
+            updateListening('error');
+          },
+          { once: true },
+        );
+      });
       updateListening('listening');
       beginSegment(stream, analyser, generation);
     } catch (error) {
@@ -215,10 +245,12 @@ export default function App() {
       setSelected((current) => current || next.id);
     });
     const removeListen = window.buddy.onListen(() => void startListening());
+    const removeStopListen = window.buddy.onStopListening(stopListening);
     return () => {
       disposed = true;
       removeTask();
       removeListen();
+      removeStopListen();
       stopListening();
     };
   }, [startListening, stopListening]);
@@ -261,12 +293,32 @@ export default function App() {
 
   async function saveSettings(next: Partial<BuddySettings>) {
     if (!settings) return;
+    const previous = settings;
     const value = { ...settings, ...next };
     setSettings(value);
     try {
-      await window.buddy.updateSettings(next);
+      setSettings(await window.buddy.updateSettings(next));
     } catch (error) {
+      setSettings(previous);
       setActionError(errorMessage(error, 'Settings could not be saved.'));
+    }
+  }
+
+  async function resolveApproval(id: string, approved: boolean) {
+    setActionError(undefined);
+    try {
+      await window.buddy.approve(id, approved);
+    } catch (error) {
+      setActionError(errorMessage(error, 'That approval is no longer active.'));
+    }
+  }
+
+  async function cancelTask(id: string) {
+    setActionError(undefined);
+    try {
+      await window.buddy.cancel(id);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Friday could not stop that task.'));
     }
   }
 
@@ -356,13 +408,20 @@ export default function App() {
               />
             </label>
             <label>
-              OpenCode Go model
-              <select value={settings.model} onChange={(event) => void saveSettings({ model: event.target.value })}>
-                <option value="kimi-k2.6">Kimi K2.6</option>
-                <option value="kimi-k2.7-code">Kimi K2.7 Code</option>
-                <option value="glm-5.2">GLM 5.2</option>
-                <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-              </select>
+              OpenCode Go model ID
+              <input
+                list="opencode-models"
+                value={settings.model}
+                onChange={(event) => setSettings({ ...settings, model: event.target.value })}
+                onBlur={(event) => void saveSettings({ model: event.target.value })}
+                placeholder="provider/model"
+              />
+              <datalist id="opencode-models">
+                <option value="kimi-k2.6" />
+                <option value="kimi-k2.7-code" />
+                <option value="glm-5.2" />
+                <option value="deepseek-v4-pro" />
+              </datalist>
             </label>
             <label className="toggle-row">
               <input
@@ -429,7 +488,11 @@ export default function App() {
                 </div>
                 {task.response ? (
                   <p>{task.response}</p>
-                ) : task.status === 'failed' ? null : (
+                ) : task.status === 'failed' ? null : task.status === 'queued' ? (
+                  <div className="thinking">
+                    <Clock3 size={15} /> Waiting for the current task to finish…
+                  </div>
+                ) : (
                   <div className="thinking">
                     <LoaderCircle className="spin" size={15} />
                     Thinking through the task…
@@ -494,14 +557,14 @@ export default function App() {
                       <button
                         type="button"
                         className="secondary-button"
-                        onClick={() => void window.buddy.approve(task.approval!.id, false)}
+                        onClick={() => void resolveApproval(task.approval!.id, false)}
                       >
                         Don’t allow
                       </button>
                       <button
                         type="button"
                         className="primary-button"
-                        onClick={() => void window.buddy.approve(task.approval!.id, true)}
+                        onClick={() => void resolveApproval(task.approval!.id, true)}
                       >
                         Allow once
                       </button>
@@ -575,7 +638,7 @@ export default function App() {
               {listenState === 'idle' || listenState === 'error' ? <Mic size={18} /> : <MicOff size={18} />}
             </button>
             {running ? (
-              <button className="stop-button" type="button" onClick={() => task && void window.buddy.cancel(task.id)}>
+              <button className="stop-button" type="button" onClick={() => task && void cancelTask(task.id)}>
                 <CircleStop size={16} /> Stop
               </button>
             ) : (

@@ -10,11 +10,12 @@ declare global {
       approve(id: string, approved: boolean): Promise<void>;
       transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult>;
       getSettings(): Promise<BuddySettings>;
-      updateSettings(value: Partial<BuddySettings>): Promise<void>;
+      updateSettings(value: Partial<BuddySettings>): Promise<BuddySettings>;
       hide(): Promise<void>;
       listening(state: ListeningState): void;
       onTask(callback: (task: TaskRecord) => void): () => void;
       onListen(callback: () => void): () => void;
+      onStopListening(callback: () => void): () => void;
     };
   }
 }

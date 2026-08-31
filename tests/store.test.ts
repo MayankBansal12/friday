@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -32,5 +32,23 @@ describe('task persistence', () => {
     const dir = await mkdtemp(join(tmpdir(), 'buddy-store-'));
     dirs.push(dir);
     expect(await new TaskStore(join(dir, 'missing.json')).load()).toEqual([]);
+  });
+  it('persists settings with tasks and preserves compatibility with task-only loading', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'buddy-store-'));
+    dirs.push(dir);
+    const store = new TaskStore(join(dir, 'state.json'));
+    const settings = { defaultCwd: '/tmp', launchAtLogin: true, wakeWord: 'Computer', model: 'kimi-k2.6' };
+    await store.save([], settings);
+    expect(await store.loadState()).toEqual({ tasks: [], settings });
+    expect(await store.load()).toEqual([]);
+  });
+
+  it('recovers from a corrupt file and keeps a backup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'buddy-store-'));
+    dirs.push(dir);
+    const path = join(dir, 'tasks.json');
+    await writeFile(path, '{not json');
+    expect(await new TaskStore(path).loadState()).toEqual({ tasks: [] });
+    expect((await readdir(dir)).some((name) => name.startsWith('tasks.json.corrupt-'))).toBe(true);
   });
 });

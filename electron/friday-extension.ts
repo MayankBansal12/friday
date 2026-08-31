@@ -25,19 +25,50 @@ type ExtensionAPI = {
   registerTool(definition: ToolDefinition): void;
 };
 
-const dangerPatterns = [
-  /\b(?:sudo|su|pkexec)\b/i,
-  /\brm\s+(?:-[^\n]*r|--recursive)/i,
-  /\b(?:mkfs|fdisk|parted|dd)\b/i,
-  /\b(?:shutdown|reboot|poweroff)\b/i,
-  /\b(?:curl|wget)\b[^\n]*(?:-d|--data|--upload-file|-T)\b/i,
-  /\bgit\s+(?:push|reset\s+--hard|clean\s+-f)/i,
-  /\b(?:chmod|chown)\b/i,
-  /\b(?:apt|dnf|pacman|npm|pnpm|pip)\s+(?:install|remove|uninstall|publish)/i,
+const dangerPatterns: Array<[RegExp, string]> = [
+  [/\b(?:sudo|su|doas|pkexec)\b/i, 'This command requests elevated privileges.'],
+  [
+    /\b(?:(?:[\w./-]+\/)?(?:rm|rmdir|unlink|shred))\b|\bfind\b[^\n;&|]{0,500}\s-delete\b/i,
+    'This command can delete files.',
+  ],
+  [
+    /\b(?:mkfs(?:\.\w+)?|fdisk|parted|wipefs|cryptsetup)\b|\bdd\b[^\n;&|]*\bof=/i,
+    'This command can overwrite disks or filesystems.',
+  ],
+  [
+    /\b(?:shutdown|reboot|poweroff|halt)\b|\bsystemctl\b[^\n;&|]*\b(?:stop|disable|mask|reboot|poweroff)\b/i,
+    'This command can stop services or the computer.',
+  ],
+  [
+    /\b(?:curl|wget)\b[^\n;&|]*(?:\s(?:-d|-F|-T)\b|--data\b|--form\b|--upload-file\b)|\b(?:scp|sftp)\b/i,
+    'This command may send local data over the network.',
+  ],
+  [
+    /\bgit\b[^\n;&|]{0,300}\bpush\b|\bgit\b[^\n;&|]{0,300}\breset\b[^\n;&|]*--hard\b|\bgit\b[^\n;&|]{0,300}\bclean\b[^\n;&|]*-[a-z]*f/i,
+    'This command can publish or irreversibly discard repository work.',
+  ],
+  [/\b(?:chmod|chown|chgrp|setfacl)\b/i, 'This command changes file permissions or ownership.'],
+  [
+    /\b(?:apt(?:-get)?|dnf|yum|pacman|zypper|snap|flatpak)\b[^\n;&|]{0,300}\b(?:install|remove|purge|uninstall)\b/i,
+    'This command changes installed system software.',
+  ],
+  [
+    /\b(?:npm|pnpm|yarn|pip|pipx|gem|cargo)\b[^\n;&|]{0,300}\b(?:publish|install|uninstall|remove)\b/i,
+    'This command installs, removes, or publishes packages.',
+  ],
+  [
+    /\b(?:gh\s+(?:release|pr\s+merge)|mail|mailx|sendmail)\b/i,
+    'This command may publish or send something externally.',
+  ],
 ];
 
+export function consequentialCommandReason(command: string) {
+  const normalized = command.replace(/\\\r?\n/g, ' ').replace(/[\0\r]/g, ' ');
+  return dangerPatterns.find(([pattern]) => pattern.test(normalized))?.[1];
+}
+
 export function isConsequentialCommand(command: string) {
-  return dangerPatterns.some((pattern) => pattern.test(command));
+  return Boolean(consequentialCommandReason(command));
 }
 
 function bridgeUrl(path: string) {
@@ -47,12 +78,14 @@ function bridgeUrl(path: string) {
   return { url: `${origin}${path}`, token };
 }
 
-async function bridge(path: string, body?: unknown) {
+async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
   const { url, token } = bridgeUrl(path);
+  const timeout = AbortSignal.timeout(30_000);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Record<string, unknown>>;
@@ -62,8 +95,12 @@ export default function fridayExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => {
     if (event.toolName !== 'bash') return undefined;
     const command = String(event.input.command ?? '');
-    if (!dangerPatterns.some((pattern) => pattern.test(command))) return undefined;
-    const confirmed = await ctx.ui.confirm('Allow consequential command?', command);
+    const reason = consequentialCommandReason(command);
+    if (!reason) return undefined;
+    const confirmed = await ctx.ui.confirm(
+      'Potentially consequential shell command',
+      `${reason}\n\n${command.slice(0, 3000)}`,
+    );
     return confirmed ? undefined : { block: true, reason: 'The user did not approve this command.' };
   });
 
@@ -73,8 +110,8 @@ export default function fridayExtension(pi: ExtensionAPI) {
     description:
       'Capture the current desktop. Use this before and after GUI actions to understand visible applications.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
-    async execute() {
-      const result = await bridge('/screenshot');
+    async execute(_id, _params, signal) {
+      const result = await bridge('/screenshot', undefined, signal);
       return {
         content: [
           { type: 'text', text: `Current desktop (${result.width}×${result.height})` },
@@ -105,13 +142,16 @@ export default function fridayExtension(pi: ExtensionAPI) {
       required: ['action'],
       additionalProperties: false,
     },
-    async execute(_id, params, _signal, _update, ctx) {
+    async execute(_id, params, signal, _update, ctx) {
       const confirmationReason = typeof params.confirmationReason === 'string' ? params.confirmationReason : '';
       if (confirmationReason) {
-        const confirmed = await ctx.ui.confirm('Friday needs your approval', confirmationReason);
+        const confirmed = await ctx.ui.confirm(
+          'Friday identified a consequential desktop action',
+          `${confirmationReason}\n\nApprove only if this description matches what you expect to happen.`,
+        );
         if (!confirmed) return { content: [{ type: 'text', text: 'The user declined this action.' }], details: {} };
       }
-      const result = await bridge('/action', params);
+      const result = await bridge('/action', params, signal);
       return {
         content: [{ type: 'text', text: String(result.message ?? 'Desktop action completed.') }],
         details: result,
