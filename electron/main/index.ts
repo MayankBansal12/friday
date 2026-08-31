@@ -46,10 +46,10 @@ function activateFriday(startVoice = true) {
 
 function createWindow(openSilently: boolean) {
   window = new BrowserWindow({
-    width: 680,
-    height: 760,
-    minWidth: 520,
-    minHeight: 560,
+    width: 760,
+    height: 800,
+    minWidth: 560,
+    minHeight: 620,
     show: false,
     frame: false,
     transparent: true,
