@@ -1,14 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
-  <title id="title">Linux Buddy terminal mark</title>
-  <rect x="16" y="16" width="480" height="480" rx="112" fill="#171818" />
-  <rect x="17.5" y="17.5" width="477" height="477" rx="110.5" fill="none" stroke="#3b3d3d" stroke-width="3" />
-  <path
-    d="m153 187 78 69-78 69"
-    fill="none"
-    stroke="#eceeeb"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    stroke-width="28"
-  />
-  <path d="M266 328h94" fill="none" stroke="#8faad7" stroke-linecap="round" stroke-width="28" />
+  <title id="title">Friday desktop agent mark</title>
+  <rect x="18" y="18" width="476" height="476" rx="142" fill="#1d1f1b" stroke="#4a4d44" stroke-width="4" />
+  <rect x="102" y="102" width="308" height="308" rx="102" fill="#d9ff63" />
+  <path d="M184 344V168h154" fill="none" stroke="#1d1f1b" stroke-width="37" stroke-linecap="round" />
+  <path d="M184 257h104" fill="none" stroke="#1d1f1b" stroke-width="37" stroke-linecap="round" />
+  <circle cx="338" cy="168" r="30" fill="#ff735d" />
 </svg>
