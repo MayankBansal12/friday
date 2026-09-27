@@ -15,7 +15,14 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev:sandboxed": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\""
+    "dev:sandboxed": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "desktop:build": "tsc -p tsconfig.node.json",
+    "desktop:install": "pnpm desktop:build && python3 scripts/install-desktop.py",
+    "desktop:status": "python3 scripts/desktop-command.py",
+    "start:desktop": "env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus electron --no-sandbox --ozone-platform=wayland .",
+    "test:native": "pnpm desktop:build && python3 tests/native/run.py",
+    "test:native:ui": "pnpm build && python3 tests/native/run.py --ui",
+    "test:native:agent": "pnpm build && python3 tests/native/run.py --agent"
   },
   "build": {
     "appId": "dev.linuxbuddy.app",
@@ -37,10 +44,15 @@
       "category": "Utility",
       "icon": "assets/icon.png",
       "syncDesktopName": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "native/desktop-client.py",
+        "to": "desktop-client.py"
+      }
+    ]
   },
   "dependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.6",
     "@vitejs/plugin-react": "latest",
     "dotenv": "^17.4.2",
     "lucide-react": "latest",

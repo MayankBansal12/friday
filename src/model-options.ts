@@ -1,0 +1,15 @@
+export const openCodeGoModelOptions = [
+  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+  { value: 'glm-5.1', label: 'GLM 5.1' },
+  { value: 'glm-5.2', label: 'GLM 5.2' },
+  { value: 'kimi-k2.6', label: 'Kimi K2.6' },
+  { value: 'kimi-k2.7-code', label: 'Kimi K2.7 Code' },
+  { value: 'mimo-v2.5', label: 'MiMo V2.5' },
+  { value: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
+  { value: 'minimax-m2.7', label: 'MiniMax M2.7' },
+  { value: 'minimax-m3', label: 'MiniMax M3' },
+  { value: 'qwen3.6-plus', label: 'Qwen 3.6 Plus' },
+  { value: 'qwen3.7-max', label: 'Qwen 3.7 Max' },
+  { value: 'qwen3.7-plus', label: 'Qwen 3.7 Plus' },
+] as const;

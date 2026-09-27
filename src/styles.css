@@ -1568,11 +1568,10 @@ button:disabled {
 }
 
 .error-toast {
-  position: absolute;
+  position: relative;
   z-index: 25;
-  right: 20px;
-  bottom: 108px;
-  left: 20px;
+  flex: 0 0 auto;
+  margin: 8px 15px;
   justify-content: space-between;
   gap: 14px;
   padding: 10px 11px;
@@ -1865,5 +1864,185 @@ button:disabled {
   }
   .spin {
     animation-duration: 1.4s;
+  }
+}
+
+.welcome-simple {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 28px;
+  text-align: center;
+}
+.welcome-simple > .friday-mark {
+  width: 48px;
+  height: 48px;
+}
+.welcome-simple h1 {
+  margin: 24px 0 10px;
+  font-size: 30px;
+  letter-spacing: -0.04em;
+}
+.welcome-simple > p {
+  max-width: 340px;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.welcome-simple .starter-ideas {
+  margin-top: 30px;
+  justify-content: center;
+}
+.answer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.desktop-notice {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.desktop-notice button,
+.drawing-context button {
+  flex-shrink: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.drawing-context {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+}
+.drawing-context button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.mark-button {
+  width: 37px;
+  height: 37px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-soft);
+}
+.mark-button:hover:enabled {
+  background: var(--paper-bright);
+  color: var(--ink);
+}
+.mark-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.compact-window {
+  border-radius: 22px;
+  display: flex;
+  flex-direction: column;
+}
+.compact-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px 8px;
+  -webkit-app-region: drag;
+}
+.compact-header button {
+  -webkit-app-region: no-drag;
+}
+.compact-presence {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: auto;
+}
+.compact-presence strong {
+  font-size: 14px;
+}
+.compact-presence small {
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.compact-presence.working small,
+.compact-presence.voice small {
+  color: var(--green);
+  animation: companion-pulse 1.2s ease-in-out infinite alternate;
+}
+.compact-caption {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 16px 8px;
+}
+.compact-caption p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.compact-window .composer-area {
+  padding: 10px;
+}
+.compact-window .composer-meta {
+  display: none;
+}
+.compact-window .command-bar textarea {
+  font-size: 13px;
+}
+.compact-window .desktop-notice {
+  font-size: 11px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.compact-window .listening-bar {
+  margin-bottom: 5px;
+}
+.compact-window .listening-bar > span:last-child {
+  display: none;
+}
+.compact-window .stop-button span {
+  display: none;
+}
+.compact-window .drawing-context {
+  margin-bottom: 5px;
+}
+.compact-shell .friday-mark {
+  width: 30px;
+  height: 30px;
+}
+.timing-summary {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  margin: 0 0 12px;
+}
+@keyframes companion-pulse {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 1;
   }
 }

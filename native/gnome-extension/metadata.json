@@ -1,0 +1,7 @@
+{
+  "uuid": "friday-desktop@linux-buddy.local",
+  "name": "Friday Desktop Companion",
+  "description": "Local Friday drawing, screen observation, and explicitly enabled desktop input for this GNOME 49 machine.",
+  "shell-version": ["49"],
+  "version": 3
+}

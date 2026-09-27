@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { BuddySettings, TaskRecord } from './types.js';
 
 export interface StoredState {
@@ -12,6 +12,10 @@ type StoreShape = { version: 1 | 2; tasks: TaskRecord[]; settings?: BuddySetting
 export class TaskStore {
   private writeChain: Promise<void> = Promise.resolve();
   constructor(private readonly path: string) {}
+
+  get sessionDirectory() {
+    return join(dirname(this.path), 'conversations');
+  }
 
   async load(): Promise<TaskRecord[]> {
     return (await this.loadState()).tasks;

@@ -80,7 +80,7 @@ function bridgeUrl(path: string) {
 
 async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
   const { url, token } = bridgeUrl(path);
-  const timeout = AbortSignal.timeout(30_000);
+  const timeout = AbortSignal.timeout(90_000);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -93,6 +93,11 @@ async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
 
 export default function fridayExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => {
+    if (
+      process.env.LINUX_BUDDY_MODE !== 'act' &&
+      ['bash', 'powershell', 'write', 'edit', 'read', 'grep', 'find', 'ls', 'desktop_action'].includes(event.toolName)
+    )
+      return { block: true, reason: 'This tool requires Act mode, selected by the user in Friday.' };
     if (event.toolName !== 'bash') return undefined;
     const command = String(event.input.command ?? '');
     const reason = consequentialCommandReason(command);
@@ -112,50 +117,129 @@ export default function fridayExtension(pi: ExtensionAPI) {
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_id, _params, signal) {
       const result = await bridge('/screenshot', undefined, signal);
+      const mark = result.lastMark as Record<string, unknown> | null;
       return {
         content: [
-          { type: 'text', text: `Current desktop (${result.width}×${result.height})` },
-          { type: 'image', data: String(result.data), mimeType: 'image/png' },
+          {
+            type: 'text',
+            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing and input coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ observationId: result.id, displayId: (result.display as { id: string }).id, windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
+          },
+          { type: 'image', data: String(result.data), mimeType: String(result.mimeType || 'image/png') },
         ],
-        details: { width: result.width, height: result.height },
+        details: { ...result, data: undefined },
       };
     },
   });
 
   pi.registerTool({
+    name: 'desktop_draw',
+    label: 'Annotate the screen',
+    description:
+      'Draw click-through arrows, ellipses, rectangles, highlights, labels, or paths over the observed app. Use screenshot pixels and the latest observation/display IDs. For an ellipse, x/y are the TOP-LEFT of its bounding box, never its center; width/height are full diameters. For example, a button bounded by left=100, top=200, right=400, bottom=280 is circled with x=100,y=200,width=300,height=80. Reuse an item ID to update it with replace=false. Annotations expire after 30 seconds or when the scene changes. No mouse input is injected.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        observationId: { type: 'string' },
+        displayId: { type: 'string' },
+        replace: { type: 'boolean' },
+        items: {
+          type: 'array',
+          maxItems: 64,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' },
+              kind: { type: 'string', enum: ['arrow', 'ellipse', 'rectangle', 'highlight', 'label', 'path'] },
+              x: {
+                type: 'number',
+                description:
+                  'Left edge of ellipse/rectangle/highlight bounding box, or arrow start / label origin. Screenshot pixels; not the ellipse center.',
+              },
+              y: {
+                type: 'number',
+                description:
+                  'Top edge of ellipse/rectangle/highlight bounding box, or arrow start / label origin. Screenshot pixels; not the ellipse center.',
+              },
+              width: {
+                type: 'number',
+                description:
+                  'Full bounding-box width in screenshot pixels; for an ellipse this is its horizontal diameter, not radius.',
+              },
+              height: {
+                type: 'number',
+                description:
+                  'Full bounding-box height in screenshot pixels; for an ellipse this is its vertical diameter, not radius.',
+              },
+              toX: { type: 'number', description: 'Arrow tip X in screenshot pixels.' },
+              toY: { type: 'number', description: 'Arrow tip Y in screenshot pixels.' },
+              text: { type: 'string' },
+              color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$', description: 'Hex RGB, for example #70e3cd' },
+              points: {
+                type: 'array',
+                maxItems: 512,
+                items: {
+                  type: 'object',
+                  properties: { x: { type: 'number' }, y: { type: 'number' } },
+                  required: ['x', 'y'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['id', 'kind', 'x', 'y'],
+          },
+        },
+      },
+      required: ['observationId', 'displayId', 'items'],
+    },
+    async execute(_id, params, signal) {
+      const result = await bridge('/draw', params, signal);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  });
+  pi.registerTool({
+    name: 'desktop_clear',
+    label: 'Clear annotations',
+    description: 'Clear all annotations, or only the listed IDs.',
+    parameters: {
+      type: 'object',
+      properties: { ids: { type: 'array', items: { type: 'string' } } },
+      additionalProperties: false,
+    },
+    async execute(_id, params, signal) {
+      const result = await bridge('/clear', params, signal);
+      return { content: [{ type: 'text', text: 'Annotations cleared.' }], details: result };
+    },
+  });
+  pi.registerTool({
     name: 'desktop_action',
     label: 'Control desktop',
     description:
-      'Control the visible Linux desktop by clicking coordinates, typing text, pressing keys, scrolling, or opening an app/URL. Observe first. Set confirmationReason for deletion, privilege changes, purchases, sending messages, publishing, or sensitive-data disclosure.',
+      'Perform one desktop action. The host requests consent; the user may explicitly grant up to five clicks/scrolls in the same window for 60 seconds. Set forceConfirmation=true for consequential actions (send, publish, delete, purchase, or disclose data), which always require fresh confirmation. Observe first and use its IDs. Observe again after the action to verify. Explain the purpose before calling this tool. Do not chain unverified actions.',
     parameters: {
       type: 'object',
+      additionalProperties: false,
       properties: {
-        action: { type: 'string', enum: ['click', 'double_click', 'right_click', 'type', 'key', 'scroll', 'open'] },
+        action: { type: 'string', enum: ['click', 'double_click', 'right_click', 'type', 'key', 'scroll'] },
+        observationId: { type: 'string' },
+        displayId: { type: 'string' },
         x: { type: 'number' },
         y: { type: 'number' },
         text: { type: 'string' },
         keys: { type: 'array', items: { type: 'string' } },
         amount: { type: 'number' },
-        target: { type: 'string' },
-        confirmationReason: { type: 'string' },
+        forceConfirmation: {
+          type: 'boolean',
+          description:
+            'Required true for consequential effects; bypasses any bounded navigation permission and asks again.',
+        },
       },
-      required: ['action'],
-      additionalProperties: false,
+      required: ['action', 'observationId', 'displayId'],
     },
-    async execute(_id, params, signal, _update, ctx) {
-      const confirmationReason = typeof params.confirmationReason === 'string' ? params.confirmationReason : '';
-      if (confirmationReason) {
-        const confirmed = await ctx.ui.confirm(
-          'Friday identified a consequential desktop action',
-          `${confirmationReason}\n\nApprove only if this description matches what you expect to happen.`,
-        );
-        if (!confirmed) return { content: [{ type: 'text', text: 'The user declined this action.' }], details: {} };
-      }
+    async execute(_id, params, signal) {
       const result = await bridge('/action', params, signal);
-      return {
-        content: [{ type: 'text', text: String(result.message ?? 'Desktop action completed.') }],
-        details: result,
-      };
+      return { content: [{ type: 'text', text: String(result.message) }], details: result };
     },
   });
 }

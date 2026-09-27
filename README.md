@@ -1,82 +1,72 @@
 # Friday
 
-Friday is a voice-first Linux desktop agent. Press **Ctrl+Shift+Space** and speak naturally. Saying **“Friday”** first is optional; when used, the wake word is removed before the request is sent. Audio is transcribed locally with the Canary model already installed through Handy and the recognized request is sent to a Pi agent running on OpenCode Go.
+Friday is a desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. Type a request or hold the microphone button; Friday chooses whether to answer, look at the screen, draw, or act. Follow-ups such as “open that” stay in the same conversation. The current runtime is Pi with OpenCode Go.
 
-Example:
+## Setup and launch
 
-> “...anything before this is ignored... Friday, open my downloads and sort the screenshots into a folder.”
+Requirements: Node.js 22+, pnpm, Python 3 with PyGObject, GNOME Shell 49, `pi` 0.80+, `handy` with the Canary model, `ffmpeg`, and `espeak-ng`. Desktop integration currently supports the built-in 1920×1080 display at 100% scale.
 
-Friday can inspect and control the visible desktop, use applications and the browser, work with files, and run terminal tools. Its interface shows a conversational answer and concise activity instead of dumping command output. It works autonomously and asks only before consequential actions such as deletion, privilege escalation, purchases, sending, publishing, or exposing sensitive information.
+Configure OpenCode Go through `OPENCODE_API_KEY` in `.env` or existing Pi authentication. See [.env.example](.env.example) for environment overrides.
 
-## Requirements
-
-- Linux graphical session (X11 is currently required for mouse/keyboard control)
-- Node.js 22+ and pnpm
-- `pi` 0.80+ on `PATH`
-- `handy` with the `canary-180m-flash` model installed
-- `ffmpeg`
-- `OPENCODE_API_KEY`
-
-The target machine already has Pi, Handy, FFmpeg, and the Canary Q8 model. `pnpm dev` passes Electron `--no-sandbox` because this host blocks Chromium user namespaces and the pnpm SUID helper is not root-owned. This exception is for local development only; use `pnpm dev:sandboxed` on a host with a correctly configured Chromium sandbox.
-
-## Run
-
-```bash
+```sh
 pnpm install
-pnpm dev
-```
-
-Build the unpacked desktop app:
-
-```bash
+pnpm desktop:install
+# On first install or after changing the GNOME extension:
+# save your work, sign out, then sign back in once.
+pnpm desktop:status
 pnpm build
-./release/linux-unpacked/linux-buddy
+pnpm start:desktop
 ```
 
-The window hides instead of quitting. Use the tray menu to quit. The shortcut always opens Friday and starts listening.
+`desktop:status` must report `ready: true` and `protocolVersion: 3`. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
 
-## Voice flow
+The installer writes the extension to `~/.local/share/gnome-shell/extensions/friday-desktop@linux-buddy.local`, creates a private token at `~/.config/friday-desktop/token`, and enables Friday in GNOME. It does not restart the desktop or log you out.
 
-1. The shortcut or tray icon opens Friday and enables the microphone.
-2. Silence closes each local utterance and sends it to Handy's batch Canary transcription.
-3. The recognized utterance becomes the request. If it contains the configured wake word, speech before it is discarded and the wake word is stripped.
-4. If the user says only “Friday,” the next utterance becomes the command.
-5. A detected request starts a Pi RPC session with the selected `opencode-go` model.
-6. Pi streams assistant text, tools, completion, and native confirmation requests into the UI.
+For development, use `pnpm dev`. The local launch commands use `--no-sandbox` because this machine's Chromium sandbox is not configured; `pnpm dev:sandboxed` is available with a working sandbox. The packaged app is built in `release/linux-unpacked/`.
 
-Canary audio is not sent to a speech service. The recognized command is sent to OpenCode Go for the agent run. When a task requires visual desktop interaction, Friday also sends the captured screenshot to the selected OpenCode Go model; the authenticated bridge itself remains loopback-only.
+## Using Friday
 
-## Desktop tools and safety
+- Ask “Look at my screen and highlight the main graph,” then follow up in the same conversation. **New task** starts a new conversation; archived tasks can be resumed.
+- **Open conversation** expands the companion for history, activity, settings, and timing details.
+- The minus button minimizes Friday. Use **Alt+Tab** to return. Closing the window keeps the process running; the tray menu has **Quit**.
+- During screen work, Friday minimizes and shows a native progress caption with **Reply** and **Stop/Clear**. The answer window returns when the drawing clears or expires.
+- **Mark screen** lets you draw around an element and ask about it. Agent drawings are click-through and preserve normal pointer movement. Drawings expire after 30 seconds and clear when input, focus, or geometry changes make them stale.
+- **Stop** or **Escape** clears overlays and cancels desktop work. **Ctrl+Shift+Escape** also stops work when GNOME grants the global shortcut.
 
-Friday's Pi extension exposes two typed tools:
+Hold the microphone button to submit direct speech. **Ctrl+Shift+Space** or the tray's **Talk to Friday** starts wake-word listening: say “Friday” followed by the request. Global shortcuts depend on GNOME granting them. Opening the app does not start recording. Transcription uses local Handy/Canary; **Read aloud** uses local espeak-ng. Automatic spoken replies are optional in Settings.
 
-- `desktop_observe`: captures the desktop for the vision-capable model.
-- `desktop_action`: clicks, types, presses keys, scrolls, or opens a path/URL.
+## Desktop integration and permissions
 
-The bridge binds to a random loopback port and requires a per-launch 256-bit bearer token. The token is passed only to the Pi child process. The extension enforces confirmation for high-risk shell patterns and asks the model to declare consequential GUI actions through Pi's confirmation protocol. Stop aborts the active Pi turn and terminates it if needed.
+The Pi extension exposes `desktop_observe`, `desktop_draw`, `desktop_clear`, and `desktop_action`. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders arrows, ellipses, rectangles, highlights, labels, and paths, and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
 
-## Configuration
+Desktop input requires a native confirmation dialog. Users can allow one exact action or up to five clicks/scrolls in the same window for the current request, lasting at most 60 seconds. Typing, key presses, right/double clicks, and actions marked consequential require fresh confirmation. Each action consumes its observation. Stop, lock, overview, display changes, disconnect, and task completion revoke desktop control; a heartbeat expires abandoned sessions.
 
-Environment overrides:
+Normal agent requests also have file and shell tools running as the logged-in user. Consequential shell commands request confirmation through a heuristic check; this is not an operating-system sandbox. Screenshot/tool results are sent to the configured model and retained in local conversation files under Electron's user-data directory. Microphone audio is transcribed locally; recognized requests go to the model.
 
-```bash
-OPENCODE_API_KEY=...
-LINUX_BUDDY_MODEL=kimi-k2.6
-LINUX_BUDDY_WAKE_WORD=Friday
-LINUX_BUDDY_STT_MODEL=handy-computer/canary-180m-flash-gguf/canary-180m-flash-Q8_0.gguf
-LINUX_BUDDY_PI_BIN=pi
-LINUX_BUDDY_HANDY_BIN=handy
-LINUX_BUDDY_FFMPEG_BIN=ffmpeg
-```
+## Development and checks
 
-The UI also supports wake word, working folder, model, and launch-at-login settings.
-
-## Quality checks
-
-```bash
-pnpm format:check
-pnpm lint
+```sh
 pnpm typecheck
+pnpm lint
+pnpm format:check
 pnpm test
 pnpm build
 ```
+
+| Command                  | Coverage                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `pnpm test:native`       | Local GNOME rendering, fullscreen pixels, click-through, consent, marking, and cancellation |
+| `pnpm test:native:ui`    | Native checks plus the packaged UI with integration available, unavailable, and reconnected |
+| `pnpm test:native:agent` | Optional real-model UI request → drawing → window return → follow-up click and verification |
+
+Native tests run in an isolated headless GNOME session with a synthetic GTK target. They require Python Pillow for pixel checks and print a temporary artifact directory for screenshots/logs. The model test uses configured OpenCode credentials and sends the synthetic desktop screenshots to that provider. Other checks make no model calls. The test driver is never installed in the user's desktop or bundled with the app.
+
+Code layout:
+
+- `electron/`: app lifecycle, agent sessions, desktop bridge/validation, and speech services.
+- `native/`: authenticated D-Bus transport and GNOME drawing/input extension.
+- `src/`: React interface and voice interaction.
+- `scripts/`: desktop installation and status commands.
+- `tests/`: unit tests and reusable native/UI integration harness.
+
+Settings include working folder, model, wake word, launch at login, and automatic spoken replies. Environment overrides include `LINUX_BUDDY_MODEL`, `LINUX_BUDDY_WAKE_WORD`, `LINUX_BUDDY_STT_MODEL`, `LINUX_BUDDY_PI_BIN`, `LINUX_BUDDY_HANDY_BIN`, and `LINUX_BUDDY_FFMPEG_BIN`. Activity reports model/tool/capture/transcription timings; hosted inference remains the main source of latency.

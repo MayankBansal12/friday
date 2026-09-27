@@ -1,7 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { desktopInterruption } from './desktop-status.js';
+import type { CompanionMode } from './desktop-protocol.js';
 import { TaskStore } from './store.js';
 import type { AgentStep, BuddySettings, TaskRecord } from './types.js';
 import { validSettings } from './validation.js';
@@ -9,7 +12,11 @@ import { validSettings } from './validation.js';
 const systemPrompt = `You are Friday, a local desktop agent working directly on the user's Linux computer.
 Complete the user's task autonomously using the desktop, files, applications, browser, and shell as needed. Use desktop_observe before GUI actions and after actions when the result is not certain. Prefer direct file and shell tools when appropriate.
 Never expose private chain-of-thought. Keep user-facing text brief, concrete, and conversational. Say what was achieved or what blocked you.
-Ask for approval for consequential actions: deletion or irreversible changes, privilege escalation, purchases, sending messages, publishing, or disclosing sensitive data. For desktop_action set confirmationReason before any such action. The shell safety check is a conservative heuristic, not a security sandbox, so you remain responsible for identifying consequential commands it may not recognize.
+Ask for approval for consequential actions: deletion or irreversible changes, privilege escalation, purchases, sending messages, publishing, or disclosing sensitive data. The host confirms desktop input. The user can explicitly approve up to five clicks/scrolls in the same window for this request, lasting at most 60 seconds. Always use forceConfirmation=true for consequential desktop actions, even when a bounded permission exists. Describe the intended effect before invoking desktop_action. The shell safety check is a conservative heuristic, not a security sandbox, so you remain responsible for identifying consequential commands it may not recognize.
+You share a persistent conversation with the user. Follow-ups such as "open that" refer to prior exchanges and user marks. All observation IDs from earlier requests have expired. Always call desktop_observe in the current request before drawing or acting, including when repeating an earlier request. Never reuse remembered observation IDs or coordinates.
+Choose the tools that fit the user's request. Answer directly when no tools are needed, observe when screen context is needed, draw when a visual explanation helps, and act when the user asks you to do something. An explanation request does not authorize changing things. Never ask the user to choose a mode.
+Use desktop_draw for arrows, circles, rectangles, highlights, labels, and paths. Drawing never moves the pointer. Screenshots include an observation ID and display ID: use those exact IDs and screenshot pixel coordinates for drawing and input. An action consumes its observation; observe after every action to verify. Screenshots hide Friday until the turn ends. If screen access is unavailable, explain the setup step returned by the tool. Do not repeatedly retry or attempt to bypass the desktop integration through shell input tools.
+For simple screen guidance, identify the target and draw promptly. A successful desktop_draw is the verification for a drawing; do not take another screenshot just to verify it because capture clears annotations. Keep final explanations short and describe which element you marked in the past tense. The user may read the reply after the drawing expires, so do not promise the highlight is still visible or will appear later.
 Do not claim success until you have verified the result.`;
 
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
@@ -20,12 +27,20 @@ interface RpcEvent {
   method?: string;
   title?: string;
   success?: boolean;
+  isError?: boolean;
+  result?: { content?: Array<{ type: string; text?: string }>; details?: { timings?: Record<string, number> } };
   error?: string;
   toolCallId?: string;
   toolName?: string;
   args?: Record<string, unknown>;
   assistantMessageEvent?: { type?: string; delta?: string };
-  message?: { role?: string; content?: unknown } | string;
+  message?: RpcMessage | string;
+  messages?: RpcMessage[];
+}
+
+interface RpcMessage {
+  role?: string;
+  content?: unknown;
 }
 
 interface ActiveRun {
@@ -36,6 +51,7 @@ interface ActiveRun {
   toolSteps: Map<string, string>;
   events: Promise<void>;
   terminationTimer?: NodeJS.Timeout;
+  startedAt: number;
 }
 
 export interface AgentServiceOptions {
@@ -57,8 +73,24 @@ function toolTitle(name: string, args: Record<string, unknown> = {}) {
   return `Using ${name.replaceAll('_', ' ')}`;
 }
 
+function assistantText(message: RpcMessage | string | undefined) {
+  if (!message || typeof message === 'string' || message.role !== 'assistant') return '';
+  if (typeof message.content === 'string') return message.content.slice(-200_000);
+  if (!Array.isArray(message.content)) return '';
+  return message.content
+    .flatMap((block) => {
+      if (typeof block === 'string') return [block];
+      if (!block || typeof block !== 'object') return [];
+      const candidate = block as { type?: unknown; text?: unknown };
+      return candidate.type === 'text' && typeof candidate.text === 'string' ? [candidate.text] : [];
+    })
+    .join('\n\n')
+    .slice(-200_000);
+}
+
 export class AgentService extends EventEmitter {
   private tasks: TaskRecord[] = [];
+  private conversationId: string = randomUUID();
   private activeRun?: ActiveRun;
   private approvalOwners = new Map<string, ActiveRun>();
   private shuttingDown = false;
@@ -72,7 +104,12 @@ export class AgentService extends EventEmitter {
     private readonly store: TaskStore,
     private settings: BuddySettings,
     private readonly extensionPath: string,
-    private readonly bridge: { url: string; token: string },
+    private readonly bridge: {
+      url: string;
+      token?: string;
+      beginRun?(id: string, mode: CompanionMode, request?: string): string;
+      revokeRun?(id: string, preserveDrawing?: boolean): void;
+    },
     options: AgentServiceOptions = {},
   ) {
     super();
@@ -83,6 +120,7 @@ export class AgentService extends EventEmitter {
   }
 
   async init() {
+    await mkdir(this.store.sessionDirectory, { recursive: true, mode: 0o700 });
     const stored = await this.store.loadState();
     if (stored.settings) {
       try {
@@ -103,7 +141,15 @@ export class AgentService extends EventEmitter {
         task.updatedAt = Date.now();
       }
     }
+    this.conversationId = this.tasks.find((task) => task.conversationId)?.conversationId ?? this.conversationId;
     await this.safePersist();
+  }
+
+  newConversation() {
+    if (this.tasks.some((task) => !terminalStatuses.has(task.status)))
+      throw new Error('Stop the current task before starting a new conversation.');
+    this.conversationId = randomUUID();
+    return this.conversationId;
   }
 
   list() {
@@ -128,16 +174,21 @@ export class AgentService extends EventEmitter {
     return this.getSettings();
   }
 
-  async submit(prompt: string) {
+  async submit(prompt: string, conversationId = this.conversationId) {
+    if (conversationId !== this.conversationId && !this.tasks.some((t) => t.conversationId === conversationId))
+      throw new Error('Unknown conversation');
     if (this.shuttingDown) throw new Error('Friday is shutting down.');
     if (!prompt.trim()) throw new Error('Tell Friday what you want done.');
     const task: TaskRecord = {
       id: randomUUID(),
+      conversationId,
+      mode: 'act',
       prompt: prompt.trim().slice(0, 8000),
       status: 'queued',
       createdAt: Date.now(),
       updatedAt: Date.now(),
       steps: [],
+      timings: {},
     };
     this.tasks.unshift(task);
     this.trimHistory();
@@ -146,16 +197,29 @@ export class AgentService extends EventEmitter {
     return structuredClone(task);
   }
 
-  async cancel(id: string) {
+  async desktopInterrupted(id: string, error: unknown) {
+    const run = this.activeRun;
+    if (!run || run.task.id !== id || terminalStatuses.has(run.task.status)) return;
+    const interruption = desktopInterruption(error);
+    if (interruption.user) await this.cancel(id, interruption.source);
+    else {
+      this.addStep(run.task, 'status', 'Desktop interrupted', interruption.message, 'failed');
+      await this.fail(run, interruption.message);
+    }
+  }
+
+  async cancel(id: string, source: 'user' | 'escape' = 'user') {
     const task = this.find(id);
     if (terminalStatuses.has(task.status)) return;
     const run = this.activeRun?.task.id === id ? this.activeRun : undefined;
     // Commit the terminal state before signalling the child so late output cannot win the race.
     task.status = 'cancelled';
+    task.stopReason = source;
+    if (run) this.bridge.revokeRun?.(run.task.id);
     task.approval = undefined;
     this.clearApprovals(run);
     for (const step of task.steps) if (step.status === 'running') step.status = 'failed';
-    this.addStep(task, 'status', 'Stopped by you', undefined, 'done');
+    this.addStep(task, 'status', source === 'escape' ? 'Stopped with Escape' : 'Stopped by you', undefined, 'done');
     await this.changed(task);
     if (run) {
       this.send(run, { type: 'abort' });
@@ -192,6 +256,7 @@ export class AgentService extends EventEmitter {
     await this.safePersist();
     const run = this.activeRun;
     if (!run) return;
+    this.bridge.revokeRun?.(run.task.id);
     this.send(run, { type: 'abort' });
     await this.terminateAndWait(run);
   }
@@ -207,6 +272,10 @@ export class AgentService extends EventEmitter {
   private start(task: TaskRecord) {
     if (this.activeRun || this.shuttingDown || task.status !== 'queued') return;
     let child: ChildProcessWithoutNullStreams;
+    const startedAt = Date.now();
+    task.timings ??= {};
+    task.timings.queueMs = startedAt - task.createdAt;
+    const runToken = this.bridge.beginRun?.(task.id, task.mode ?? 'guide', task.prompt) ?? this.bridge.token;
     try {
       child = this.spawnProcess(
         process.env.LINUX_BUDDY_PI_BIN || 'pi',
@@ -218,9 +287,20 @@ export class AgentService extends EventEmitter {
           '--model',
           this.settings.model,
           '--thinking',
-          'medium',
-          '--no-session',
-          '--approve',
+          'low',
+          '--session',
+          join(this.store.sessionDirectory, `${task.conversationId}.jsonl`),
+          '--no-extensions',
+          '--no-skills',
+          '--no-prompt-templates',
+          '--no-context-files',
+          '--no-approve',
+          '--tools',
+          task.mode === 'act'
+            ? 'read,bash,edit,write,grep,find,ls,desktop_observe,desktop_draw,desktop_clear,desktop_action'
+            : task.mode === 'explain'
+              ? 'desktop_observe'
+              : 'desktop_observe,desktop_draw,desktop_clear',
           '--extension',
           this.extensionPath,
           '--system-prompt',
@@ -229,16 +309,23 @@ export class AgentService extends EventEmitter {
         {
           cwd: resolve(this.settings.defaultCwd),
           shell: false,
-          env: { ...process.env, LINUX_BUDDY_BRIDGE_URL: this.bridge.url, LINUX_BUDDY_BRIDGE_TOKEN: this.bridge.token },
+          env: {
+            ...process.env,
+            LINUX_BUDDY_BRIDGE_URL: this.bridge.url,
+            LINUX_BUDDY_BRIDGE_TOKEN: runToken,
+            LINUX_BUDDY_MODE: task.mode ?? 'guide',
+          },
         },
       ) as ChildProcessWithoutNullStreams;
     } catch (error) {
+      this.bridge.revokeRun?.(task.id);
       task.status = 'failed';
       task.error = this.friendlyError(error instanceof Error ? error.message : String(error));
       void this.changed(task).then(() => this.pump());
       return;
     }
     const run: ActiveRun = {
+      startedAt,
       child,
       task,
       buffer: '',
@@ -262,6 +349,7 @@ export class AgentService extends EventEmitter {
         if (this.activeRun !== run) return;
         if (!terminalStatuses.has(task.status))
           await this.fail(run, code === 0 ? 'Friday stopped before finishing.' : this.friendlyError(stderr, code));
+        this.bridge.revokeRun?.(task.id, task.status === 'completed');
         this.clearApprovals(run);
         this.activeRun = undefined;
         this.pump();
@@ -272,13 +360,14 @@ export class AgentService extends EventEmitter {
 
   private consume(run: ActiveRun, value: string) {
     if (this.activeRun !== run) return;
-    run.buffer = `${run.buffer}${value}`.slice(-1_000_000);
+    // Pi includes PNG tool results in JSONL events; a desktop frame can exceed 1 MB.
+    run.buffer = `${run.buffer}${value}`.slice(-32 * 1024 * 1024);
     while (true) {
       const newline = run.buffer.indexOf('\n');
       if (newline < 0) break;
       const line = run.buffer.slice(0, newline).replace(/\r$/, '');
       run.buffer = run.buffer.slice(newline + 1);
-      if (!line || line.length > 512_000) continue;
+      if (!line || line.length > 32 * 1024 * 1024) continue;
       try {
         const event = JSON.parse(line) as RpcEvent;
         run.events = run.events
@@ -293,7 +382,9 @@ export class AgentService extends EventEmitter {
   private async event(run: ActiveRun, event: RpcEvent) {
     const task = run.task;
     if (this.activeRun !== run || terminalStatuses.has(task.status)) return;
+    task.timings ??= {};
     if (event.type === 'agent_start') {
+      task.timings.startupMs ??= Date.now() - run.startedAt;
       task.status = 'thinking';
       await this.changed(task);
       return;
@@ -303,12 +394,23 @@ export class AgentService extends EventEmitter {
       return;
     }
     if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+      task.timings.firstTextMs ??= Date.now() - task.createdAt;
       run.assistantText = `${run.assistantText}${event.assistantMessageEvent.delta ?? ''}`.slice(-200_000);
       task.response = run.assistantText;
       this.changedDeferred(task);
       return;
     }
+    if (event.type === 'message_end') {
+      const text = assistantText(typeof event.message === 'string' ? undefined : event.message);
+      if (text.trim()) {
+        run.assistantText = text;
+        task.response = text;
+        await this.changed(task);
+      }
+      return;
+    }
     if (event.type === 'tool_execution_start' && event.toolCallId) {
+      task.timings.firstModelMs ??= Date.now() - task.createdAt;
       task.status = 'acting';
       const step = this.addStep(task, 'tool', toolTitle(event.toolName || 'tool', event.args), undefined, 'running');
       run.toolSteps.set(event.toolCallId, step.id);
@@ -318,7 +420,19 @@ export class AgentService extends EventEmitter {
     if (event.type === 'tool_execution_end' && event.toolCallId) {
       const stepId = run.toolSteps.get(event.toolCallId);
       const step = stepId ? task.steps.find((item) => item.id === stepId) : undefined;
-      if (step) step.status = event.success === false ? 'failed' : 'done';
+      if (step) {
+        step.durationMs = Date.now() - step.createdAt;
+        if (event.result?.details?.timings) step.metrics = event.result.details.timings;
+        step.status = event.success === false || event.isError ? 'failed' : 'done';
+        if (step.status === 'done' && step.title === 'Using desktop draw')
+          task.timings.firstDrawingMs ??= Date.now() - task.createdAt;
+        if (step.status === 'failed')
+          step.detail = event.result?.content
+            ?.filter((block) => block.type === 'text')
+            .map((block) => block.text ?? '')
+            .join('\n')
+            .slice(0, 2000);
+      }
       run.toolSteps.delete(event.toolCallId);
       await this.changed(task);
       return;
@@ -337,10 +451,20 @@ export class AgentService extends EventEmitter {
       return;
     }
     if (event.type === 'agent_end') {
+      const finalText = [...(event.messages ?? [])]
+        .reverse()
+        .map(assistantText)
+        .find((text) => text.trim());
+      if (finalText) task.response = finalText;
+      if (!task.response?.trim()) {
+        await this.fail(run, 'Friday finished without returning an answer. Please try that request again.');
+        return;
+      }
+      this.bridge.revokeRun?.(task.id, true);
       task.status = 'completed';
+      task.timings.totalMs = Date.now() - task.createdAt;
       task.approval = undefined;
       this.clearApprovals(run);
-      if (!task.response?.trim()) task.response = 'Done.';
       for (const step of task.steps) if (step.status === 'running') step.status = 'done';
       this.addStep(task, 'status', 'Task complete', undefined, 'done');
       await this.changed(task);
@@ -354,6 +478,7 @@ export class AgentService extends EventEmitter {
 
   private async fail(run: ActiveRun, message: string) {
     if (terminalStatuses.has(run.task.status)) return;
+    this.bridge.revokeRun?.(run.task.id);
     run.task.status = 'failed';
     run.task.error = this.friendlyError(message);
     run.task.approval = undefined;

@@ -13,5 +13,9 @@ export default tseslint.config(
     plugins: { 'react-hooks': reactHooks, 'react-refresh': reactRefresh },
     rules: { ...reactHooks.configs.recommended.rules, ...reactRefresh.configs.vite.rules },
   },
-  { files: ['electron/**/*.ts', 'tests/**/*.ts'], languageOptions: { globals: globals.node } },
+  {
+    files: ['native/gnome-extension/*.js', 'tests/native/*.js'],
+    languageOptions: { globals: { global: 'readonly', TextDecoder: 'readonly' } },
+  },
+  { files: ['electron/**/*.ts', 'tests/**/*.ts', 'tests/native/*.mjs'], languageOptions: { globals: globals.node } },
 );

@@ -45,13 +45,13 @@ function transcriptFrom(value: unknown): string | undefined {
   return undefined;
 }
 
-export function detectWakeCommand(text: string, wakeWord: string, armed: boolean, acceptDirect = false) {
+export function detectWakeCommand(text: string, wakeWord: string, armed: boolean) {
   if (armed) return { result: { text, wakeDetected: true, command: text } as TranscriptResult, armed: false };
   const escaped = wakeWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = text.match(new RegExp(`\\b${escaped}\\b[\\s,.:;!?—-]*(.*)$`, 'i'));
   if (!match) {
     return {
-      result: { text, wakeDetected: false, command: acceptDirect ? text : undefined } as TranscriptResult,
+      result: { text, wakeDetected: false } as TranscriptResult,
       armed: false,
     };
   }
@@ -81,6 +81,7 @@ export class SpeechService {
 
   async transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> {
     if (audio.byteLength < 1000) return { text: '', wakeDetected: false };
+    const started = Date.now();
     const directory = await mkdtemp(join(tmpdir(), 'friday-speech-'));
     const suffix = mimeType.includes('ogg') ? '.ogg' : mimeType.includes('wav') ? '.wav' : '.webm';
     const input = join(directory, `utterance${suffix}`);
@@ -92,6 +93,7 @@ export class SpeechService {
         ['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
         30_000,
       );
+      const converted = Date.now();
       const { stdout } = await run(
         process.env.LINUX_BUDDY_HANDY_BIN || 'handy',
         ['--transcribe-file', wav, '--model', this.model, '--json'],
@@ -104,12 +106,18 @@ export class SpeechService {
         text = stdout.trim().split('\n').at(-1)?.trim() ?? '';
       }
       if (!text) return { text: '', wakeDetected: false };
-      // Listening is explicitly started by the user, so a complete utterance is
-      // already intentional input. The wake word remains optional and is stripped
-      // when present; saying only the wake word still arms the following segment.
-      const detected = detectWakeCommand(text, this.wakeWord, this.armed, true);
+      // Keep transcribed background speech from becoming a command. A segment must
+      // contain the wake word, or immediately follow a wake-word-only segment.
+      const detected = detectWakeCommand(text, this.wakeWord, this.armed);
       this.armed = detected.armed;
-      return detected.result;
+      return {
+        ...detected.result,
+        timings: {
+          conversionMs: converted - started,
+          transcriptionMs: Date.now() - converted,
+          totalMs: Date.now() - started,
+        },
+      };
     } catch {
       throw new Error(
         'Canary could not transcribe this utterance. Check that Handy and the configured model are available.',

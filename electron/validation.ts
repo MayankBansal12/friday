@@ -34,9 +34,13 @@ export function validListeningState(value: unknown): ListeningState {
 export function validSettings(value: unknown): Partial<BuddySettings> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid settings.');
   const input = value as Record<string, unknown>;
-  const allowed = new Set<keyof BuddySettings>(['defaultCwd', 'launchAtLogin', 'wakeWord', 'model']);
+  const allowed = new Set<keyof BuddySettings>(['defaultCwd', 'launchAtLogin', 'wakeWord', 'model', 'autoSpeak']);
   if (Object.keys(input).some((key) => !allowed.has(key as keyof BuddySettings))) throw new Error('Unknown setting.');
   const result: Partial<BuddySettings> = {};
+  if ('autoSpeak' in input) {
+    if (typeof input.autoSpeak !== 'boolean') throw new Error('Spoken replies must be on or off.');
+    result.autoSpeak = input.autoSpeak;
+  }
   if ('launchAtLogin' in input) {
     if (typeof input.launchAtLogin !== 'boolean') throw new Error('Launch-at-login must be on or off.');
     result.launchAtLogin = input.launchAtLogin;

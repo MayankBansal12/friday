@@ -21,12 +21,15 @@ import {
   Laptop,
   LoaderCircle,
   Mic,
-  MicOff,
+  Maximize2,
+  Minimize2,
   Minus,
   Plus,
   RotateCcw,
   Search,
   Send,
+  Scan,
+  Volume2,
   Settings,
   ShieldAlert,
   ShieldCheck,
@@ -34,24 +37,21 @@ import {
   X,
 } from 'lucide-react';
 import type { BuddySettings, ListeningState, RunStatus, TaskRecord, TranscriptResult } from '../electron/types';
+import { openCodeGoModelOptions } from './model-options';
+import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
+import { VoiceFollowUp } from './voice-follow-up';
 
 const activeStatuses = new Set<RunStatus>(['queued', 'thinking', 'acting', 'awaiting_approval']);
-const modelOptions = [
-  { value: 'kimi-k2.6', label: 'Kimi K2.6' },
-  { value: 'kimi-k2.7-code', label: 'Kimi K2.7 Code' },
-  { value: 'glm-5.2', label: 'GLM 5.2' },
-  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-];
 const starterIdeas = [
-  'Find the largest files in Downloads',
-  'Open my calendar and show today',
-  'Tidy screenshots into a new folder',
+  'Look at my screen and explain what I am seeing',
+  'Circle the main action in the current app',
+  'Show me where to click with an arrow',
 ];
 
 type ProductView = 'now' | 'history';
 
 function errorMessage(error: unknown, fallback: string) {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return error instanceof Error && error.message ? desktopErrorMessage(error) : fallback;
 }
 
 function formatRelativeTime(timestamp: number) {
@@ -79,9 +79,9 @@ function statusLabel(status: RunStatus) {
 function voiceCopy(state: ListeningState, wakeWord: string) {
   if (state === 'listening') {
     return {
-      eyebrow: 'Microphone live',
-      title: 'Go ahead.',
-      detail: `Speak your request—or start with “${wakeWord}”.`,
+      eyebrow: 'Waiting for wake word',
+      title: `Say “${wakeWord}”.`,
+      detail: `Try “${wakeWord}, open my calendar.”`,
     };
   }
   if (state === 'armed') {
@@ -100,7 +100,7 @@ function voiceCopy(state: ListeningState, wakeWord: string) {
   return {
     eyebrow: 'Voice ready',
     title: 'Start listening',
-    detail: `Then speak naturally. “${wakeWord}” is optional.`,
+    detail: `Then say “${wakeWord}” before your request.`,
   };
 }
 
@@ -123,153 +123,19 @@ function StatusIcon({ status }: { status: RunStatus }) {
   return <LoaderCircle className="spin" size={13} />;
 }
 
-function VoiceStage({
-  state,
-  wakeWord,
-  voiceLevel,
-  heard,
-  onToggle,
-}: {
-  state: ListeningState;
-  wakeWord: string;
-  voiceLevel: number;
-  heard: string;
-  onToggle: () => void;
-}) {
-  const copy = voiceCopy(state, wakeWord);
-  const active = state !== 'idle' && state !== 'error';
-  const bars = [38, 63, 48, 82, 55, 92, 68, 44, 76, 52, 34];
-
+function WelcomeView({ onTryIdea }: { onTryIdea: (value: string) => void }) {
   return (
-    <div className="voice-stage" data-state={state} style={{ '--voice-level': voiceLevel } as React.CSSProperties}>
-      <button
-        className="voice-card pressable"
-        type="button"
-        onClick={onToggle}
-        aria-label={active ? 'Stop listening' : 'Start listening'}
-      >
-        <span className="voice-card-top">
-          <span className="signal-label">
-            <i /> {copy.eyebrow}
-          </span>
-          <span className="signal-code">FR / 01</span>
-        </span>
-        <span className="signal-screen" aria-hidden="true">
-          <span className="signal-bars">
-            {bars.map((height, index) => (
-              <i
-                key={`${height}-${index}`}
-                style={
-                  {
-                    height: `${height}%`,
-                    '--meter-scale': Math.max(0.28, 0.42 + voiceLevel * (0.56 + (index % 3) * 0.18)),
-                    '--bar-delay': `${index * -42}ms`,
-                  } as React.CSSProperties
-                }
-              />
-            ))}
-          </span>
-          <span className="signal-centerline" />
-        </span>
-        <span className="voice-card-copy">
-          <strong>{copy.title}</strong>
-          <small>{copy.detail}</small>
-        </span>
-        <span className="voice-control" aria-hidden="true">
-          {active ? <MicOff size={17} /> : <Mic size={17} />}
-          {active ? 'Stop' : 'Talk to Friday'}
-        </span>
-      </button>
-      {heard && (
-        <p className="heard-caption" aria-live="polite">
-          <span>Last heard</span> “{heard}”
-        </p>
-      )}
-    </div>
-  );
-}
-
-function WelcomeView({
-  listenState,
-  wakeWord,
-  voiceLevel,
-  heard,
-  onToggleVoice,
-  onTryIdea,
-}: {
-  listenState: ListeningState;
-  wakeWord: string;
-  voiceLevel: number;
-  heard: string;
-  onToggleVoice: () => void;
-  onTryIdea: (value: string) => void;
-}) {
-  const active = listenState !== 'idle' && listenState !== 'error';
-
-  return (
-    <section className="welcome-view">
-      <div className="welcome-hero">
-        <div className="welcome-copy">
-          <p className="eyebrow">
-            <span>Linux native</span>
-            <span aria-hidden="true">/</span>
-            Voice first
-          </p>
-          <h1>
-            Your desktop.
-            <br />
-            <em>Handled.</em>
-          </h1>
-          <p className="welcome-lede">
-            Ask Friday to navigate apps, work with files, or run terminal tasks while you stay in control.
-          </p>
-          <button className="hero-action pressable" type="button" onClick={onToggleVoice}>
-            <span>{active ? <MicOff size={18} /> : <Mic size={18} />}</span>
-            {active ? 'Stop listening' : 'Talk to Friday'}
-            <ArrowRight size={17} />
+    <section className="welcome-simple">
+      <FridayMark />
+      <h1>What can I help with?</h1>
+      <p>Ask a question, point something out, or tell me what you want done.</p>
+      <div className="starter-ideas" aria-label="Example requests">
+        {starterIdeas.map((idea) => (
+          <button type="button" key={idea} onClick={() => onTryIdea(idea)}>
+            <span>{idea}</span>
+            <ArrowRight size={13} />
           </button>
-        </div>
-        <VoiceStage
-          state={listenState}
-          wakeWord={wakeWord}
-          voiceLevel={voiceLevel}
-          heard={heard}
-          onToggle={onToggleVoice}
-        />
-      </div>
-
-      <div className="starter-row" aria-label="Example tasks">
-        <span className="starter-label">Try a job</span>
-        <div className="starter-ideas">
-          {starterIdeas.map((idea) => (
-            <button type="button" key={idea} onClick={() => onTryIdea(idea)}>
-              <span>{idea}</span>
-              <ArrowRight size={13} />
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="data-route" aria-label="How Friday handles your data">
-        <div className="data-node">
-          <span className="data-icon local">
-            <Laptop size={16} />
-          </span>
-          <span>
-            <strong>Speech stays local</strong>
-            <small>Canary transcribes on this computer</small>
-          </span>
-        </div>
-        <ArrowRight className="route-arrow" size={15} aria-hidden="true" />
-        <div className="data-node">
-          <span className="data-icon cloud">
-            <Cloud size={16} />
-          </span>
-          <span>
-            <strong>Agent work uses cloud</strong>
-            <small>Your request goes to OpenCode Go</small>
-          </span>
-        </div>
+        ))}
       </div>
     </section>
   );
@@ -283,6 +149,8 @@ function TaskView({
   onRetry,
   onApprove,
   approvalPending,
+  speaking,
+  onSpeak,
 }: {
   task: TaskRecord;
   showActivity: boolean;
@@ -291,6 +159,8 @@ function TaskView({
   onRetry: () => void;
   onApprove: (approved: boolean) => void;
   approvalPending: boolean;
+  speaking: boolean;
+  onSpeak: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const active = activeStatuses.has(task.status);
@@ -332,10 +202,21 @@ function TaskView({
             </span>
           </span>
           {task.response && (
-            <button className="copy-button pressable" type="button" onClick={() => void copyResponse()}>
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
+            <div className="answer-actions">
+              <button
+                className="copy-button pressable"
+                type="button"
+                onClick={onSpeak}
+                aria-label={speaking ? 'Stop speaking' : 'Read aloud'}
+                title={speaking ? 'Stop speaking' : 'Read aloud'}
+              >
+                {speaking ? <CircleStop size={14} /> : <Volume2 size={14} />}
+              </button>
+              <button className="copy-button pressable" type="button" onClick={() => void copyResponse()}>
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
           )}
         </header>
 
@@ -417,6 +298,16 @@ function TaskView({
           </button>
           {showActivity && (
             <div className="activity-list">
+              {task.timings && (
+                <p className="timing-summary">
+                  {Object.entries(task.timings)
+                    .map(
+                      ([name, ms]) =>
+                        `${({ queueMs: 'Queue', startupMs: 'Agent startup', firstModelMs: 'First model action', firstTextMs: 'First words', firstDrawingMs: 'First drawing', totalMs: 'Total' } as Record<string, string>)[name] || name}: ${(ms / 1000).toFixed(1)}s`,
+                    )
+                    .join(' · ')}
+                </p>
+              )}
               {task.steps.map((step) => (
                 <div className={`activity-row ${step.status}`} key={step.id}>
                   <span className="activity-rail">
@@ -431,6 +322,14 @@ function TaskView({
                   <span>
                     <strong>{step.title}</strong>
                     {step.detail && <small>{step.detail}</small>}
+                    {step.durationMs !== undefined && (
+                      <small>
+                        {(step.durationMs / 1000).toFixed(2)}s
+                        {step.metrics
+                          ? ` · Capture ${step.metrics.captureMs}ms · Image prep ${step.metrics.imageProcessingMs}ms · ${Math.round(step.metrics.outputBytes / 1024)}KB`
+                          : ''}
+                      </small>
+                    )}
                   </span>
                 </div>
               ))}
@@ -464,7 +363,13 @@ function TaskView({
         <div className="stopped-note">
           <CircleStop size={15} />
           <span>
-            <strong>Stopped by you</strong>
+            <strong>
+              {task.stopReason === 'user'
+                ? 'Stopped by you'
+                : task.stopReason === 'escape'
+                  ? 'Stopped with Escape'
+                  : 'Task stopped'}
+            </strong>
             <small>No more actions will run for this task.</small>
           </span>
         </div>
@@ -637,7 +542,18 @@ function SettingsDialog({
               onBlur={(event) => onSave({ wakeWord: event.target.value.trim() || 'Friday' })}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
-            <small>Optional when you start listening yourself. “Friday” is the default.</small>
+            <small>Friday listens for this before accepting a voice command.</small>
+          </label>
+          <label className="setting-toggle">
+            <span>
+              <strong>Read replies aloud</strong>
+              <small>Speak replies automatically using the local voice.</small>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.autoSpeak === true}
+              onChange={(event) => onSave({ autoSpeak: event.target.checked })}
+            />
           </label>
         </div>
 
@@ -674,7 +590,7 @@ function SettingsDialog({
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
             <datalist id="opencode-models">
-              {modelOptions.map((option) => (
+              {openCodeGoModelOptions.map((option) => (
                 <option value={option.value} label={option.label} key={option.value} />
               ))}
             </datalist>
@@ -745,6 +661,7 @@ export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [selected, setSelected] = useState<string>();
   const [view, setView] = useState<ProductView>('now');
+  const [expanded, setExpanded] = useState(false);
   const [settings, setSettings] = useState<BuddySettings>();
   const [prompt, setPrompt] = useState('');
   const [listenState, setListenState] = useState<ListeningState>('idle');
@@ -768,6 +685,18 @@ export default function App() {
   >(undefined);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const [desktopState, setDesktopState] = useState<DesktopStatus>();
+  const [checkingDesktop, setCheckingDesktop] = useState(true);
+  const [marking, setMarking] = useState(false);
+  const [marked, setMarked] = useState(false);
+  const [conversationId, setConversationId] = useState<string | undefined>();
+  const directVoiceRef = useRef(false);
+  const [directVoice, setDirectVoice] = useState(false);
+  const pttHeldRef = useRef(false);
+  const [speaking, setSpeaking] = useState(false);
+  const voiceFollowUpRef = useRef(new VoiceFollowUp());
+  const submittingRef = useRef(false);
+  const spokenTasksRef = useRef(new Set<string>());
 
   const task = useMemo(() => (selected ? tasks.find((item) => item.id === selected) : undefined), [selected, tasks]);
   const activeTask = useMemo(() => tasks.find((item) => activeStatuses.has(item.status)), [tasks]);
@@ -779,6 +708,9 @@ export default function App() {
   }, []);
 
   const stopListening = useCallback(() => {
+    voiceFollowUpRef.current.cancel();
+    void window.buddy.silence();
+    setSpeaking(false);
     generationRef.current += 1;
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
@@ -792,26 +724,33 @@ export default function App() {
   }, [updateListening]);
 
   const runPrompt = useCallback(
-    async (value: string) => {
+    async (value: string, resumeVoice = false) => {
       const cleaned = value.trim();
-      if (!cleaned || submitting) return;
+      if (!cleaned || submittingRef.current) return;
       stopListening();
+      if (resumeVoice) voiceFollowUpRef.current.beginSubmission();
+      submittingRef.current = true;
       setSubmitting(true);
       setActionError(undefined);
       try {
-        const created = await window.buddy.submit(cleaned);
+        const created = await window.buddy.submit(cleaned, conversationId);
+        if (resumeVoice) voiceFollowUpRef.current.submitted(created.id);
         setSelected(created.id);
+        setConversationId(created.conversationId);
+        setMarked(false);
         setView('now');
         setShowActivity(false);
         setPrompt('');
       } catch (error) {
+        if (resumeVoice) voiceFollowUpRef.current.cancel();
         setPrompt(cleaned);
         setActionError(errorMessage(error, 'Friday could not start that task.'));
       } finally {
+        submittingRef.current = false;
         setSubmitting(false);
       }
     },
-    [stopListening, submitting],
+    [stopListening, conversationId],
   );
 
   const beginSegment = useCallback(
@@ -832,7 +771,7 @@ export default function App() {
       };
       recorder.onstop = async () => {
         if (generation !== generationRef.current || !stream.active) return;
-        if (!hasSpeech) {
+        if (!hasSpeech && !directVoiceRef.current) {
           beginSegmentRef.current?.(stream, analyser, generation);
           return;
         }
@@ -849,9 +788,14 @@ export default function App() {
           }
           if (generation !== generationRef.current) return;
           if (result.text) setHeard(result.text);
-          if (result.command) {
+          const command = directVoiceRef.current ? result.text : result.command;
+          if (command) {
             stopListening();
-            await runPrompt(result.command);
+            await runPrompt(command, true);
+            return;
+          }
+          if (directVoiceRef.current) {
+            stopListening();
             return;
           }
           updateListening(result.wakeDetected ? 'armed' : 'listening');
@@ -867,6 +811,10 @@ export default function App() {
         }
       };
       recorder.start(250);
+      if (directVoiceRef.current && !pttHeldRef.current) {
+        recorder.stop();
+        return;
+      }
       const monitor = () => {
         if (generation !== generationRef.current || recorder.state !== 'recording') return;
         analyser.getByteTimeDomainData(samples);
@@ -883,11 +831,11 @@ export default function App() {
           silenceStarted = 0;
         } else if (hasSpeech) {
           if (!silenceStarted) silenceStarted = now;
-          if (now - silenceStarted > 850) {
+          if (!directVoiceRef.current && now - silenceStarted > 850) {
             recorder.stop();
             return;
           }
-        } else if (now - startedAt > 10_000) {
+        } else if (!directVoiceRef.current && now - startedAt > 10_000) {
           recorder.stop();
           return;
         }
@@ -906,52 +854,59 @@ export default function App() {
     beginSegmentRef.current = beginSegment;
   }, [beginSegment]);
 
-  const startListening = useCallback(async () => {
-    if (streamRef.current?.active) return;
-    setActionError(undefined);
-    setHeard('');
-    const generation = generationRef.current + 1;
-    generationRef.current = generation;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
-      if (generation !== generationRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
+  const startListening = useCallback(
+    async (direct = false) => {
+      directVoiceRef.current = direct;
+      setDirectVoice(direct);
+      void window.buddy.silence();
+      setSpeaking(false);
+      if (streamRef.current?.active) return;
+      setActionError(undefined);
+      setHeard('');
+      const generation = generationRef.current + 1;
+      generationRef.current = generation;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+        });
+        if (generation !== generationRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        const context = new AudioContext();
+        await context.resume();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.72;
+        context.createMediaStreamSource(stream).connect(analyser);
+        streamRef.current = stream;
+        audioContextRef.current = context;
+        stream.getAudioTracks().forEach((track) => {
+          track.addEventListener(
+            'ended',
+            () => {
+              if (generation !== generationRef.current) return;
+              generationRef.current += 1;
+              recorderRef.current = undefined;
+              streamRef.current = undefined;
+              void context.close();
+              audioContextRef.current = undefined;
+              setVoiceLevel(0);
+              setActionError('The microphone disconnected. Start listening to reconnect it.');
+              updateListening('error');
+            },
+            { once: true },
+          );
+        });
+        updateListening('listening');
+        beginSegmentRef.current?.(stream, analyser, generation);
+      } catch (error) {
+        setActionError(errorMessage(error, 'Allow microphone access to talk to Friday.'));
+        updateListening('error');
       }
-      const context = new AudioContext();
-      await context.resume();
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.72;
-      context.createMediaStreamSource(stream).connect(analyser);
-      streamRef.current = stream;
-      audioContextRef.current = context;
-      stream.getAudioTracks().forEach((track) => {
-        track.addEventListener(
-          'ended',
-          () => {
-            if (generation !== generationRef.current) return;
-            generationRef.current += 1;
-            recorderRef.current = undefined;
-            streamRef.current = undefined;
-            void context.close();
-            audioContextRef.current = undefined;
-            setVoiceLevel(0);
-            setActionError('The microphone disconnected. Start listening to reconnect it.');
-            updateListening('error');
-          },
-          { once: true },
-        );
-      });
-      updateListening('listening');
-      beginSegment(stream, analyser, generation);
-    } catch (error) {
-      setActionError(errorMessage(error, 'Allow microphone access to talk to Friday.'));
-      updateListening('error');
-    }
-  }, [beginSegment, updateListening]);
+    },
+    [updateListening],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -962,6 +917,7 @@ export default function App() {
         persistedSettingsRef.current = config;
         setSettings(config);
         setSelected(history[0]?.id);
+        setConversationId(history[0]?.conversationId);
       })
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
@@ -970,6 +926,27 @@ export default function App() {
         [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
       );
       setSelected((current) => current || next.id);
+      const followUp = voiceFollowUpRef.current.taskChanged(next);
+      if (
+        next.status === 'completed' &&
+        next.response &&
+        persistedSettingsRef.current?.autoSpeak &&
+        !spokenTasksRef.current.has(next.id)
+      ) {
+        spokenTasksRef.current.add(next.id);
+        stopListening();
+        const generation = generationRef.current;
+        setSpeaking(true);
+        void window.buddy
+          .speak(next.response)
+          .then(() => {
+            if (followUp && generation === generationRef.current) void startListening();
+          })
+          .catch((error) => setActionError(errorMessage(error, 'Could not read aloud.')))
+          .finally(() => {
+            if (generation === generationRef.current) setSpeaking(false);
+          });
+      } else if (followUp) void startListening();
     });
     const removeListen = window.buddy.onListen(() => {
       setView('now');
@@ -984,6 +961,44 @@ export default function App() {
       stopListening();
     };
   }, [startListening, stopListening]);
+
+  useEffect(() => window.buddy.onExpanded(setExpanded), []);
+
+  const refreshDesktop = useCallback(
+    () =>
+      window.buddy
+        .desktopStatus()
+        .then(setDesktopState)
+        .catch((error: unknown) =>
+          setDesktopState({
+            ready: false,
+            error: errorMessage(error, 'Screen access is unavailable. Try checking again.'),
+          }),
+        )
+        .finally(() => setCheckingDesktop(false)),
+    [],
+  );
+
+  useEffect(() => {
+    void refreshDesktop();
+    const onFocus = () => void refreshDesktop();
+    window.addEventListener('focus', onFocus);
+    const removeMark = window.buddy.onMark(() => {
+      setMarked(true);
+      setPrompt((current) => (current.trim() ? current : 'What is this?'));
+      inputRef.current?.focus();
+      void refreshDesktop();
+    });
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      removeMark();
+    };
+  }, [refreshDesktop]);
+
+  const selectedStatus = task?.status;
+  useEffect(() => {
+    if (selectedStatus && !activeStatuses.has(selectedStatus)) void refreshDesktop();
+  }, [selectedStatus, refreshDesktop]);
 
   useEffect(() => {
     if (!contentRef.current || view !== 'now') return;
@@ -1043,16 +1058,69 @@ export default function App() {
     }
   }
 
-  async function cancelTask(id: string) {
+  async function stopAll() {
     setActionError(undefined);
+    stopListening();
     try {
-      await window.buddy.cancel(id);
+      await window.buddy.stop();
+      setMarked(false);
+      await refreshDesktop();
     } catch (error) {
       setActionError(errorMessage(error, 'Friday could not stop that task.'));
     }
   }
 
-  function newTask() {
+  async function speakResponse() {
+    if (speaking) {
+      await window.buddy.silence();
+      setSpeaking(false);
+      return;
+    }
+    if (!task?.response) return;
+    stopListening();
+    setSpeaking(true);
+    try {
+      await window.buddy.speak(task.response);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Could not read aloud.'));
+    } finally {
+      setSpeaking(false);
+    }
+  }
+
+  async function markScreen() {
+    setActionError(undefined);
+    setMarking(true);
+    try {
+      await window.buddy.mark();
+    } catch (error) {
+      setActionError(errorMessage(error, 'Could not mark the screen.'));
+    } finally {
+      setMarking(false);
+      await refreshDesktop();
+    }
+  }
+
+  async function clearDrawing() {
+    setActionError(undefined);
+    try {
+      await window.buddy.clearDrawing();
+      setMarked(false);
+      await refreshDesktop();
+    } catch (error) {
+      setActionError(errorMessage(error, 'Could not clear the drawing.'));
+    }
+  }
+
+  async function newTask() {
+    try {
+      setConversationId(await window.buddy.newConversation());
+    } catch (error) {
+      setActionError(errorMessage(error, 'Could not start a new conversation'));
+      return;
+    }
+    setMarked(false);
+    void refreshDesktop();
     setSelected(undefined);
     setView('now');
     setShowActivity(false);
@@ -1076,6 +1144,211 @@ export default function App() {
         ? { label: 'Working', tone: 'working' }
         : { label: 'Standing by', tone: 'ready' };
 
+  const composer = (
+    <footer className="composer-area">
+      {desktopState && !desktopState.ready && (
+        <div className="desktop-notice" role="status">
+          <span>{desktopState.error}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setCheckingDesktop(true);
+              void refreshDesktop();
+            }}
+            disabled={checkingDesktop}
+          >
+            {checkingDesktop ? 'Checking…' : 'Check again'}
+          </button>
+        </div>
+      )}
+      {(marked || (desktopState?.annotations ?? 0) > 0) && (
+        <div className="drawing-context">
+          <span>{marked ? 'Screen mark attached' : 'Drawing on screen'}</span>
+          <button type="button" onClick={() => void clearDrawing()}>
+            Clear <X size={12} />
+          </button>
+        </div>
+      )}
+      {listenState !== 'idle' && (
+        <div className={`listening-bar ${listenState}`} aria-live="polite">
+          <span className="listening-indicator">
+            <i style={{ transform: `scale(${1 + voiceLevel})` }} />
+            {directVoice && listenState === 'listening' ? 'Listening' : voiceCopy(listenState, wakeWord).eyebrow}
+          </span>
+          <span>
+            {heard
+              ? `“${heard}”`
+              : directVoice && listenState === 'listening'
+                ? 'Release the microphone to send.'
+                : voiceCopy(listenState, wakeWord).detail}
+          </span>
+        </div>
+      )}
+      <form
+        className="command-bar"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault();
+          void runPrompt(prompt);
+        }}
+      >
+        <textarea
+          ref={inputRef}
+          autoFocus
+          rows={1}
+          value={prompt}
+          aria-label="Ask Friday"
+          placeholder={
+            view === 'history'
+              ? 'Start a new task…'
+              : activeTask
+                ? 'Give Friday another task…'
+                : 'Ask Friday to do something…'
+          }
+          onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
+        <button
+          className="mark-button pressable"
+          type="button"
+          aria-label="Mark screen"
+          title={desktopState?.ready ? 'Mark something on screen' : desktopState?.error || 'Checking screen access…'}
+          disabled={!desktopState?.ready || Boolean(activeTask) || marking}
+          onClick={() => void markScreen()}
+        >
+          {marking ? <LoaderCircle className="spin" size={18} /> : <Scan size={18} />}
+        </button>
+        <button
+          className={`mic-button pressable ${listeningActive ? 'active' : ''}`}
+          type="button"
+          aria-label="Hold to talk"
+          title="Hold to talk · release to send"
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            pttHeldRef.current = true;
+            stopListening();
+            void startListening(true);
+          }}
+          onPointerUp={() => {
+            pttHeldRef.current = false;
+            if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+          }}
+          onPointerCancel={() => {
+            pttHeldRef.current = false;
+            stopListening();
+          }}
+          onKeyDown={(event) => {
+            if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) {
+              event.preventDefault();
+              pttHeldRef.current = true;
+              stopListening();
+              void startListening(true);
+            }
+          }}
+          onKeyUp={(event) => {
+            if (event.key === ' ' || event.key === 'Enter') {
+              event.preventDefault();
+              pttHeldRef.current = false;
+              if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+            }
+          }}
+        >
+          <Mic size={18} />
+        </button>
+
+        {(activeTask || listeningActive || speaking) && (
+          <button className="stop-button pressable" type="button" onClick={() => void stopAll()}>
+            <CircleStop size={15} /> <span>Stop</span>
+          </button>
+        )}
+        <button
+          className="send-button pressable"
+          type="submit"
+          disabled={!prompt.trim() || submitting}
+          aria-label="Send request"
+        >
+          {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
+        </button>
+      </form>
+      <div className="composer-meta">
+        <span>Hold the microphone to talk</span>
+        <span>Enter to send · Shift+Enter for a new line</span>
+      </div>
+    </footer>
+  );
+  if (!expanded)
+    return (
+      <main className="shell compact-shell">
+        <section className="friday-window compact-window" aria-label="Friday companion">
+          <header className="compact-header">
+            <FridayMark compact />
+            <span className={`compact-presence ${presence.tone}`}>
+              <strong>Friday</strong>
+              <small>{speaking ? 'Speaking' : presence.label}</small>
+            </span>
+            <button
+              className="icon-button"
+              type="button"
+              title="Settings"
+              aria-label="Open settings"
+              onClick={() => {
+                void window.buddy.setExpanded(true);
+                setShowSettings(true);
+              }}
+            >
+              <Settings size={16} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              title="Open conversation"
+              aria-label="Open conversation"
+              onClick={() => void window.buddy.setExpanded(true)}
+            >
+              <Maximize2 size={16} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              title="Minimize Friday"
+              aria-label="Minimize Friday"
+              onClick={() => void window.buddy.hide()}
+            >
+              <Minus size={16} />
+            </button>
+          </header>
+          <div className="compact-caption" aria-live="polite">
+            {actionError ? (
+              <p role="alert">{actionError}</p>
+            ) : task?.error ? (
+              <p role="alert">{task.error}</p>
+            ) : task?.approval ? (
+              <button type="button" className="quiet-button" onClick={() => void window.buddy.setExpanded(true)}>
+                Review: {task.approval.title}
+              </button>
+            ) : (
+              <p>
+                {task?.response ||
+                  (task?.status === 'cancelled'
+                    ? task.stopReason === 'user'
+                      ? 'Stopped by you.'
+                      : task.stopReason === 'escape'
+                        ? 'Stopped with Escape.'
+                        : 'Task stopped.'
+                    : activeTask
+                      ? activeTask.steps.at(-1)?.title || 'Thinking…'
+                      : 'Tell me what you need. I can look, explain, draw, and help you do it.')}
+              </p>
+            )}
+          </div>
+          {composer}
+        </section>
+      </main>
+    );
   return (
     <main className="shell">
       <section className="friday-window" aria-label="Friday desktop agent">
@@ -1099,6 +1372,15 @@ export default function App() {
           </nav>
 
           <div className="title-actions">
+            <button
+              className="icon-button pressable"
+              type="button"
+              aria-label="Small companion"
+              title="Small companion"
+              onClick={() => void window.buddy.setExpanded(false)}
+            >
+              <Minimize2 size={17} />
+            </button>
             <span className={`presence ${presence.tone}`} aria-live="polite">
               <i /> {presence.label}
             </span>
@@ -1114,8 +1396,8 @@ export default function App() {
             <button
               className="icon-button pressable"
               type="button"
-              aria-label="Hide Friday"
-              title="Hide Friday"
+              aria-label="Minimize Friday"
+              title="Minimize Friday"
               onClick={() => window.buddy.hide()}
             >
               <Minus size={18} />
@@ -1137,6 +1419,7 @@ export default function App() {
               tasks={tasks}
               onOpenTask={(id) => {
                 setSelected(id);
+                setConversationId(tasks.find((item) => item.id === id)?.conversationId);
                 setView('now');
                 setShowActivity(false);
               }}
@@ -1151,16 +1434,11 @@ export default function App() {
               onRetry={() => void runPrompt(task.prompt)}
               onApprove={(approved) => void resolveApproval(approved)}
               approvalPending={approvalPending}
+              speaking={speaking}
+              onSpeak={() => void speakResponse()}
             />
           ) : (
-            <WelcomeView
-              listenState={listenState}
-              wakeWord={wakeWord}
-              voiceLevel={voiceLevel}
-              heard={heard}
-              onToggleVoice={() => (listeningActive ? stopListening() : void startListening())}
-              onTryIdea={tryIdea}
-            />
+            <WelcomeView onTryIdea={tryIdea} />
           )}
         </div>
 
@@ -1176,77 +1454,7 @@ export default function App() {
           </div>
         )}
 
-        <footer className="composer-area">
-          {listenState !== 'idle' && (
-            <div className={`listening-bar ${listenState}`} aria-live="polite">
-              <span className="listening-indicator">
-                <i />
-                {voiceCopy(listenState, wakeWord).eyebrow}
-              </span>
-              <span>{heard ? `“${heard}”` : voiceCopy(listenState, wakeWord).detail}</span>
-            </div>
-          )}
-          <form
-            className="command-bar"
-            onSubmit={(event: FormEvent) => {
-              event.preventDefault();
-              void runPrompt(prompt);
-            }}
-          >
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={prompt}
-              aria-label="Ask Friday"
-              placeholder={
-                view === 'history'
-                  ? 'Start a new task…'
-                  : activeTask
-                    ? 'Give Friday another task…'
-                    : 'Ask Friday to do something…'
-              }
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-            />
-            <button
-              className={`mic-button pressable ${listeningActive ? 'active' : ''}`}
-              type="button"
-              aria-label={listeningActive ? 'Stop listening' : 'Start listening'}
-              title={listeningActive ? 'Stop listening' : 'Start listening'}
-              onClick={() => (listeningActive ? stopListening() : void startListening())}
-            >
-              {listeningActive ? <MicOff size={18} /> : <Mic size={18} />}
-            </button>
-            {activeTask && (
-              <button className="stop-button pressable" type="button" onClick={() => void cancelTask(activeTask.id)}>
-                <CircleStop size={15} /> <span>Stop</span>
-              </button>
-            )}
-            <button
-              className="send-button pressable"
-              type="submit"
-              disabled={!prompt.trim() || submitting}
-              aria-label="Send request"
-            >
-              {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
-            </button>
-          </form>
-          <div className="composer-meta">
-            <span>
-              <kbd>Ctrl</kbd>
-              <kbd>Shift</kbd>
-              <kbd>Space</kbd> to talk
-            </span>
-            <span>
-              Local voice <i aria-hidden="true" /> Cloud agent
-            </span>
-          </div>
-        </footer>
+        {composer}
 
         {showSettings && settings && (
           <SettingsDialog
