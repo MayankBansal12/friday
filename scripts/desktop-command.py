@@ -13,7 +13,7 @@ try:
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     result = bus.call_sync('dev.Friday.Desktop', '/dev/Friday/Desktop', 'dev.Friday.Desktop1', 'Command', GLib.Variant('(ss)', (token, json.dumps({'op': 'status'}))), GLib.VariantType.new('(s)'), Gio.DBusCallFlags.NONE, 5000, None)
     value = json.loads(result.unpack()[0])
-    if value.get('protocolVersion') != 3:
+    if value.get('protocolVersion') != 4:
         value['ready'] = False
         value['actionRequired'] = 'Save your work, sign out of GNOME and sign back in to activate the installed Friday update.'
     print(json.dumps(value, indent=2))

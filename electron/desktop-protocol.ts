@@ -21,9 +21,22 @@ export interface Point {
   x: number;
   y: number;
 }
+export const annotationTextLimits = {
+  circle: 40,
+  ellipse: 40,
+  rectangle: 40,
+  highlight: 40,
+  underline: 40,
+  arrow: 60,
+  bracket: 60,
+  step: 80,
+  note: 160,
+  label: 160,
+  path: 60,
+} as const;
 export interface Annotation {
   id: string;
-  kind: 'arrow' | 'ellipse' | 'rectangle' | 'highlight' | 'label' | 'path';
+  kind: keyof typeof annotationTextLimits;
   x: number;
   y: number;
   width?: number;
@@ -31,6 +44,8 @@ export interface Annotation {
   toX?: number;
   toY?: number;
   text?: string;
+  title?: string;
+  step?: number;
   color?: string;
   points?: Point[];
 }
@@ -122,11 +137,11 @@ export function drawing(value: unknown, observation?: Observation): Drawing {
     const id = identifier(a.id);
     if (seen.has(id)) throw new Error('Duplicate annotation ID');
     seen.add(id);
-    if (!['arrow', 'ellipse', 'rectangle', 'highlight', 'label', 'path'].includes(String(a.kind)))
+    if (typeof a.kind !== 'string' || !Object.hasOwn(annotationTextLimits, a.kind))
       throw new Error('Unknown annotation kind');
     const item: Annotation = {
       id,
-      kind: a.kind as Annotation['kind'],
+      kind: a.kind === 'circle' ? 'ellipse' : (a.kind as Annotation['kind']),
       x: finite(a.x, 0, o.width - 1),
       y: finite(a.y, 0, o.height - 1),
     };
@@ -135,25 +150,49 @@ export function drawing(value: unknown, observation?: Observation): Drawing {
       item.color = a.color;
     }
     if (a.text !== undefined) {
-      if (typeof a.text !== 'string' || a.text.length > 160) throw new Error('Label is too long');
-      item.text = a.text;
+      item.text = annotationText(a.text, annotationTextLimits[item.kind], `${item.kind} text`);
+    }
+    if (a.title !== undefined) {
+      if (item.kind !== 'note') throw new Error('Only notes have a title');
+      item.title = annotationText(a.title, 40, 'Note title');
     }
     if (item.kind === 'arrow') {
-      item.toX = finite(a.toX, 0, o.width - 1);
-      item.toY = finite(a.toY, 0, o.height - 1);
-    } else if (['ellipse', 'rectangle', 'highlight'].includes(item.kind)) {
+      if (a.toX === undefined && a.toY === undefined) {
+        // With just x/y the agent supplies the tip; choose a short tail away from it.
+        item.toX = item.x;
+        item.toY = item.y;
+        item.x = Math.max(0, Math.min(o.width - 1, item.x + (item.x > o.width / 2 ? -140 : 140)));
+        item.y = Math.max(0, Math.min(o.height - 1, item.y + (item.y > o.height / 2 ? -70 : 70)));
+      } else {
+        item.toX = finite(a.toX, 0, o.width - 1);
+        item.toY = finite(a.toY, 0, o.height - 1);
+      }
+    } else if (['ellipse', 'rectangle', 'highlight', 'underline', 'bracket'].includes(item.kind)) {
       item.width = finite(a.width, 1, o.width - item.x);
       item.height = finite(a.height, 1, o.height - item.y);
+    } else if (item.kind === 'step') {
+      item.step = finite(a.step, 1, 9);
+      if (!Number.isInteger(item.step)) throw new Error('Step must be a whole number from 1 to 9');
     } else if (item.kind === 'path') {
       if (!Array.isArray(a.points) || a.points.length < 2 || a.points.length > 512) throw new Error('Invalid path');
       item.points = a.points.map((p) => {
         const q = record(p);
         return { x: finite(q.x, 0, o.width - 1), y: finite(q.y, 0, o.height - 1) };
       });
-    } else if (!item.text) throw new Error('A label needs text');
+    } else if (!item.text && !item.title) throw new Error('A note or label needs text or a title');
     return item;
   });
   return { observationId: o.id, displayId: o.display.id, items, replace: v.replace !== false };
+}
+function annotationText(value: unknown, limit: number, name: string) {
+  if (typeof value !== 'string') throw new Error(`${name} must be plain text`);
+  // Control characters cannot be drawn and may truncate native text.
+  const text = value
+    .replace(/\s+/g, ' ')
+    .replace(/\p{Cc}/gu, '')
+    .trim();
+  if (Array.from(text).length > limit) throw new Error(`${name} is limited to ${limit} characters`);
+  return text;
 }
 export const keyNames: Record<string, number> = {
   ctrl: 0xffe3,

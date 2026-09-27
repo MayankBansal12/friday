@@ -14,7 +14,7 @@ async function fixture(mode: CompanionMode = 'act', compressed = false, companio
     close: vi.fn(),
     async command(value) {
       calls.push(value);
-      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion: 3, annotations };
+      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion: 4, annotations };
       if (value.op === 'draw') return rendered ? { rendered: true } : { ids: ['button'] };
       if (value.op === 'caption') {
         if (captionError) throw new Error('Caption could not be rendered');

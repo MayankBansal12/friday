@@ -103,7 +103,7 @@ export class DesktopBridge {
       .command({ op: 'begin', runId: run.id, mode: run.mode, request: run.request })
       .then((result) => {
         this.assert(run);
-        if (result.protocolVersion !== 3) throw new Error(desktopUpdateMessage);
+        if (result.protocolVersion !== 4) throw new Error(desktopUpdateMessage);
         this.heartbeat = setInterval(() => {
           void this.native.command({ op: 'heartbeat', runId: run.id }).catch((error: unknown) => {
             if (this.active !== run) return;
@@ -319,7 +319,7 @@ export class DesktopBridge {
   async status(): Promise<DesktopStatus> {
     try {
       const status = await this.native.command({ op: 'status' });
-      const compatible = status.protocolVersion === 3;
+      const compatible = status.protocolVersion === 4;
       return {
         ready: status.ready === true && compatible,
         protocolVersion: typeof status.protocolVersion === 'number' ? status.protocolVersion : 1,

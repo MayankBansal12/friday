@@ -7,7 +7,7 @@ export interface DesktopStatus {
 }
 
 export const desktopUpdateMessage =
-  'Friday’s screen integration has been updated. Save your work, sign out of GNOME, then sign back in to activate the drawing fixes.';
+  'Friday’s screen integration has been updated. Run pnpm desktop:install from the project, then save your work and sign out of GNOME and back in to activate the drawing update.';
 
 export function desktopErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);

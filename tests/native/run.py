@@ -154,6 +154,29 @@ try:
     assert (stage / 'clicked').exists(), 'Click did not reach GTK app through overlay'
     assert command('status')['annotations'] == 0, 'Stale drawing survived user input'
     print('PASS: capture, circle/arrow rendering, real GTK click-through, stale clearing', flush=True)
+    obs = observe(); capture('03-guidance-before.png')
+    command('draw', **obs, items=[
+        {'id': 'circle', 'kind': 'circle', 'x': 60, 'y': 120, 'width': 280, 'height': 90},
+        {'id': 'highlight', 'kind': 'highlight', 'x': 480, 'y': 120, 'width': 240, 'height': 60, 'text': 'Selected network'},
+        {'id': 'arrow', 'kind': 'arrow', 'x': 900, 'y': 160, 'text': 'Choose your Wi-Fi network'},
+        {'id': 'step', 'kind': 'step', 'x': 1320, 'y': 160, 'step': 2, 'text': 'Enter the password, then choose Connect'},
+        {'id': 'underline', 'kind': 'underline', 'x': 60, 'y': 350, 'width': 260, 'height': 40, 'text': 'Check this value'},
+        {'id': 'bracket', 'kind': 'bracket', 'x': 480, 'y': 330, 'width': 220, 'height': 100, 'text': 'Network settings'},
+        {'id': 'note', 'kind': 'note', 'x': 80, 'y': 650, 'title': 'Almost connected', 'text': 'Choose your network and enter its password. The connection icon will change when you are online. You can keep using the app while this guide is on screen.'},
+        {'id': 'edge', 'kind': 'note', 'x': 1919, 'y': 1079, 'title': 'At the screen edge', 'text': 'This note stays inside the display and wraps automatically.'},
+    ])
+    capture('03-guidance.png')
+    from PIL import ImageChops
+    before = Image.open(stage / '03-guidance-before.png').convert('RGB')
+    after = Image.open(stage / '03-guidance.png').convert('RGB')
+    for name, region in [('circle', (55, 115, 345, 215)), ('highlight', (480, 120, 720, 180)), ('arrow', (890, 150, 1050, 240)), ('step', (1300, 140, 1340, 180)), ('underline', (55, 385, 325, 400)), ('bracket', (685, 325, 710, 435)), ('note', (80, 650, 360, 850)), ('edge', (1630, 970, 1912, 1072))]:
+        assert ImageChops.difference(before.crop(region), after.crop(region)).getbbox(), f'{name} absent from composed screen'
+    assert all(abs(a - b) <= 6 for a, b in zip(after.getpixel((330, 656)), (251, 250, 244))), 'Note card is not warm paper'
+    capture('03-guidance-repaint.png')
+    repeated = Image.open(stage / '03-guidance-repaint.png').convert('RGB')
+    assert not ImageChops.difference(after.crop((55, 115, 345, 215)), repeated.crop((55, 115, 345, 215))).getbbox(), 'Sketch changed between repaints'
+    assert not driver('pick', x=100, y=700)['friday'], 'Note intercepted desktop input'
+    print('PASS: visual vocabulary, wrapped notes, edge placement, stable sketches, note click-through', flush=True)
     obs = observe()
     payload = {**obs, 'action': 'click', 'x': 960, 'y': 430}
     reject('action', 'Approve', **payload)

@@ -6,6 +6,7 @@ import {
   stagePoint,
   nativeAction,
   nativeDrawing,
+  annotationTextLimits,
   type Observation,
 } from '../electron/desktop-protocol.js';
 const observation = (): Observation => ({
@@ -84,6 +85,70 @@ describe('desktop coordinate and freshness contract', () => {
     ])
       expect(() => drawing({ ...ids, items: [bad] }, o)).toThrow();
     expect(() => drawing({ ...ids, items: [item, item] }, o)).toThrow('Duplicate');
+  });
+  it('supports wordless marks, numbered steps, and formatted notes', () => {
+    const items = [
+      { id: 'focus', kind: 'circle', x: 100, y: 200, width: 200, height: 60 },
+      { id: 'next', kind: 'step', x: 90, y: 200, step: 2 },
+      { id: 'help', kind: 'note', x: 400, y: 200, title: 'Network', text: '  Choose   your Wi-Fi.  ' },
+      { id: 'title', kind: 'note', x: 400, y: 500, title: 'Connected' },
+    ];
+    const result = drawing({ ...ids, items }, observation());
+    expect(result.items[0]).toEqual({ ...items[0], kind: 'ellipse' });
+    expect(result.items[1]).toEqual(items[1]);
+    expect(result.items[2]).toMatchObject({ title: 'Network', text: 'Choose your Wi-Fi.' });
+    expect(result.items[3].title).toBe('Connected');
+    const bell = drawing({ ...ids, items: [{ ...items[2], text: 'Ring\u0007 now\u0000' }] }, observation());
+    expect(bell.items[0].text).toBe('Ring now');
+    for (const bad of [
+      { ...items[1], step: 0 },
+      { ...items[1], step: 10 },
+      { ...items[1], step: 1.5 },
+      { ...items[1], step: undefined },
+      { ...items[0], title: 'Wrong kind' },
+      { ...items[2], title: 'x'.repeat(41) },
+      { ...items[2], title: '', text: '  ' },
+    ])
+      expect(() => drawing({ ...ids, items: [bad] }, observation())).toThrow();
+  });
+  it('enforces each text limit without rejecting labels at the limit', () => {
+    for (const [kind, limit] of Object.entries(annotationTextLimits)) {
+      const item = {
+        id: 'test',
+        kind,
+        x: 100,
+        y: 100,
+        width: 200,
+        height: 80,
+        step: 1,
+        points: [
+          { x: 100, y: 100 },
+          { x: 200, y: 200 },
+        ],
+        text: 'é'.repeat(limit),
+      };
+      expect(drawing({ ...ids, items: [item] }, observation()).items[0].text).toHaveLength(limit);
+      expect(() => drawing({ ...ids, items: [{ ...item, text: item.text + '!' }] }, observation())).toThrow(
+        `${limit} characters`,
+      );
+    }
+  });
+  it('resolves automatic arrows once, preserving the target through native scaling and revalidation', () => {
+    const native = observation();
+    const small = { ...native, width: 1440, height: 810 };
+    for (const [x, y] of [
+      [0, 0],
+      [1439, 809],
+      [720, 405],
+    ]) {
+      const result = drawing({ ...ids, items: [{ id: 'pointer', kind: 'arrow', x, y }] }, small);
+      expect(result.items[0]).toMatchObject({ toX: x, toY: y });
+      expect(result.items[0].x).not.toBe(x);
+      const mapped = nativeDrawing(result, small, native);
+      expect(mapped.items[0].toX).toBeCloseTo((x * 4) / 3);
+      expect(drawing(mapped, native)).toEqual(mapped);
+    }
+    expect(() => drawing({ ...ids, items: [{ id: 'bad', kind: 'arrow', x: 0, y: 0, toX: 50 }] }, small)).toThrow();
   });
   it('rejects unknown action/key names and bounds input size', () => {
     const o = observation();

@@ -200,7 +200,10 @@ if (hasSingleInstanceLock)
     const runtimeDirectory = join(app.getPath('userData'), 'runtime');
     const extensionPath = join(runtimeDirectory, 'friday-extension.mjs');
     await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-    await copyFile(join(root, 'dist-electron/friday-extension.js'), extensionPath);
+    await Promise.all([
+      copyFile(join(root, 'dist-electron/friday-extension.js'), extensionPath),
+      copyFile(join(root, 'dist-electron/desktop-protocol.js'), join(runtimeDirectory, 'desktop-protocol.js')),
+    ]);
     service = new AgentService(
       new TaskStore(join(app.getPath('userData'), 'tasks.json')),
       settings,

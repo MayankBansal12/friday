@@ -18,7 +18,7 @@ pnpm build
 pnpm start:desktop
 ```
 
-`desktop:status` must report `ready: true` and `protocolVersion: 3`. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
+`desktop:status` must report `ready: true` and `protocolVersion: 4`. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
 
 The installer writes the extension to `~/.local/share/gnome-shell/extensions/friday-desktop@linux-buddy.local`, creates a private token at `~/.config/friday-desktop/token`, and enables Friday in GNOME. It does not restart the desktop or log you out.
 
@@ -37,7 +37,31 @@ Hold the microphone button to submit direct speech. **Ctrl+Shift+Space** or the 
 
 ## Desktop integration and permissions
 
-The Pi extension exposes `desktop_observe`, `desktop_draw`, `desktop_clear`, and `desktop_action`. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders arrows, ellipses, rectangles, highlights, labels, and paths, and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
+The Pi extension exposes `desktop_observe`, `desktop_draw`, `desktop_clear`, and `desktop_action`. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
+
+Screen guidance is visual first: usually 1–3 marks, with text only when it adds useful information. Use `circle`, `arrow`, `highlight`, `step`, or `note`; `rectangle`, `underline`, `bracket`, and the existing `ellipse`, `label`, and `path` also work. Text wraps into padded cards placed beside targets when space permits. Notes can have a short heading. Styling and placement are handled by the native renderer, with no browser overlay or extra dependency.
+
+| Annotation                                        | Optional text limit | Geometry in screenshot pixels                                                  |
+| ------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
+| Circle / ellipse, rectangle, highlight, underline | 40 characters       | Target top-left `x/y`, full `width/height`                                     |
+| Arrow                                             | 60 characters       | Target tip `x/y`; optionally supply `toX/toY` to use `x/y` as an explicit tail |
+| Bracket                                           | 60 characters       | Target top-left `x/y`, full `width/height`; bracket appears on the right       |
+| Numbered step                                     | 80 characters       | Marker center `x/y`, `step` from 1–9                                           |
+| Note / legacy label                               | 160 characters      | Card origin `x/y`; note also accepts a 40-character `title`                    |
+| Path                                              | 60 characters       | `x/y` and `points`                                                             |
+
+All items need an `id`. Text is plain, not Markdown. A note needs text or a title; other visual marks work without words. For example, after `desktop_observe`, call `desktop_draw` with its current IDs:
+
+```json
+{
+  "observationId": "<current observation ID>",
+  "displayId": "<current display ID>",
+  "items": [
+    { "id": "settings", "kind": "circle", "x": 420, "y": 180, "width": 120, "height": 40 },
+    { "id": "next", "kind": "step", "x": 400, "y": 200, "step": 1, "text": "Open Settings" }
+  ]
+}
+```
 
 Desktop input requires a native confirmation dialog. Users can allow one exact action or up to five clicks/scrolls in the same window for the current request, lasting at most 60 seconds. Typing, key presses, right/double clicks, and actions marked consequential require fresh confirmation. Each action consumes its observation. Stop, lock, overview, display changes, disconnect, and task completion revoke desktop control; a heartbeat expires abandoned sessions.
 

@@ -1,3 +1,5 @@
+import { annotationTextLimits } from './desktop-protocol.js';
+
 type ToolEvent = { toolName: string; input: Record<string, unknown> };
 type ToolResult = {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -135,7 +137,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
     name: 'desktop_draw',
     label: 'Annotate the screen',
     description:
-      'Draw click-through arrows, ellipses, rectangles, highlights, labels, or paths over the observed app. Use screenshot pixels and the latest observation/display IDs. For an ellipse, x/y are the TOP-LEFT of its bounding box, never its center; width/height are full diameters. For example, a button bounded by left=100, top=200, right=400, bottom=280 is circled with x=100,y=200,width=300,height=80. Reuse an item ID to update it with replace=false. Annotations expire after 30 seconds or when the scene changes. No mouse input is injected.',
+      'Guide visually with circle, arrow, highlight, step, or note; rectangle, underline, bracket, ellipse, label, and path are also supported. Prefer 1–3 marks with no text. Add short plain text only when needed; Buddy styles and wraps it beside the target. Use screenshot pixels and the latest observation/display IDs. Circle/ellipse, rectangle, highlight, underline, and bracket use the target TOP-LEFT x/y and full width/height, never a center or radius. For a button or control, use its full outer visible bounds including padded clickable space, never only the text or icon bounds. Arrow x/y is the target tip unless toX/toY are supplied (then x/y is the tail). Step uses x/y for the numbered marker center and step=1–9. Note uses x/y for card placement and needs text or a title. Reuse an item ID to update it with replace=false. Annotations expire after 30 seconds or when the scene changes. No mouse input is injected.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -151,16 +153,16 @@ export default function fridayExtension(pi: ExtensionAPI) {
             additionalProperties: false,
             properties: {
               id: { type: 'string' },
-              kind: { type: 'string', enum: ['arrow', 'ellipse', 'rectangle', 'highlight', 'label', 'path'] },
+              kind: { type: 'string', enum: Object.keys(annotationTextLimits) },
               x: {
                 type: 'number',
                 description:
-                  'Left edge of ellipse/rectangle/highlight bounding box, or arrow start / label origin. Screenshot pixels; not the ellipse center.',
+                  'Target left edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
               },
               y: {
                 type: 'number',
                 description:
-                  'Top edge of ellipse/rectangle/highlight bounding box, or arrow start / label origin. Screenshot pixels; not the ellipse center.',
+                  'Target top edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
               },
               width: {
                 type: 'number',
@@ -174,8 +176,18 @@ export default function fridayExtension(pi: ExtensionAPI) {
               },
               toX: { type: 'number', description: 'Arrow tip X in screenshot pixels.' },
               toY: { type: 'number', description: 'Arrow tip Y in screenshot pixels.' },
-              text: { type: 'string' },
-              color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$', description: 'Hex RGB, for example #70e3cd' },
+              text: {
+                type: 'string',
+                maxLength: 160,
+                description: `Optional plain text; omit when the visual is enough. Character limits by kind: ${JSON.stringify(annotationTextLimits)}. No Markdown.`,
+              },
+              title: { type: 'string', maxLength: 40, description: 'Optional short heading for a note only.' },
+              step: { type: 'integer', minimum: 1, maximum: 9, description: 'Required for a numbered step.' },
+              color: {
+                type: 'string',
+                pattern: '^#[0-9a-fA-F]{6}$',
+                description: 'Hex RGB, for example #5b72f2; omit for the default style',
+              },
               points: {
                 type: 'array',
                 maxItems: 512,

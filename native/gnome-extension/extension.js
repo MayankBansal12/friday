@@ -4,6 +4,7 @@ import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
+import { paintAnnotations } from './drawing.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
@@ -182,7 +183,7 @@ export default class FridayDesktop extends Extension {
     if (c.op === 'status')
       return {
         ready: true,
-        protocolVersion: 3,
+        protocolVersion: 4,
         presentation: this._presentation(),
         lastStop: this._lastStop ?? null,
         display: this._display(),
@@ -214,7 +215,7 @@ export default class FridayDesktop extends Extension {
         null,
         () => this._stop(true, 'disconnected'),
       );
-      return { ready: true, protocolVersion: 3 };
+      return { ready: true, protocolVersion: 4 };
     }
     // stop is never placed behind capture/input work; it revokes the lease immediately.
     if (c.op === 'stop' || c.op === 'finish') {
@@ -849,9 +850,6 @@ export default class FridayDesktop extends Extension {
     const cr = this._area.get_context();
     try {
       this._paintError = null;
-      cr.setLineWidth(4);
-      cr.setLineCap(1);
-      cr.setLineJoin(1);
       const items = [...this._items.values()];
       if (this._mark) {
         cr.setSourceRGBA(0.05, 0.08, 0.12, 0.15);
@@ -859,55 +857,13 @@ export default class FridayDesktop extends Extension {
         items.push({ kind: 'label', x: 650, y: 65, text: 'Draw around something · release to finish · Esc to stop' });
         if (this._mark.points.length > 1) items.push({ kind: 'path', points: this._mark.points });
       }
-      for (const a of items) {
-        const color = a.color ?? '#70e3cd';
-        const rgb = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16) / 255);
-        cr.setSourceRGBA(...rgb, a.kind === 'highlight' ? 0.24 : 0.96);
-        if (a.kind === 'ellipse') {
-          cr.save();
-          cr.translate(a.x + a.width / 2, a.y + a.height / 2);
-          cr.scale(a.width / 2, a.height / 2);
-          cr.arc(0, 0, 1, 0, Math.PI * 2);
-          cr.restore();
-          cr.stroke();
-        } else if (a.kind === 'rectangle' || a.kind === 'highlight') {
-          cr.rectangle(a.x, a.y, a.width, a.height);
-          if (a.kind === 'highlight') cr.fill();
-          else cr.stroke();
-        } else if (a.kind === 'arrow') {
-          cr.moveTo(a.x, a.y);
-          cr.lineTo(a.toX, a.toY);
-          cr.stroke();
-          const angle = Math.atan2(a.toY - a.y, a.toX - a.x);
-          for (const delta of [-0.5, 0.5]) {
-            cr.moveTo(a.toX, a.toY);
-            cr.lineTo(a.toX - 20 * Math.cos(angle + delta), a.toY - 20 * Math.sin(angle + delta));
-            cr.stroke();
-          }
-          if (this._pulseTimer) {
-            const progress = ((Date.now() - this._pulseStarted) % 1000) / 1000;
-            cr.setSourceRGBA(...rgb, 0.65 * (1 - progress));
-            cr.arc(a.toX, a.toY, 6 + progress * 18, 0, Math.PI * 2);
-            cr.stroke();
-          }
-        } else if (a.kind === 'path') {
-          a.points.forEach((p, i) => (i ? cr.lineTo(p.x, p.y) : cr.moveTo(p.x, p.y)));
-          cr.stroke();
-        }
-        if (a.text) {
-          cr.selectFontFace('Sans', 0, 1);
-          cr.setFontSize(16);
-          const w = Math.min(1800, cr.textExtents(a.text).width + 20);
-          const x = Math.max(4, Math.min(a.x, 1916 - w));
-          const y = Math.max(28, Math.min(a.y, 1070));
-          cr.setSourceRGBA(0.04, 0.08, 0.11, 0.95);
-          cr.rectangle(x - 6, y - 22, w, 30);
-          cr.fill();
-          cr.setSourceRGBA(1, 1, 1, 1);
-          cr.moveTo(x + 4, y);
-          cr.showText(a.text);
-        }
-      }
+      paintAnnotations(
+        cr,
+        items,
+        global.screen_width,
+        global.screen_height,
+        this._pulseTimer ? ((Date.now() - this._pulseStarted) % 1000) / 1000 : undefined,
+      );
       this._paintSerial++;
     } catch (error) {
       this._paintError = error.message;
