@@ -11,7 +11,13 @@ import {
   Settings,
   X,
 } from 'lucide-react';
-import type { FridayState, ListeningState, SurfaceLayout, TaskRecord } from '../electron/types';
+import {
+  activeStatuses,
+  type FridayState,
+  type ListeningState,
+  type SurfaceLayout,
+  type TaskRecord,
+} from '../electron/types';
 import './presence.css';
 
 interface Props {
@@ -41,7 +47,7 @@ export function FridayPresence(props: Props) {
   const [dismissed, setDismissed] = useState<string>();
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const panelRef = useRef<HTMLElement>(null);
-  const busy = task && ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status);
+  const busy = task && activeStatuses.has(task.status);
   const listeningToRequest = listening === 'armed' || listening === 'transcribing';
   const active = Boolean(busy || speaking || listeningToRequest || typing);
   const children = (state?.sessions ?? [])

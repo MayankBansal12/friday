@@ -1,5 +1,5 @@
-import type { CompanionMode } from './desktop-protocol.js';
-export type RunStatus = 'queued' | 'thinking' | 'acting' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'thinking' | 'acting' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
+export const activeStatuses: ReadonlySet<RunStatus> = new Set(['thinking', 'acting', 'awaiting_approval']);
 
 export interface AgentStep {
   id: string;
@@ -24,13 +24,11 @@ export interface TaskRecord {
   role?: 'parent' | 'child';
   parentId?: string;
   spoken?: boolean;
-  mode?: CompanionMode;
   id: string;
   prompt: string;
   status: RunStatus;
   stopReason?: 'user' | 'escape';
   timings?: {
-    queueMs?: number;
     startupMs?: number;
     firstModelMs?: number;
     firstTextMs?: number;

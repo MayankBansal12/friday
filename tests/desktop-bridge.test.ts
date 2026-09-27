@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DesktopBridge } from '../electron/desktop-bridge.js';
 import type { NativeDesktop } from '../electron/gnome-client.js';
-import type { CompanionMode } from '../electron/desktop-protocol.js';
 
 const bridges: DesktopBridge[] = [];
-async function fixture(mode: CompanionMode = 'act', compressed = false, companion = false) {
+async function fixture(compressed = false, companion = false) {
   const calls: Record<string, unknown>[] = [];
-  let blockAction: (() => Promise<Record<string, unknown>>) | undefined;
+  let blockDraw: (() => Promise<Record<string, unknown>>) | undefined;
   let captionError = false;
   let rendered = true;
   let annotations = 0;
@@ -14,7 +13,8 @@ async function fixture(mode: CompanionMode = 'act', compressed = false, companio
     close: vi.fn(),
     async command(value) {
       calls.push(value);
-      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion: 4, annotations };
+      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion: 5, annotations };
+      if (value.op === 'draw' && blockDraw) return blockDraw();
       if (value.op === 'draw') return rendered ? { rendered: true } : { ids: ['button'] };
       if (value.op === 'caption') {
         if (captionError) throw new Error('Caption could not be rendered');
@@ -33,8 +33,6 @@ async function fixture(mode: CompanionMode = 'act', compressed = false, companio
           windowBounds: { x: 400, y: 200, width: 800, height: 600 },
           lastMark: { points: [{ x: 500, y: 300 }], current: true },
         };
-      if (value.op === 'confirm') return { approved: true };
-      if (value.op === 'action' && blockAction) return blockAction();
       return {};
     },
   };
@@ -51,7 +49,7 @@ async function fixture(mode: CompanionMode = 'act', compressed = false, companio
   );
   bridges.push(bridge);
   await bridge.start();
-  const token = bridge.beginRun('run-1', mode);
+  const token = bridge.beginRun('run-1');
   async function request(path: string, body?: unknown, overrideToken = token) {
     const response = await fetch(`${bridge.url}${path}`, {
       method: body ? 'POST' : 'GET',
@@ -74,26 +72,26 @@ async function fixture(mode: CompanionMode = 'act', compressed = false, companio
     setAnnotations: (count: number) => {
       annotations = count;
     },
-    block: (fn: typeof blockAction) => {
-      blockAction = fn;
+    block: (fn: typeof blockDraw) => {
+      blockDraw = fn;
     },
   };
 }
 afterEach(() => {
   for (const b of bridges.splice(0)) b.close();
 });
-const click = { action: 'click', observationId: 'obs', displayId: 'screen', x: 10, y: 20 };
+const guide = {
+  observationId: 'obs',
+  displayId: 'screen',
+  items: [{ id: 'button', kind: 'rectangle', x: 10, y: 20, width: 200, height: 100 }],
+};
 
 describe('host desktop permissions and cancellation', () => {
   it('does not report drawing success when native code only accepts the geometry', async () => {
     const f = await fixture();
     await f.request('/screenshot');
     f.failDrawing();
-    const result = await f.request('/draw', {
-      observationId: 'obs',
-      displayId: 'screen',
-      items: [{ id: 'button', kind: 'rectangle', x: 10, y: 20, width: 200, height: 100 }],
-    });
+    const result = await f.request('/draw', guide);
     expect(result.status).toBe(400);
     expect(result.body.error).toContain('did not confirm');
   });
@@ -108,7 +106,7 @@ describe('host desktop permissions and cancellation', () => {
     expect(window.hide).not.toHaveBeenCalled();
   });
   it('keeps the request window open and stops with the real error when the caption cannot be shown', async () => {
-    const f = await fixture('act', false, true);
+    const f = await fixture(false, true);
     f.failCaption();
     f.bridge.onStopped = vi.fn();
     expect((await f.request('/screenshot')).status).toBe(400);
@@ -120,7 +118,7 @@ describe('host desktop permissions and cancellation', () => {
     expect(f.calls.some((c) => c.op === 'observe')).toBe(false);
   });
   it('preserves the guide after completion and automatically returns the answer when it clears', async () => {
-    const f = await fixture('act', false, true);
+    const f = await fixture(false, true);
     await f.request('/screenshot');
     expect(f.calls.map((c) => c.op)).toEqual(['begin', 'caption', 'observe']);
     f.setAnnotations(1);
@@ -132,15 +130,15 @@ describe('host desktop permissions and cancellation', () => {
     expect(f.calls).toContainEqual({ op: 'stop', runId: 'run-1' });
   });
   it('does not let an old task restore the window during a newer desktop task', async () => {
-    const f = await fixture('act', false, true);
+    const f = await fixture(false, true);
     await f.request('/screenshot');
     f.bridge.revokeRun('run-1', true);
-    f.bridge.beginRun('run-2', 'act');
+    f.bridge.beginRun('run-2');
     await new Promise((resolve) => setTimeout(resolve, 550));
     expect(f.window.showInactive).not.toHaveBeenCalled();
   });
-  it('keeps screenshot, window bounds, marks, drawings and actions in one coordinate system', async () => {
-    const f = await fixture('act', true);
+  it('keeps screenshot, window bounds, marks and drawings in one coordinate system', async () => {
+    const f = await fixture(true);
     const observed = (await f.request('/screenshot')).body;
     expect(observed).toMatchObject({
       width: 1440,
@@ -157,9 +155,6 @@ describe('host desktop permissions and cancellation', () => {
     expect(f.calls.find((c) => c.op === 'draw')).toMatchObject({
       items: [{ x: 500, y: 300, width: 200, height: 100 }],
     });
-    expect((await f.request('/action', { ...click, x: 450, y: 262.5 })).status).toBe(200);
-    expect(f.calls.find((c) => c.op === 'confirm')).toMatchObject({ action: { x: 600, y: 350 } });
-    expect(f.calls.find((c) => c.op === 'action')).toMatchObject({ x: 600, y: 350 });
   });
   it('explains an unloaded GNOME extension and leaves Friday visible when marking fails', async () => {
     const unavailable = new Error(
@@ -182,14 +177,13 @@ describe('host desktop permissions and cancellation', () => {
     await expect(bridge.mark()).rejects.toThrow('sign out of GNOME');
     expect(command).toHaveBeenCalledWith(expect.objectContaining({ op: 'stop' }));
   });
-  it('keeps Friday hidden across observe and action, restoring only at the end', async () => {
+  it('keeps Friday hidden across observe and draw, restoring only at the end', async () => {
     const f = await fixture();
     await f.request('/screenshot');
     expect(f.window.hide).toHaveBeenCalled();
     expect(f.window.showInactive).not.toHaveBeenCalled();
-    expect((await f.request('/action', click)).status).toBe(200);
-    expect(f.calls.map((c) => c.op)).toEqual(['begin', 'observe', 'confirm', 'action']);
-    expect((await f.request('/action', click)).status).toBe(400); // observation consumed
+    expect((await f.request('/draw', guide)).status).toBe(200);
+    expect(f.calls.map((c) => c.op)).toEqual(['begin', 'observe', 'draw']);
     f.bridge.revokeRun('run-1', true);
     expect(f.window.showInactive).toHaveBeenCalledOnce();
   });
@@ -206,12 +200,12 @@ describe('host desktop permissions and cancellation', () => {
     f.bridge.nativeStopped('run-1', reason);
     expect(f.bridge.onStopped).toHaveBeenCalledTimes(1);
   });
-  it.each(['explain', 'guide'] as const)('rejects action input in %s mode before native injection', async (mode) => {
-    const f = await fixture(mode);
+  it('exposes no desktop input route', async () => {
+    const f = await fixture();
     await f.request('/screenshot');
-    const result = await f.request('/action', click);
-    expect(result.status).toBe(400);
-    expect(f.calls.some((c) => c.op === 'action' || c.op === 'confirm')).toBe(false);
+    const click = { action: 'click', observationId: 'obs', displayId: 'screen', x: 10, y: 20 };
+    expect((await f.request('/action', click)).status).toBe(404);
+    expect(f.calls.map((c) => c.op)).toEqual(['begin', 'observe']);
   });
   it('revokes accepted queued operations immediately, including requests racing stop', async () => {
     const f = await fixture();
@@ -227,23 +221,17 @@ describe('host desktop permissions and cancellation', () => {
         finish = resolve;
       });
     });
-    const first = f.request('/action', click);
+    const first = f.request('/draw', guide);
     await started;
-    const queued = f.request('/action', click);
+    const queued = f.request('/draw', guide);
     f.bridge.revokeRun('run-1');
-    expect(f.calls.at(-1)?.op).toBe('stop'); // not blocked behind accepted input
-    finish({});
+    expect(f.calls.at(-1)?.op).toBe('stop'); // not blocked behind the accepted drawing
+    finish({ rendered: true });
     await first;
     expect([400, 401]).toContain((await queued).status);
-    expect(f.calls.filter((c) => c.op === 'action')).toHaveLength(1);
+    expect(f.calls.filter((c) => c.op === 'draw')).toHaveLength(1);
     expect((await f.request('/screenshot')).status).toBe(401);
-    f.bridge.beginRun('run-2', 'guide');
+    f.bridge.beginRun('run-2');
     expect((await f.request('/screenshot')).status).toBe(401); // old bearer stays revoked
-  });
-  it('cannot draw in Explain mode even by calling the bridge directly', async () => {
-    const f = await fixture('explain');
-    await f.request('/screenshot');
-    expect((await f.request('/draw', { observationId: 'obs', displayId: 'screen', items: [] })).status).toBe(400);
-    expect(f.calls.some((c) => c.op === 'draw')).toBe(false);
   });
 });

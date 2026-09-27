@@ -17,11 +17,11 @@ describe('voice follow-up listening', () => {
     expect(followUp.taskChanged(task('voice-task', 'completed'))).toBe(false);
   });
 
-  it('ignores other tasks and handles a queued event before submit resolves', () => {
+  it('ignores other tasks and handles a thinking event before submit resolves', () => {
     const followUp = new VoiceFollowUp();
     followUp.beginSubmission();
 
-    expect(followUp.taskChanged(task('voice-task', 'queued'))).toBe(false);
+    expect(followUp.taskChanged(task('voice-task', 'thinking'))).toBe(false);
     expect(followUp.taskChanged(task('typed-task', 'completed'))).toBe(false);
     expect(followUp.taskChanged(task('voice-task', 'failed'))).toBe(true);
   });

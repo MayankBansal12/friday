@@ -75,22 +75,6 @@ def reject(op, fragment, **kwargs):
     else:
         raise AssertionError('Expected rejection: ' + op)
 
-def approve_action(payload, bounded=False):
-    command('heartbeat')
-    # Send confirmation asynchronously, then operate the real dialog from the test-only driver.
-    pending = {'done': False}
-    def completed(conn, result):
-        pending['reply'] = json.loads(conn.call_finish(result).unpack()[0]); pending['done'] = True
-    bus.call('dev.Friday.Desktop', '/dev/Friday/Desktop', 'dev.Friday.Desktop1', 'Command', GLib.Variant('(ss)', (token, json.dumps({'op': 'confirm', 'runId': 'smoke', 'action': payload}))), GLib.VariantType.new('(s)'), Gio.DBusCallFlags.NONE, 10000, None, completed)
-    time.sleep(.6)
-    driver('approve', bounded=bounded)
-    context = GLib.MainContext.default()
-    deadline = time.monotonic() + 5
-    while not pending['done'] and time.monotonic() < deadline:
-        context.iteration(False); time.sleep(.01)
-    assert pending.get('reply', {}).get('approved'), pending
-    time.sleep(.4)
-
 try:
     deadline = time.monotonic() + 20
     while True:
@@ -108,7 +92,7 @@ try:
     driver('overview'); time.sleep(.5)
     driver('fullscreen', enabled=True); time.sleep(.6)
     assert not command('status')['presentation']['compositingHeld'], 'Idle overlay keeps fullscreen compositing inhibited'
-    command('begin', mode='guide')
+    command('begin')
     full_obs = observe()
     draw_reply = command('draw', **full_obs, items=[{'id': 'fullscreen-circle', 'kind': 'ellipse', 'x': 600, 'y': 400, 'width': 600, 'height': 120, 'color': '#ff0000'}, {'id': 'graph', 'kind': 'rectangle', 'x': 846, 'y': 100, 'width': 846, 'height': 453, 'color': '#facc15'}])
     assert draw_reply['rendered'], 'Drawing acknowledged without painting'
@@ -121,8 +105,8 @@ try:
     assert fullscreen_state['fullscreen'] and fullscreen_state['drawingMapped'] and fullscreen_state['captionMapped'], fullscreen_state
     from PIL import Image
     pixels = Image.open(stage / '00-fullscreen-overlay.png').convert('RGB')
-    red, green, blue = pixels.getpixel((1400, 100))
-    assert red > 220 and green > 160 and blue < 60, 'Yellow graph border absent from composed screen pixels'
+    yellow_rows = [y for y in range(92, 109) if (lambda r, g, b: r > 220 and g > 160 and b < 60)(*pixels.getpixel((1400, y)))]
+    assert sum(y - 1 not in yellow_rows for y in yellow_rows) == 2, 'Expected two separate yellow pen strokes in fullscreen'
     command('clear')
     assert command('status')['presentation']['compositingHeld'], 'Clearing the drawing released compositing while caption remained'
     assert driver('overlayState')['captionMapped']
@@ -130,7 +114,7 @@ try:
     assert driver('overlayState')['captionMapped'], 'Caption disappeared on completion in fullscreen'
     command('stop')
     assert not command('status')['presentation']['compositingHeld'], 'Stop leaked fullscreen compositing inhibition'
-    command('begin', mode='guide')
+    command('begin')
     full_obs = observe()
     driver('blockPainting', enabled=True)
     reject('draw', 'could not display', **full_obs, items=[{'id': 'unpainted', 'kind': 'rectangle', 'x': 100, 'y': 100, 'width': 300, 'height': 200}])
@@ -140,14 +124,13 @@ try:
     assert not command('status')['presentation']['compositingHeld']
     print('PASS: fullscreen graph pixels, paint acknowledgement, caption/drawing compositing lifetime, unpainted draw rejection', flush=True)
     driver('fullscreen', enabled=False); time.sleep(.6)
-    command('begin', mode='act')
+    command('begin')
     obs = observe(); capture('01-observe.png')
     driver('move', x=1050, y=580); time.sleep(.1)
     command('draw', **obs, items=[{'id': 'target', 'kind': 'ellipse', 'x': 560, 'y': 380, 'width': 800, 'height': 110}, {'id': 'pointer', 'kind': 'arrow', 'x': 400, 'y': 400, 'toX': 560, 'toY': 430, 'text': 'Open the demo'}])
     time.sleep(.3); capture('02-annotated.png')
     driver('move', x=1100, y=600); time.sleep(.1)
     assert command('status')['annotations'] == 2, 'Pointer motion erased guidance'
-    reject('confirm', 'pointer moved', action={**obs, 'action': 'click', 'x': 960, 'y': 430})
     assert driver('pick', x=960, y=430)['friday'] is False, 'Drawing intercepted input'
     driver('click', x=960, y=430); time.sleep(.3)
     capture('02b-after-click.png')
@@ -172,75 +155,31 @@ try:
     for name, region in [('circle', (55, 115, 345, 215)), ('highlight', (480, 120, 720, 180)), ('arrow', (890, 150, 1050, 240)), ('step', (1300, 140, 1340, 180)), ('underline', (55, 385, 325, 400)), ('bracket', (685, 325, 710, 435)), ('note', (80, 650, 360, 850)), ('edge', (1630, 970, 1912, 1072))]:
         assert ImageChops.difference(before.crop(region), after.crop(region)).getbbox(), f'{name} absent from composed screen'
     assert all(abs(a - b) <= 6 for a, b in zip(after.getpixel((330, 656)), (251, 250, 244))), 'Note card is not warm paper'
+    red_rows = [y for y in range(380, 401) if (lambda r, g, b: r > 160 and g < 110 and b < 120)(*after.getpixel((190, y)))]
+    blue_columns = [x for x in range(690, 710) if (lambda r, g, b: b > 160 and r < 110 and g < 145)(*after.getpixel((x, 380)))]
+    assert sum(y - 1 not in red_rows for y in red_rows) == 2, 'Underline is missing two distinct red strokes'
+    assert sum(x - 1 not in blue_columns for x in blue_columns) == 2, 'Bracket is missing two distinct blue strokes'
     capture('03-guidance-repaint.png')
     repeated = Image.open(stage / '03-guidance-repaint.png').convert('RGB')
     assert not ImageChops.difference(after.crop((55, 115, 345, 215)), repeated.crop((55, 115, 345, 215))).getbbox(), 'Sketch changed between repaints'
     assert not driver('pick', x=100, y=700)['friday'], 'Note intercepted desktop input'
     print('PASS: visual vocabulary, wrapped notes, edge placement, stable sketches, note click-through', flush=True)
-    obs = observe()
-    payload = {**obs, 'action': 'click', 'x': 960, 'y': 430}
-    reject('action', 'Approve', **payload)
-    approve_action(payload)
-    command('action', **payload)
-    observe(); capture('03-verified.png')
-    print('PASS: exact-action consent, native input, screenshot verification', flush=True)
-    obs = observe(); payload = {**obs, 'action': 'click', 'x': 960, 'y': 430}
-    approve_action(payload, bounded=True); command('action', **payload)
-    assert command('status')['permission']['remaining'] == 4
-    # Consequential effects bypass the grant and still show a fresh exact-action dialog.
-    obs = observe(); payload = {**obs, 'action': 'click', 'x': 960, 'y': 430, 'forceConfirmation': True}
-    approve_action(payload); command('action', **payload)
-    assert command('status')['permission']['remaining'] == 4
-    for remaining in range(3, -1, -1):
-        obs = observe(); payload = {**obs, 'action': 'click', 'x': 960, 'y': 430}
-        assert command('confirm', action=payload).get('scoped') is True
-        command('action', **payload)
-        assert command('status')['permission']['remaining'] == remaining
-    obs = observe(); payload = {**obs, 'action': 'click', 'x': 960, 'y': 430}
-    approve_action(payload); command('action', **payload)  # exhausted budget must show a dialog
     driver('overview', show=True); time.sleep(.3)
     status = command('status')
-    assert not status['active'] and status['permission'] is None
-    assert status['lastStop']['reason'] == 'overview'
+    assert not status['active'] and status['lastStop']['reason'] == 'overview'
     driver('overview'); time.sleep(.4)
-    command('begin', mode='act'); observe()
-    print('PASS: bounded consent, five-action budget, consequential reapproval, overview revocation and reason', flush=True)
+    command('begin'); observe()
+    print('PASS: overview revocation and reason', flush=True)
     command('mark'); driver('press', x=600, y=450); driver('move', x=800, y=550); driver('release', x=850, y=430); time.sleep(.2)
     status = command('status'); capture('mark.png'); assert not status['marking'] and status['lastMark']['points']
     assert driver('pick', x=960, y=430)['friday'] is False
     command('stop'); assert command('status')['annotations'] == 0
     reject('observe', 'user_stop')
     print('PASS: explicit user marking, return to click-through, Stop/revocation', flush=True)
-    for selected in ['explain', 'guide']:
-        command('begin', mode=selected); obs = observe()
-        reject('action', 'Act mode', **obs, action='click', x=960, y=430)
-        if selected == 'explain': reject('draw', 'Guide', **obs, items=[])
-        command('stop')
-    print('PASS: native capability enforcement', flush=True)
-    command('begin', mode='act')
-    driver('click', x=960, y=540); time.sleep(.2)
-    obs = observe()
-    payload = {**obs, 'action': 'type', 'text': 'x' * 1000}
-    approve_action(payload)
-    # Stop while native typing is in flight, without waiting behind its reply.
-    pending_input = {'done': False}
-    def input_done(conn, result):
-        pending_input['reply'] = json.loads(conn.call_finish(result).unpack()[0]); pending_input['done'] = True
-    bus.call('dev.Friday.Desktop', '/dev/Friday/Desktop', 'dev.Friday.Desktop1', 'Command', GLib.Variant('(ss)', (token, json.dumps({'op': 'action', 'runId': 'smoke', **payload}))), GLib.VariantType.new('(s)'), Gio.DBusCallFlags.NONE, 10000, None, input_done)
-    time.sleep(.15); command('stop'); time.sleep(.2)
-    text_path = stage / 'clicked.text'
-    count = len(text_path.read_text()) if text_path.exists() else 0
-    assert 0 < count < 1000, count
-    time.sleep(.3)
-    assert len(text_path.read_text()) == count, 'Typing continued after Stop'
-    assert driver('inputState') == {'keys': 0, 'buttons': 0}
-    context = GLib.MainContext.default()
-    while context.pending(): context.iteration(False)
-    assert pending_input.get('reply', {}).get('error'), pending_input
-    command('begin', mode='guide'); observe()
+    command('begin'); observe()
     driver('key', key=0xff1b); time.sleep(.2)
     assert command('status')['active'] is False, 'Escape did not revoke the native lease'
-    print('PASS: in-flight typing cancellation, held input release, global Escape', flush=True)
+    print('PASS: global Escape', flush=True)
     if '--ui' in sys.argv:
         app.terminate(); app.wait(timeout=5)
         (stage / 'clicked').unlink(missing_ok=True)
@@ -304,8 +243,6 @@ try:
                                         capture('08-ui-returned.png')
                                         (stage / 'ui-returned-state.json').write_text(json.dumps(window_state, indent=2))
                                         (stage / 'ui-drawing-captured').write_text('returned automatically')
-                                try: driver('approve')
-                                except RuntimeError: pass
                             else:
                                 if not (stage / '05b-working-fullscreen.png').exists() and command('status')['active']:
                                     state = driver('overlayState')

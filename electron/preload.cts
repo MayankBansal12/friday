@@ -37,8 +37,7 @@ contextBridge.exposeInMainWorld('buddy', {
     return () => ipcRenderer.removeListener('friday:state', handler);
   },
   listTasks: (): Promise<TaskRecord[]> => invoke('tasks:list', 10_000),
-  submit: (prompt: string, conversationId?: string): Promise<TaskRecord> =>
-    invoke('tasks:submit', 15_000, prompt, conversationId),
+  submit: (prompt: string): Promise<TaskRecord> => invoke('tasks:submit', 15_000, prompt),
   newConversation: (): Promise<string> => invoke('conversation:new', 10_000),
   desktopStatus: (): Promise<DesktopStatus> => invoke('desktop:status', 30_000),
   mark: (): Promise<void> => invoke('desktop:mark', 30_000),
@@ -49,7 +48,6 @@ contextBridge.exposeInMainWorld('buddy', {
     ipcRenderer.on('desktop:marked', handler);
     return () => ipcRenderer.removeListener('desktop:marked', handler);
   },
-  cancel: (id: string): Promise<void> => invoke('tasks:cancel', 15_000, id),
   approve: (id: string, approved: boolean): Promise<void> => invoke('tasks:approve', 15_000, id, approved),
   transcribe: (audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> =>
     invoke('voice:transcribe', 160_000, audio, mimeType),

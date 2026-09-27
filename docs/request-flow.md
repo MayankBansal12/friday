@@ -40,17 +40,13 @@ flowchart TD
 
 The host enforces tool ownership with a per-process token and an active-turn check. Children have `task_report`, file tools, and shell tools. Shell execution is still under the user's account with the existing consequential-command check, not an OS sandbox.
 
-## What you see and hear
+## Speech and presentation
 
-The default surface is a circle in the upper right. The floating window uses XWayland for fixed placement, independently of the GNOME drawing extension. Its position is restored after reopening or display changes. An engaged microphone, parent turn, or speech makes it a top bar. Hover, explicit expansion, an approval/error, or the parent's `show_text` can open a panel. Background work alone keeps the circle. Text input and history are optional surfaces.
+Only the parent speaks. `speak` starts espeak-ng immediately and a newer utterance replaces it. If the parent answers without calling `speak`, the host reads a short version once, unless speech is disabled; longer details stay visible through `show_text`. Background completions never start speech.
 
-Click the circle/shortcut to start listening. Speech is segmented after 850 ms of silence and transcribed locally. After a spoken request and reply, an engaged listening window accepts follow-ups; ten seconds without speech returns it to wake-word listening. Wake recognition also uses Parakeet transcription, not a dedicated instant wake detector. Opening Friday does not turn on the microphone.
+Clicking the microphone or the talk shortcut stops speech and opens listening; the parent's current turn is interrupted when the new request is submitted. Speaking over TTS alone does not interrupt it, and stopping the foreground leaves children running. Wake recognition uses Parakeet transcription, not a dedicated wake detector. The README describes the companion surfaces.
 
-Only the parent speaks. `speak` starts espeak-ng immediately; a newer utterance replaces it. If the parent returns a final answer without calling `speak`, the host reads a short version once, unless speech is disabled. Longer details remain visible through `show_text`. Background completions never start TTS.
-
-Clicking the microphone or using the talk shortcut stops speech and opens listening. The model's current work is interrupted when the new request is submitted. Speaking over TTS alone does not interrupt it in this version. Stopping the foreground leaves children running.
-
-During capture and drawing, GNOME renders a compact native top bar while the Electron surface is minimized. The native bar supports hover text and Reply/Stop controls; the Electron companion returns once drawing clears. Computer clicking/typing and continuous screen monitoring remain outside this prototype.
+During capture and drawing, the Electron surface is minimized and GNOME shows a native bar with Reply/Stop until the drawing clears. Friday has no desktop input and does not continuously watch the screen.
 
 ## Implementation and validation
 

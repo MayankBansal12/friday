@@ -59,7 +59,7 @@ async function fixture(options: ConstructorParameters<typeof AgentService>[4] = 
     new TaskStore(join(dir, 'state.json')),
     settings,
     '/tmp/extension.mjs',
-    { url: 'http://127.0.0.1:1', token: 'token' },
+    { url: 'http://127.0.0.1:1', beginRun: () => 'token' },
     { spawn: spawnMock, terminateGraceMs: 100, persistDebounceMs: 5, ...options },
   );
   services.push(service);
@@ -114,7 +114,6 @@ describe('AgentService lifecycle', () => {
     expect(children).toHaveLength(1);
     const args = invocations[0][1] as string[];
     expect(args[args.indexOf('--tools') + 1]).toContain('desktop_draw');
-    expect(args[args.indexOf('--tools') + 1]).not.toContain('desktop_action');
     const newId = await service.newConversation();
     expect((await service.submit('New topic')).conversationId).toBe(newId);
     expect(newId).not.toBe(first.conversationId);

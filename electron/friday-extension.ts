@@ -73,19 +73,11 @@ export function isConsequentialCommand(command: string) {
   return Boolean(consequentialCommandReason(command));
 }
 
-function bridgeUrl(path: string) {
-  const runtime = process.env.LINUX_BUDDY_RUNTIME_URL;
-  const runtimeToken = process.env.LINUX_BUDDY_RUNTIME_TOKEN;
-  if (runtime && runtimeToken)
-    return { url: `${runtime}${path.startsWith('/tools/') ? path : `/desktop${path}`}`, token: runtimeToken };
-  const origin = process.env.LINUX_BUDDY_BRIDGE_URL;
-  const token = process.env.LINUX_BUDDY_BRIDGE_TOKEN;
-  if (!origin || !token) throw new Error('Friday desktop bridge is unavailable');
-  return { url: `${origin}${path}`, token };
-}
-
 async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
-  const { url, token } = bridgeUrl(path);
+  const runtime = process.env.LINUX_BUDDY_RUNTIME_URL;
+  const token = process.env.LINUX_BUDDY_RUNTIME_TOKEN;
+  if (!runtime || !token) throw new Error('Friday runtime is unavailable');
+  const url = `${runtime}${path.startsWith('/tools/') ? path : `/desktop${path}`}`;
   const timeout = AbortSignal.timeout(90_000);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET',
@@ -100,8 +92,6 @@ async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
 export default function fridayExtension(pi: ExtensionAPI) {
   const role = process.env.LINUX_BUDDY_ROLE || 'parent';
   pi.on('tool_call', async (event, ctx) => {
-    if (event.toolName === 'desktop_action')
-      return { block: true, reason: 'Desktop input is outside this prototype. Guide the user instead.' };
     if (
       role === 'child' &&
       (event.toolName.startsWith('desktop_') ||
@@ -203,8 +193,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'desktop_observe',
     label: 'Look at screen',
-    description:
-      'Capture the current desktop. Use this before and after GUI actions to understand visible applications.',
+    description: 'Capture the current desktop to see the visible applications before explaining or drawing on them.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_id, _params, signal) {
       const result = await bridge('/screenshot', undefined, signal);
@@ -213,7 +202,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
         content: [
           {
             type: 'text',
-            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing and input coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ observationId: result.id, displayId: (result.display as { id: string }).id, windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
+            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ observationId: result.id, displayId: (result.display as { id: string }).id, windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
           },
           { type: 'image', data: String(result.data), mimeType: String(result.mimeType || 'image/png') },
         ],
@@ -311,36 +300,6 @@ export default function fridayExtension(pi: ExtensionAPI) {
     async execute(_id, params, signal) {
       const result = await bridge('/clear', params, signal);
       return { content: [{ type: 'text', text: 'Annotations cleared.' }], details: result };
-    },
-  });
-  pi.registerTool({
-    name: 'desktop_action',
-    label: 'Control desktop',
-    description:
-      'Perform one desktop action. The host requests consent; the user may explicitly grant up to five clicks/scrolls in the same window for 60 seconds. Set forceConfirmation=true for consequential actions (send, publish, delete, purchase, or disclose data), which always require fresh confirmation. Observe first and use its IDs. Observe again after the action to verify. Explain the purpose before calling this tool. Do not chain unverified actions.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        action: { type: 'string', enum: ['click', 'double_click', 'right_click', 'type', 'key', 'scroll'] },
-        observationId: { type: 'string' },
-        displayId: { type: 'string' },
-        x: { type: 'number' },
-        y: { type: 'number' },
-        text: { type: 'string' },
-        keys: { type: 'array', items: { type: 'string' } },
-        amount: { type: 'number' },
-        forceConfirmation: {
-          type: 'boolean',
-          description:
-            'Required true for consequential effects; bypasses any bounded navigation permission and asks again.',
-        },
-      },
-      required: ['action', 'observationId', 'displayId'],
-    },
-    async execute(_id, params, signal) {
-      const result = await bridge('/action', params, signal);
-      return { content: [{ type: 'text', text: String(result.message) }], details: result };
     },
   });
 }

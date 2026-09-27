@@ -18,14 +18,13 @@ declare global {
       setSurface(layout: SurfaceLayout, height?: number): Promise<void>;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
-      submit(prompt: string, conversationId?: string): Promise<TaskRecord>;
+      submit(prompt: string): Promise<TaskRecord>;
       newConversation(): Promise<string>;
       desktopStatus(): Promise<DesktopStatus>;
       mark(): Promise<void>;
       clearDrawing(): Promise<void>;
       stop(): Promise<void>;
       onMark(callback: (mark: Record<string, unknown>) => void): () => void;
-      cancel(id: string): Promise<void>;
       approve(id: string, approved: boolean): Promise<void>;
       transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult>;
       getSettings(): Promise<BuddySettings>;

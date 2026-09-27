@@ -10,11 +10,17 @@ import { Speaker } from '../speaker.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { TaskStore } from '../store.js';
-import type { BuddySettings, ListeningState, SurfaceLayout, TaskRecord } from '../types.js';
+import {
+  activeStatuses,
+  type BuddySettings,
+  type ListeningState,
+  type SurfaceLayout,
+  type TaskRecord,
+} from '../types.js';
 import { validAudio, validId, validListeningState, validPrompt, validSettings } from '../validation.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
-loadEnvironment({ path: join(process.cwd(), '.env.local'), quiet: true });
+loadEnvironment({ path: join(process.cwd(), '.env'), quiet: true });
 // The companion needs absolute positioning and always-on-top support. Electron
 // cannot provide those on native Wayland; use XWayland when an X display exists.
 if (process.platform === 'linux' && process.env.DISPLAY && !app.commandLine.hasSwitch('ozone-platform'))
@@ -77,11 +83,7 @@ function setExpanded(value: boolean) {
   window.webContents.send('window:expanded', value);
 }
 function showCompanion() {
-  const task = service
-    .list()
-    .find(
-      (task) => task.role !== 'child' && ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status),
-    );
+  const task = service.list().find((task) => task.role !== 'child' && activeStatuses.has(task.status));
   if (task) void bridge.setCaption(task.id, task.response || task.steps.at(-1)?.title || 'Friday is working…');
 }
 
@@ -132,7 +134,6 @@ function createWindow(openSilently: boolean) {
       window?.hide();
     }
   });
-  // Capture hides the companion without ending the conversation or follow-up listening.
   window.webContents.on('will-navigate', (event, url) => {
     const devOrigin = process.env.VITE_DEV_SERVER_URL;
     if ((devOrigin && url.startsWith(devOrigin)) || url.startsWith('file://')) return;
@@ -269,8 +270,7 @@ if (hasSingleInstanceLock)
     globalShortcut.register('CommandOrControl+Shift+Escape', () => {
       stopListening();
       bridge.stop();
-      for (const task of service.list())
-        if (['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status)) void service.cancel(task.id);
+      for (const task of service.list()) if (activeStatuses.has(task.status)) void service.cancel(task.id);
     });
     if (!globalShortcut.register('CommandOrControl+Shift+Space', activateFriday))
       console.warn('Global shortcut Ctrl+Shift+Space is unavailable');
@@ -310,24 +310,13 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       stopListening();
       bridge.stop();
-      const task = service
-        .list()
-        .find(
-          (item) =>
-            item.role !== 'child' && ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(item.status),
-        );
+      const task = service.list().find((item) => item.role !== 'child' && activeStatuses.has(item.status));
       if (task) await service.cancel(task.id);
     });
-    ipcMain.handle('tasks:submit', (event, prompt: unknown, conversationId: unknown) => {
+    ipcMain.handle('tasks:submit', (event, prompt: unknown) => {
       fromWindow(event);
       speaker.stop();
-      if (conversationId !== undefined) validId(conversationId);
       return service.submit(validPrompt(prompt));
-    });
-    ipcMain.handle('tasks:cancel', (event, id: unknown) => {
-      fromWindow(event);
-      stopListening();
-      return service.cancel(validId(id));
     });
     ipcMain.handle('tasks:approve', (event, id: unknown, approved: unknown) => {
       fromWindow(event);
@@ -360,7 +349,7 @@ if (hasSingleInstanceLock)
       await Promise.all(
         service
           .list()
-          .filter((task) => ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status))
+          .filter((task) => activeStatuses.has(task.status))
           .map((task) => service.cancel(task.id)),
       );
     });

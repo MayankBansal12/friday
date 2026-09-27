@@ -7,8 +7,7 @@ import St from 'gi://St';
 import { paintAnnotations } from './drawing.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
-import { action, drawing, identifier, keyNames, mode, record, stagePoint } from './protocol.js';
+import { drawing, identifier, protocolVersion, record } from './protocol.js';
 
 const IFACE = `<node><interface name="dev.Friday.Desktop1">
 <method name="Command"><arg type="s" direction="in" name="token"/><arg type="s" direction="in" name="command"/><arg type="s" direction="out" name="result"/></method>
@@ -20,8 +19,6 @@ export default class FridayDesktop extends Extension {
     this._alive = true;
     this._scene = 0;
     this._items = new Map();
-    this._keys = new Set();
-    this._buttons = new Set();
     this._timers = new Map();
     this._signals = [];
     this._compositingHeld = false;
@@ -31,9 +28,6 @@ export default class FridayDesktop extends Extension {
     const [, bytes] = secret.load_contents(null);
     this._token = new TextDecoder().decode(bytes).trim();
     if (!/^[0-9a-f]{64}$/.test(this._token)) throw new Error('Friday setup token is missing or invalid');
-    const seat = Clutter.get_default_backend().get_default_seat();
-    this._pointer = seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
-    this._keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
     this._area = new St.DrawingArea({ reactive: false, can_focus: false, visible: false });
     this._area.set_position(0, 0);
     this._area.set_size(global.screen_width, global.screen_height);
@@ -76,19 +70,15 @@ export default class FridayDesktop extends Extension {
     this._lastPointer = global.get_pointer();
     this._pointerWatch = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
       const pointer = global.get_pointer();
+      // Wayland application button events do not always reach Shell's stage handler.
       if (
         (this._observation || this._items.size) &&
         !this._busy &&
         !this._mark &&
-        !this._confirmDialog &&
         Date.now() > (this._ignorePointerUntil ?? 0) &&
-        pointer.some((v, i) => v !== this._lastPointer[i])
-      ) {
-        // Wayland application button events do not always reach Shell's stage handler.
-        // Pointer motion can invalidate an input target without erasing the visual guide.
-        if (pointer[2] !== this._lastPointer[2]) this._invalidate();
-        else this._inputInvalidated = true;
-      }
+        pointer[2] !== this._lastPointer[2]
+      )
+        this._invalidate();
       this._lastPointer = pointer;
       return GLib.SOURCE_CONTINUE;
     });
@@ -118,8 +108,6 @@ export default class FridayDesktop extends Extension {
     this._area?.destroy();
     this._area = null;
     this._syncCompositing();
-    this._pointer = null;
-    this._keyboard = null;
     this._token = null;
   }
 
@@ -202,7 +190,7 @@ export default class FridayDesktop extends Extension {
     if (c.op === 'status')
       return {
         ready: true,
-        protocolVersion: 4,
+        protocolVersion,
         companionLayout: true,
         presentation: this._presentation(),
         lastStop: this._lastStop ?? null,
@@ -211,7 +199,6 @@ export default class FridayDesktop extends Extension {
         marking: Boolean(this._mark),
         lastMark: this._lastMark ?? null,
         active: Boolean(this._lease),
-        permission: this._grant ? { remaining: this._grant.remaining, expiresAt: this._grant.expiresAt } : null,
       };
     if (c.op === 'begin') {
       if (this._busy) throw new Error('Previous desktop operation is stopping; retry shortly');
@@ -221,8 +208,6 @@ export default class FridayDesktop extends Extension {
         throw new Error('Unlock the desktop and leave overview first');
       this._stop(true, 'superseded');
       this._lease = identifier(c.runId);
-      this._mode = mode(c.mode);
-      this._request = typeof c.request === 'string' ? c.request.slice(0, 1200) : '';
       this._owner = sender;
       this._captionOwner = sender;
       this._captionRun = this._lease;
@@ -235,9 +220,9 @@ export default class FridayDesktop extends Extension {
         null,
         () => this._stop(true, 'disconnected'),
       );
-      return { ready: true, protocolVersion: 4 };
+      return { ready: true, protocolVersion };
     }
-    // stop is never placed behind capture/input work; it revokes the lease immediately.
+    // stop is never placed behind capture work; it revokes the lease immediately.
     if (c.op === 'stop' || c.op === 'finish') {
       if ((!this._lease && !this._owner) || (sender === this._owner && (!c.runId || c.runId === this._lease)))
         this._stop(c.op !== 'finish', c.op === 'finish' ? 'completed' : 'user_stop');
@@ -254,9 +239,7 @@ export default class FridayDesktop extends Extension {
       return { cleared: true };
     }
     if (c.op === 'observe') return this._observe(c, sender);
-    if (c.op === 'confirm') return this._confirm(c, sender);
     if (c.op === 'mark') {
-      if (this._mode === 'explain') throw new Error('Choose Guide or Act to mark the screen');
       if (this._busy) throw new Error('Wait for the current desktop operation');
       this._startMark();
       return { marking: true };
@@ -264,7 +247,6 @@ export default class FridayDesktop extends Extension {
     if (!this._observation || this._observation.scene !== this._scene || this._observation.focus !== this._focus())
       throw new Error('Observe again: the focused app or desktop changed');
     if (c.op === 'draw') {
-      if (this._mode === 'explain') throw new Error('Choose Guide or Act to draw');
       const d = drawing(c, this._observation);
       if (d.replace) this._items.clear();
       for (const item of d.items) this._items.set(item.id, item);
@@ -292,39 +274,7 @@ export default class FridayDesktop extends Extension {
       }
       return { ids: [...this._items.keys()], expiresInMs: 30000, rendered: true };
     }
-    if (c.op === 'action') {
-      if (this._mode !== 'act') throw new Error('Desktop input requires Act mode');
-      if (this._busy || this._mark) throw new Error('Finish the current desktop operation first');
-      const a = action(c, this._observation);
-      if (this._approvedAction !== JSON.stringify(a)) throw new Error('Approve this exact action first');
-      this._approvedAction = null;
-      if (this._usesGrant && this._grant) this._grant.remaining--;
-      this._usesGrant = false;
-      const observation = this._observation;
-      this._observation = null;
-      this._clear();
-      this._busy = true;
-      try {
-        await this._input(a, observation, c, sender);
-        return { message: `${a.action} completed. Observe again to verify.` };
-      } finally {
-        this._release();
-        await this._wait(50);
-        this._lastPointer = global.get_pointer();
-        this._busy = false;
-      }
-    }
     throw new Error('Unknown desktop command');
-  }
-
-  _canGrant(a) {
-    const win = global.display.focus_window;
-    if (!win || !['click', 'scroll'].includes(a.action) || a.forceConfirmation) return false;
-    const r = win.get_frame_rect();
-    const [pointerX, pointerY] = global.get_pointer();
-    if (a.action === 'scroll')
-      return pointerX >= r.x && pointerY >= r.y && pointerX < r.x + r.width && pointerY < r.y + r.height;
-    return a.x >= r.x && a.y >= r.y && a.x < r.x + r.width && a.y < r.y + r.height;
   }
 
   _animatePointer() {
@@ -337,91 +287,6 @@ export default class FridayDesktop extends Extension {
         return GLib.SOURCE_REMOVE;
       }
       return GLib.SOURCE_CONTINUE;
-    });
-  }
-
-  _confirm(c, sender) {
-    if (this._inputInvalidated) throw new Error('Observe again: the pointer moved before input');
-    if (this._mode !== 'act' || this._confirmDialog || this._busy) throw new Error('Desktop confirmation unavailable');
-    const a = action(c.action, this._observation);
-    if (!this._observation || this._observation.scene !== this._scene || this._observation.focus !== this._focus())
-      throw new Error('Observe again: the focused app or desktop changed');
-    const grant = this._grant;
-    this._usesGrant = false;
-    if (
-      grant &&
-      grant.runId === this._lease &&
-      grant.focus === this._focus() &&
-      grant.expiresAt > Date.now() &&
-      grant.remaining > 0 &&
-      this._canGrant(a)
-    ) {
-      this._approvedAction = JSON.stringify(a);
-      this._usesGrant = true;
-      return { approved: true, scoped: true, remaining: grant.remaining };
-    }
-    return new Promise((resolve) => {
-      const dialog = new ModalDialog.ModalDialog({ destroyOnClose: true });
-      this._confirmDialog = dialog;
-      dialog.contentLayout.add_child(
-        new St.Label({ text: 'Friday wants to act on your desktop', style: 'font-size: 20px; font-weight: bold;' }),
-      );
-      const detail = new St.Label({
-        text: `${this._request ? `Your request: ${this._request}\n\n` : ''}In “${global.display.focus_window?.get_title() || 'the active app'}”:\n${
-          a.action === 'type'
-            ? `Type: ${a.text}`
-            : a.action === 'key'
-              ? `Press ${a.keys.join(' + ')}`
-              : a.action === 'scroll'
-                ? `Scroll ${Math.abs(a.amount)} steps ${a.amount > 0 ? 'down' : 'up'}`
-                : `${a.action === 'double_click' ? 'Double-click' : a.action === 'right_click' ? 'Right-click' : 'Click'} at (${Math.round(a.x)}, ${Math.round(a.y)})`
-        }`,
-        style: 'font-size: 14px;',
-      });
-      detail.clutter_text.line_wrap = true;
-      dialog.contentLayout.add_child(detail);
-      if (this._canGrant(a)) {
-        const scope = new St.Label({
-          text: `Optional permission: up to 5 clicks or scrolls, only in “${global.display.focus_window?.get_title() || 'this window'}”, for this request and at most 60 seconds. Typing and key presses still ask each time. Stop or Escape revokes it.`,
-          style: 'font-size: 13px;',
-        });
-        scope.clutter_text.line_wrap = true;
-        dialog.contentLayout.add_child(scope);
-      }
-      let timeout = 0;
-      const done = (approved, bounded = false) => {
-        if (this._confirmDialog !== dialog) return;
-        if (timeout) GLib.source_remove(timeout);
-        this._confirmDialog = null;
-        this._dismissConfirmation = null;
-        this._ignorePointerUntil = Date.now() + 250;
-        dialog.close();
-        try {
-          this._check(c, sender);
-        } catch {
-          approved = false;
-        }
-        // Authorizes this exact validated payload once, inside Shell as well as in the host.
-        this._approvedAction = approved ? JSON.stringify(a) : null;
-        if (!approved) this._grant = null;
-        if (approved && bounded && this._canGrant(a)) {
-          this._grant = { runId: this._lease, focus: this._focus(), remaining: 5, expiresAt: Date.now() + 60000 };
-          this._usesGrant = true;
-        }
-        resolve({ approved });
-      };
-      this._dismissConfirmation = done;
-      dialog.setButtons([
-        { label: 'Decline', action: () => done(false), key: Clutter.KEY_Escape },
-        ...(this._canGrant(a) ? [{ label: 'Allow 5 clicks/scrolls · 60s', action: () => done(true, true) }] : []),
-        { label: 'Allow once', action: () => done(true) },
-      ]);
-      timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 22000, () => {
-        timeout = 0;
-        done(false);
-        return GLib.SOURCE_REMOVE;
-      });
-      if (!dialog.open()) done(false);
     });
   }
 
@@ -442,7 +307,6 @@ export default class FridayDesktop extends Extension {
         throw new Error('Desktop changed during capture; observe again');
       const display = this._display();
       const frame = global.display.focus_window?.get_frame_rect();
-      this._inputInvalidated = false;
       this._observation = {
         id: GLib.uuid_string_random(),
         display,
@@ -469,72 +333,6 @@ export default class FridayDesktop extends Extension {
     }
   }
 
-  async _input(a, observation, command, sender) {
-    const check = () => {
-      this._check(command, sender);
-      if (['type', 'key', 'scroll'].includes(a.action) && this._focus() !== observation.focus)
-        throw new Error('The target window changed during input; stopped');
-    };
-    const pause = async (ms) => {
-      await this._wait(ms);
-      check();
-    };
-    check();
-    if (['click', 'double_click', 'right_click'].includes(a.action)) {
-      const p = stagePoint(a, observation);
-      this._pointer.notify_absolute_motion(GLib.get_monotonic_time(), p.x, p.y);
-      await pause(40);
-      const [actualX, actualY] = global.get_pointer();
-      if (Math.abs(actualX - p.x) > 1 || Math.abs(actualY - p.y) > 1)
-        throw new Error(
-          'Pointer did not reach the observed target; no click was sent. Move it away from screen edges and observe again.',
-        );
-      const button = a.action === 'right_click' ? 3 : 1;
-      for (let n = 0; n < (a.action === 'double_click' ? 2 : 1); n++) {
-        check();
-        this._buttons.add(button);
-        this._pointer.notify_button(GLib.get_monotonic_time(), button, Clutter.ButtonState.PRESSED);
-        await pause(30);
-        this._pointer.notify_button(GLib.get_monotonic_time(), button, Clutter.ButtonState.RELEASED);
-        this._buttons.delete(button);
-        if (a.action === 'double_click') await pause(80);
-      }
-    } else if (a.action === 'key') {
-      for (const name of a.keys) {
-        check();
-        const key = keyNames[name];
-        this._keys.add(key);
-        this._keyboard.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.PRESSED);
-      }
-      await pause(30);
-    } else if (a.action === 'type') {
-      for (const char of a.text) {
-        check();
-        const key =
-          char === '\n'
-            ? keyNames.enter
-            : char === '\t'
-              ? keyNames.tab
-              : Clutter.unicode_to_keysym(char.codePointAt(0));
-        this._keys.add(key);
-        this._keyboard.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.PRESSED);
-        this._keyboard.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.RELEASED);
-        this._keys.delete(key);
-        await pause(8);
-      }
-    } else if (a.action === 'scroll') {
-      for (let n = 0; n < Math.abs(Math.round(a.amount)); n++) {
-        check();
-        this._pointer.notify_discrete_scroll(
-          GLib.get_monotonic_time(),
-          a.amount > 0 ? Clutter.ScrollDirection.DOWN : Clutter.ScrollDirection.UP,
-          Clutter.ScrollSource.WHEEL,
-        );
-        await pause(30);
-      }
-    }
-  }
-
   _wait(ms) {
     return new Promise((resolve) => {
       const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
@@ -546,15 +344,6 @@ export default class FridayDesktop extends Extension {
     });
   }
 
-  _release() {
-    for (const key of [...(this._keys ?? [])].reverse())
-      this._keyboard?.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.RELEASED);
-    for (const button of this._buttons ?? [])
-      this._pointer?.notify_button(GLib.get_monotonic_time(), button, Clutter.ButtonState.RELEASED);
-    this._keys?.clear();
-    this._buttons?.clear();
-  }
-
   _stop(clear = true, reason = 'user_stop') {
     const runId = this._lease;
     if (runId && !['completed', 'superseded'].includes(reason))
@@ -563,12 +352,9 @@ export default class FridayDesktop extends Extension {
         new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason })]),
       );
     if (clear) this._clearCaption();
-    this._grant = null;
-    this._usesGrant = false;
     if (this._lease) this._lastStop = { runId: this._lease, reason, at: Date.now() };
     this._lease = null;
     this._observation = null;
-    this._approvedAction = null;
     if (this._ownerWatch) Gio.bus_unwatch_name(this._ownerWatch);
     this._ownerWatch = 0;
     this._owner = null;
@@ -580,10 +366,8 @@ export default class FridayDesktop extends Extension {
         null,
         () => this._clearCaption(),
       );
-    this._dismissConfirmation?.(false);
     this._endMark();
     if (clear) this._clear();
-    this._release();
     for (const [id, resolve] of this._timers ?? []) {
       GLib.source_remove(id);
       resolve();
@@ -741,7 +525,6 @@ export default class FridayDesktop extends Extension {
   }
 
   _invalidate() {
-    this._grant = null;
     this._scene++;
     this._observation = null;
     if (!this._mark) this._clear();
@@ -812,7 +595,6 @@ export default class FridayDesktop extends Extension {
     if (!this._mark) {
       if (
         !this._busy &&
-        !this._confirmDialog &&
         [Clutter.EventType.BUTTON_PRESS, Clutter.EventType.SCROLL, Clutter.EventType.KEY_PRESS].includes(type)
       )
         this._invalidate();

@@ -35,20 +35,20 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import type {
-  BuddySettings,
-  FridayState,
-  ListeningState,
-  RunStatus,
-  TaskRecord,
-  TranscriptResult,
+import {
+  activeStatuses,
+  type BuddySettings,
+  type FridayState,
+  type ListeningState,
+  type RunStatus,
+  type TaskRecord,
+  type TranscriptResult,
 } from '../electron/types';
 import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { VoiceFollowUp } from './voice-follow-up';
 import { FridayPresence } from './FridayPresence';
 
-const activeStatuses = new Set<RunStatus>(['queued', 'thinking', 'acting', 'awaiting_approval']);
 const starterIdeas = [
   'Look at my screen and explain what I am seeing',
   'Circle the main action in the current app',
@@ -74,7 +74,6 @@ function formatRelativeTime(timestamp: number) {
 }
 
 function statusLabel(status: RunStatus) {
-  if (status === 'queued') return 'Queued';
   if (status === 'thinking') return 'Planning';
   if (status === 'acting') return 'Working';
   if (status === 'awaiting_approval') return 'Needs approval';
@@ -237,17 +236,8 @@ function TaskView({
               <i />
             </span>
             <span>
-              <strong>
-                {task.status === 'queued'
-                  ? 'Waiting for the current task'
-                  : task.status === 'awaiting_approval'
-                    ? 'Paused for your approval'
-                    : 'Working it through'}
-              </strong>
-              <small>
-                {currentStep?.title ||
-                  (task.status === 'queued' ? 'This task will start next.' : 'Understanding what needs to happen…')}
-              </small>
+              <strong>{task.status === 'awaiting_approval' ? 'Paused for your approval' : 'Working it through'}</strong>
+              <small>{currentStep?.title || 'Understanding what needs to happen…'}</small>
             </span>
           </div>
         )}
@@ -310,7 +300,7 @@ function TaskView({
                   {Object.entries(task.timings)
                     .map(
                       ([name, ms]) =>
-                        `${({ queueMs: 'Queue', startupMs: 'Agent startup', firstModelMs: 'First model action', firstTextMs: 'First words', firstDrawingMs: 'First drawing', totalMs: 'Total' } as Record<string, string>)[name] || name}: ${(ms / 1000).toFixed(1)}s`,
+                        `${({ startupMs: 'Agent startup', firstModelMs: 'First model action', firstTextMs: 'First words', firstDrawingMs: 'First drawing', totalMs: 'Total' } as Record<string, string>)[name] || name}: ${(ms / 1000).toFixed(1)}s`,
                     )
                     .join(' · ')}
                 </p>
@@ -697,7 +687,6 @@ export default function App() {
   const [checkingDesktop, setCheckingDesktop] = useState(true);
   const [marking, setMarking] = useState(false);
   const [marked, setMarked] = useState(false);
-  const [conversationId, setConversationId] = useState<string | undefined>();
   const directVoiceRef = useRef(false);
   const [directVoice, setDirectVoice] = useState(false);
   const pttHeldRef = useRef(false);
@@ -747,10 +736,9 @@ export default function App() {
       setSubmitting(true);
       setActionError(undefined);
       try {
-        const created = await window.buddy.submit(cleaned, conversationId);
+        const created = await window.buddy.submit(cleaned);
         if (resumeVoice) voiceFollowUpRef.current.submitted(created.id);
         setSelected(created.id);
-        setConversationId(created.conversationId);
         setMarked(false);
         setView('now');
         setShowActivity(false);
@@ -764,7 +752,7 @@ export default function App() {
         setSubmitting(false);
       }
     },
-    [stopListening, conversationId],
+    [stopListening],
   );
 
   const beginSegment = useCallback(
@@ -939,7 +927,6 @@ export default function App() {
         setSettings(config);
         setFriday(runtime);
         setSelected(history.find((item) => item.role !== 'child')?.id);
-        setConversationId(runtime.parentId);
       })
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
@@ -1127,7 +1114,7 @@ export default function App() {
 
   async function newTask() {
     try {
-      setConversationId(await window.buddy.newConversation());
+      await window.buddy.newConversation();
     } catch (error) {
       setActionError(errorMessage(error, 'Could not start a new conversation'));
       return;
@@ -1396,7 +1383,6 @@ export default function App() {
               tasks={tasks}
               onOpenTask={(id) => {
                 setSelected(id);
-                setConversationId(tasks.find((item) => item.id === id)?.conversationId);
                 setView('now');
                 setShowActivity(false);
               }}

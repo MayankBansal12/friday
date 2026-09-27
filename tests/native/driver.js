@@ -42,10 +42,6 @@ export default class Driver extends Extension {
           grabbed: f?._grab?.get_seat_state(),
         };
       }
-      if (c.op === 'inputState') {
-        const f = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
-        result = { keys: f?._keys.size, buttons: f?._buttons.size };
-      }
       if (c.op === 'drawingGeometry') {
         const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
         const target = global
@@ -162,14 +158,6 @@ export default class Driver extends Extension {
         const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
         if (!friday?._replyButton) throw new Error('No companion reply button');
         friday._replyButton.emit('clicked', 1);
-      }
-      if (c.op === 'approve') {
-        // Invoke the actual dialog button, exactly as a user would, only in the isolated session.
-        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
-        if (!friday?._confirmDialog) throw new Error('No approval dialog');
-        const buttons = friday._confirmDialog.buttonLayout.get_children();
-        if (c.bounded && buttons.length !== 3) throw new Error('Bounded permission was not offered');
-        buttons.at(c.bounded ? -2 : -1).emit('clicked', 1);
       }
       invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(result)]));
     } catch (e) {
