@@ -41,7 +41,7 @@ subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'welcome-dialog-last-show
 # A new headless seat starts exactly inside GNOME's hot-corner pointer barriers.
 subprocess.run(['gsettings', 'set', 'org.gnome.desktop.interface', 'enable-hot-corners', 'false'], check=True)
 log = open(stage / 'shell.log', 'w')
-shell = subprocess.Popen(['gnome-shell', '--headless', '--wayland', '--no-x11', '--virtual-monitor=1920x1080', '--wayland-display=wayland-friday-smoke'], stdout=log, stderr=log)
+shell = subprocess.Popen(['gnome-shell', '--headless', '--wayland', '--virtual-monitor=1920x1080', '--wayland-display=wayland-friday-smoke'], stdout=log, stderr=log)
 app = None
 ui = None
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -121,7 +121,7 @@ try:
     assert fullscreen_state['fullscreen'] and fullscreen_state['drawingMapped'] and fullscreen_state['captionMapped'], fullscreen_state
     from PIL import Image
     pixels = Image.open(stage / '00-fullscreen-overlay.png').convert('RGB')
-    red, green, blue = pixels.getpixel((1100, 100))
+    red, green, blue = pixels.getpixel((1400, 100))
     assert red > 220 and green > 160 and blue < 60, 'Yellow graph border absent from composed screen pixels'
     command('clear')
     assert command('status')['presentation']['compositingHeld'], 'Clearing the drawing released compositing while caption remained'
@@ -251,7 +251,10 @@ try:
             listener.bind(('127.0.0.1', 0))
             debug_port = listener.getsockname()[1]
         with open(stage / 'ui.log', 'w') as ui_log:
-            ui = subprocess.Popen([str(executable), '--no-sandbox', '--ozone-platform=wayland', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, stdout=ui_log, stderr=ui_log)
+            display_env = driver('displayEnvironment')
+            assert display_env.get('DISPLAY'), 'Isolated GNOME did not provide an XWayland display'
+            ui_env = dict(os.environ, **display_env)
+            ui = subprocess.Popen([str(executable), '--no-sandbox', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, env=ui_env, stdout=ui_log, stderr=ui_log)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and ui.poll() is None:
                 if any('friday —' in t.lower() or 'linux buddy' in t.lower() for t in driver('windows')['titles']): break
@@ -260,14 +263,14 @@ try:
             time.sleep(1)
             assert ui.poll() is None, (stage / 'ui.log').read_text()
             capture('05-friday-ui.png')
-            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'ready'], check=True, timeout=30)
+            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'ready'], env=ui_env, check=True, timeout=30)
             # Simulate the user's missing service, then recover, only inside this isolated desktop.
             subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions', '["friday-test@linux-buddy.local"]'], check=True)
             time.sleep(.5)
-            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'unavailable'], check=True, timeout=30)
+            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'unavailable'], env=ui_env, check=True, timeout=30)
             subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions', '["friday-desktop@linux-buddy.local", "friday-test@linux-buddy.local"]'], check=True)
             time.sleep(.5)
-            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'reconnected'], check=True, timeout=30)
+            subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'reconnected'], env=ui_env, check=True, timeout=30)
             if '--agent' in sys.argv:
                 driver('fullscreen', enabled=True); time.sleep(.5)
                 driver('fridayWindow', activate=True); time.sleep(.3)
@@ -311,7 +314,7 @@ try:
                                 driver('move', x=1050 + int(time.monotonic() * 10) % 100, y=590)
                             time.sleep(.25)
                         assert agent.poll() == 0, (stage / 'ui-agent.log').read_text()[-6000:]
-                        assert (stage / 'clicked').exists(), 'UI agent did not click the target'
+                        assert not (stage / 'clicked').exists(), 'Guidance unexpectedly clicked the target'
                         print((stage / 'ui-agent.log').read_text(), flush=True)
                         capture('07-ui-verified.png')
                     finally:

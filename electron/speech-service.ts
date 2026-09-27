@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ParakeetClient, type ParakeetOptions } from './parakeet-client.js';
 import type { TranscriptResult } from './types.js';
 
 function run(command: string, args: string[], timeoutMs: number) {
@@ -18,11 +20,11 @@ function run(command: string, args: string[], timeoutMs: number) {
       callback();
     };
     const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
+      child.kill('SIGKILL');
       finish(() => reject(new Error(`${command} timed out after ${timeoutMs}ms`)));
     }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+    child.stdout.on('data', (chunk: Buffer) => (stdout = `${stdout}${chunk.toString('utf8')}`.slice(-5000)));
+    child.stderr.on('data', (chunk: Buffer) => (stderr = `${stderr}${chunk.toString('utf8')}`.slice(-5000)));
     child.on('error', (error) => finish(() => reject(error)));
     child.on('close', (code) => {
       finish(() =>
@@ -32,17 +34,6 @@ function run(command: string, args: string[], timeoutMs: number) {
       );
     });
   });
-}
-
-function transcriptFrom(value: unknown): string | undefined {
-  if (typeof value === 'string') return value.trim() || undefined;
-  if (!value || typeof value !== 'object') return undefined;
-  const record = value as Record<string, unknown>;
-  for (const key of ['text', 'transcript', 'transcription', 'result']) {
-    const found = transcriptFrom(record[key]);
-    if (found) return found;
-  }
-  return undefined;
 }
 
 export function detectWakeCommand(text: string, wakeWord: string, armed: boolean) {
@@ -64,66 +55,103 @@ export function detectWakeCommand(text: string, wakeWord: string, armed: boolean
 
 export class SpeechService {
   private armed = false;
+  private generation = 0;
+  private busy = false;
+  private readonly client: ParakeetClient;
 
   constructor(
     private wakeWord: string,
-    private readonly model = process.env.LINUX_BUDDY_STT_MODEL ||
-      'handy-computer/canary-180m-flash-gguf/canary-180m-flash-Q8_0.gguf',
-  ) {}
+    options: Partial<ParakeetOptions> = {},
+  ) {
+    this.client = new ParakeetClient({
+      workerPath: fileURLToPath(new URL('../native/parakeet-worker.py', import.meta.url)),
+      ...options,
+    });
+  }
+
+  prepare() {
+    return this.client.prepare();
+  }
 
   setWakeWord(value: string) {
     this.wakeWord = value.trim() || 'Friday';
+    this.reset();
   }
 
   reset() {
     this.armed = false;
+    this.generation++;
+  }
+
+  close() {
+    this.reset();
+    this.client.close();
   }
 
   async transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> {
     if (audio.byteLength < 1000) return { text: '', wakeDetected: false };
+    if (this.busy) throw new Error('A transcription is already in progress.');
+    this.busy = true;
+    const generation = this.generation;
     const started = Date.now();
-    const directory = await mkdtemp(join(tmpdir(), 'friday-speech-'));
+    let directory: string | undefined;
     const suffix = mimeType.includes('ogg') ? '.ogg' : mimeType.includes('wav') ? '.wav' : '.webm';
-    const input = join(directory, `utterance${suffix}`);
-    const wav = join(directory, `${randomUUID()}.wav`);
     try {
+      await this.prepare();
+      const modelReady = Date.now();
+      directory = await mkdtemp(join(tmpdir(), 'friday-speech-'));
+      const input = join(directory, `utterance${suffix}`);
+      const wav = join(directory, `${randomUUID()}.wav`);
       await writeFile(input, Buffer.from(audio));
       await run(
         process.env.LINUX_BUDDY_FFMPEG_BIN || 'ffmpeg',
-        ['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-i',
+          input,
+          '-t',
+          '31',
+          '-ar',
+          '16000',
+          '-ac',
+          '1',
+          '-c:a',
+          'pcm_s16le',
+          wav,
+        ],
         30_000,
       );
       const converted = Date.now();
-      const { stdout } = await run(
-        process.env.LINUX_BUDDY_HANDY_BIN || 'handy',
-        ['--transcribe-file', wav, '--model', this.model, '--json'],
-        120_000,
-      );
-      let text = '';
-      try {
-        text = transcriptFrom(JSON.parse(stdout)) ?? '';
-      } catch {
-        text = stdout.trim().split('\n').at(-1)?.trim() ?? '';
-      }
-      if (!text) return { text: '', wakeDetected: false };
+      const { text, inferenceMs } = await this.client.transcribe(wav);
+      // Results from an old listening interaction must never arm the next one.
+      if (generation !== this.generation) return { text: '', wakeDetected: false };
       // Keep transcribed background speech from becoming a command. A segment must
       // contain the wake word, or immediately follow a wake-word-only segment.
-      const detected = detectWakeCommand(text, this.wakeWord, this.armed);
+      const detected = text
+        ? detectWakeCommand(text, this.wakeWord, this.armed)
+        : { result: { text: '', wakeDetected: false }, armed: this.armed };
       this.armed = detected.armed;
       return {
         ...detected.result,
         timings: {
-          conversionMs: converted - started,
+          modelWaitMs: modelReady - started,
+          conversionMs: converted - modelReady,
           transcriptionMs: Date.now() - converted,
+          inferenceMs,
           totalMs: Date.now() - started,
         },
       };
-    } catch {
+    } catch (error) {
       throw new Error(
-        'Canary could not transcribe this utterance. Check that Handy and the configured model are available.',
+        `Local Parakeet transcription failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      this.busy = false;
+      if (directory) await rm(directory, { recursive: true, force: true });
     }
   }
 }

@@ -21,7 +21,6 @@ import {
   Laptop,
   LoaderCircle,
   Mic,
-  Maximize2,
   Minimize2,
   Minus,
   Plus,
@@ -36,10 +35,18 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import type { BuddySettings, ListeningState, RunStatus, TaskRecord, TranscriptResult } from '../electron/types';
+import type {
+  BuddySettings,
+  FridayState,
+  ListeningState,
+  RunStatus,
+  TaskRecord,
+  TranscriptResult,
+} from '../electron/types';
 import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { VoiceFollowUp } from './voice-follow-up';
+import { FridayPresence } from './FridayPresence';
 
 const activeStatuses = new Set<RunStatus>(['queued', 'thinking', 'acting', 'awaiting_approval']);
 const starterIdeas = [
@@ -88,7 +95,7 @@ function voiceCopy(state: ListeningState, wakeWord: string) {
     return { eyebrow: 'Wake word heard', title: 'Go ahead.', detail: 'I’m ready for the task.' };
   }
   if (state === 'transcribing') {
-    return { eyebrow: 'On-device speech', title: 'Making sense of that…', detail: 'Canary is transcribing locally.' };
+    return { eyebrow: 'On-device speech', title: 'Making sense of that…', detail: 'Transcribing on your computer.' };
   }
   if (state === 'error') {
     return {
@@ -633,7 +640,7 @@ function SettingsDialog({
               <Laptop size={15} />
               <span>
                 <strong>Audio</strong>
-                <small>Transcribed locally with Handy + Canary.</small>
+                <small>Speech is transcribed on your computer.</small>
               </span>
             </div>
             <div>
@@ -659,6 +666,7 @@ function SettingsDialog({
 
 export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [friday, setFriday] = useState<FridayState>();
   const [selected, setSelected] = useState<string>();
   const [view, setView] = useState<ProductView>('now');
   const [expanded, setExpanded] = useState(false);
@@ -696,10 +704,14 @@ export default function App() {
   const [speaking, setSpeaking] = useState(false);
   const voiceFollowUpRef = useRef(new VoiceFollowUp());
   const submittingRef = useRef(false);
-  const spokenTasksRef = useRef(new Set<string>());
+  const conversationOpenRef = useRef(false);
+  const followUpPendingRef = useRef(false);
 
   const task = useMemo(() => (selected ? tasks.find((item) => item.id === selected) : undefined), [selected, tasks]);
-  const activeTask = useMemo(() => tasks.find((item) => activeStatuses.has(item.status)), [tasks]);
+  const activeTask = useMemo(
+    () => tasks.find((item) => item.role !== 'child' && activeStatuses.has(item.status)),
+    [tasks],
+  );
   const wakeWord = settings?.wakeWord || 'Friday';
 
   const updateListening = useCallback((state: ListeningState) => {
@@ -709,6 +721,8 @@ export default function App() {
 
   const stopListening = useCallback(() => {
     voiceFollowUpRef.current.cancel();
+    followUpPendingRef.current = false;
+    conversationOpenRef.current = false;
     void window.buddy.silence();
     setSpeaking(false);
     generationRef.current += 1;
@@ -788,7 +802,7 @@ export default function App() {
           }
           if (generation !== generationRef.current) return;
           if (result.text) setHeard(result.text);
-          const command = directVoiceRef.current ? result.text : result.command;
+          const command = directVoiceRef.current || conversationOpenRef.current ? result.text : result.command;
           if (command) {
             stopListening();
             await runPrompt(command, true);
@@ -798,7 +812,8 @@ export default function App() {
             stopListening();
             return;
           }
-          updateListening(result.wakeDetected ? 'armed' : 'listening');
+          if (result.wakeDetected) conversationOpenRef.current = true;
+          updateListening(conversationOpenRef.current ? 'armed' : 'listening');
           beginSegmentRef.current?.(stream, analyser, generation);
         } catch (error) {
           setActionError(errorMessage(error, 'Local speech transcription failed.'));
@@ -836,6 +851,8 @@ export default function App() {
             return;
           }
         } else if (!directVoiceRef.current && now - startedAt > 10_000) {
+          conversationOpenRef.current = false;
+          updateListening('listening');
           recorder.stop();
           return;
         }
@@ -855,12 +872,16 @@ export default function App() {
   }, [beginSegment]);
 
   const startListening = useCallback(
-    async (direct = false) => {
+    async (direct = false, engaged = false) => {
+      conversationOpenRef.current = engaged || direct;
       directVoiceRef.current = direct;
       setDirectVoice(direct);
       void window.buddy.silence();
       setSpeaking(false);
-      if (streamRef.current?.active) return;
+      if (streamRef.current?.active) {
+        updateListening(engaged ? 'armed' : 'listening');
+        return;
+      }
       setActionError(undefined);
       setHeard('');
       const generation = generationRef.current + 1;
@@ -898,7 +919,7 @@ export default function App() {
             { once: true },
           );
         });
-        updateListening('listening');
+        updateListening(engaged || direct ? 'armed' : 'listening');
         beginSegmentRef.current?.(stream, analyser, generation);
       } catch (error) {
         setActionError(errorMessage(error, 'Allow microphone access to talk to Friday.'));
@@ -910,14 +931,15 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
-    void Promise.all([window.buddy.listTasks(), window.buddy.getSettings()])
-      .then(([history, config]) => {
+    void Promise.all([window.buddy.listTasks(), window.buddy.getSettings(), window.buddy.fridayState()])
+      .then(([history, config, runtime]) => {
         if (disposed) return;
         setTasks(history);
         persistedSettingsRef.current = config;
         setSettings(config);
-        setSelected(history[0]?.id);
-        setConversationId(history[0]?.conversationId);
+        setFriday(runtime);
+        setSelected(history.find((item) => item.role !== 'child')?.id);
+        setConversationId(runtime.parentId);
       })
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
@@ -925,37 +947,28 @@ export default function App() {
       setTasks((current) =>
         [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
       );
-      setSelected((current) => current || next.id);
-      const followUp = voiceFollowUpRef.current.taskChanged(next);
-      if (
-        next.status === 'completed' &&
-        next.response &&
-        persistedSettingsRef.current?.autoSpeak &&
-        !spokenTasksRef.current.has(next.id)
-      ) {
-        spokenTasksRef.current.add(next.id);
-        stopListening();
-        const generation = generationRef.current;
-        setSpeaking(true);
-        void window.buddy
-          .speak(next.response)
-          .then(() => {
-            if (followUp && generation === generationRef.current) void startListening();
-          })
-          .catch((error) => setActionError(errorMessage(error, 'Could not read aloud.')))
-          .finally(() => {
-            if (generation === generationRef.current) setSpeaking(false);
-          });
-      } else if (followUp) void startListening();
+      if (next.role !== 'child') {
+        setSelected((current) => current || next.id);
+        if (voiceFollowUpRef.current.taskChanged(next)) followUpPendingRef.current = true;
+      }
+    });
+    const removeState = window.buddy.onFridayState((runtime) => {
+      setFriday(runtime);
+      setSpeaking(runtime.presentation.speaking);
+      if (!runtime.presentation.speaking && followUpPendingRef.current) {
+        followUpPendingRef.current = false;
+        void startListening(false, true);
+      }
     });
     const removeListen = window.buddy.onListen(() => {
       setView('now');
-      void startListening();
+      void startListening(false, true);
     });
     const removeStopListen = window.buddy.onStopListening(stopListening);
     return () => {
       disposed = true;
       removeTask();
+      removeState();
       removeListen();
       removeStopListen();
       stopListening();
@@ -1282,72 +1295,36 @@ export default function App() {
   );
   if (!expanded)
     return (
-      <main className="shell compact-shell">
-        <section className="friday-window compact-window" aria-label="Friday companion">
-          <header className="compact-header">
-            <FridayMark compact />
-            <span className={`compact-presence ${presence.tone}`}>
-              <strong>Friday</strong>
-              <small>{speaking ? 'Speaking' : presence.label}</small>
-            </span>
-            <button
-              className="icon-button"
-              type="button"
-              title="Settings"
-              aria-label="Open settings"
-              onClick={() => {
-                void window.buddy.setExpanded(true);
-                setShowSettings(true);
-              }}
-            >
-              <Settings size={16} />
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              title="Open conversation"
-              aria-label="Open conversation"
-              onClick={() => void window.buddy.setExpanded(true)}
-            >
-              <Maximize2 size={16} />
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              title="Minimize Friday"
-              aria-label="Minimize Friday"
-              onClick={() => void window.buddy.hide()}
-            >
-              <Minus size={16} />
-            </button>
-          </header>
-          <div className="compact-caption" aria-live="polite">
-            {actionError ? (
-              <p role="alert">{actionError}</p>
-            ) : task?.error ? (
-              <p role="alert">{task.error}</p>
-            ) : task?.approval ? (
-              <button type="button" className="quiet-button" onClick={() => void window.buddy.setExpanded(true)}>
-                Review: {task.approval.title}
-              </button>
-            ) : (
-              <p>
-                {task?.response ||
-                  (task?.status === 'cancelled'
-                    ? task.stopReason === 'user'
-                      ? 'Stopped by you.'
-                      : task.stopReason === 'escape'
-                        ? 'Stopped with Escape.'
-                        : 'Task stopped.'
-                    : activeTask
-                      ? activeTask.steps.at(-1)?.title || 'Thinking…'
-                      : 'Tell me what you need. I can look, explain, draw, and help you do it.')}
-              </p>
-            )}
-          </div>
-          {composer}
-        </section>
-      </main>
+      <FridayPresence
+        state={friday}
+        task={activeTask || tasks.find((item) => item.conversationId === friday?.parentId)}
+        tasks={tasks}
+        listening={listenState}
+        speaking={speaking}
+        level={voiceLevel}
+        heard={heard}
+        error={actionError}
+        onTalk={() => {
+          void startListening(false, true);
+        }}
+        onSubmit={(value) => {
+          void runPrompt(value);
+        }}
+        onStop={() => {
+          stopListening();
+          void window.buddy.stopForeground().catch((error) => setActionError(String(error)));
+        }}
+        onDismiss={stopListening}
+        onDetails={() => {
+          void window.buddy.setExpanded(true);
+        }}
+        onStopChild={(id) => {
+          void window.buddy.stopChild(id).catch((error) => setActionError(String(error)));
+        }}
+        onApprove={(id, approved) => {
+          void window.buddy.approve(id, approved).catch((error) => setActionError(String(error)));
+        }}
+      />
     );
   return (
     <main className="shell">

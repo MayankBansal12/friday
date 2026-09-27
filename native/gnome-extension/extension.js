@@ -174,6 +174,25 @@ export default class FridayDesktop extends Extension {
   }
 
   async _command(c, sender) {
+    if (c.op === 'place_companion') {
+      if (!Number.isInteger(c.pid) || !['orb', 'bar', 'panel', 'details'].includes(c.layout))
+        throw new Error('Invalid companion placement');
+      const win = global
+        .get_window_actors()
+        .map((actor) => actor.meta_window)
+        .find(
+          (candidate) =>
+            candidate.get_pid() === c.pid &&
+            /linux.buddy|friday|electron/i.test(candidate.get_wm_class() || candidate.get_title() || ''),
+        );
+      if (!win) return { placed: false };
+      const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
+      const width = Math.min(Math.max(Number(c.width) || 96, 76), Math.min(800, area.width - 24));
+      const height = Math.min(Math.max(Number(c.height) || 96, 60), Math.min(850, area.height - 24));
+      const x = c.layout === 'orb' ? area.x + area.width - width - 18 : area.x + Math.round((area.width - width) / 2);
+      win.move_resize_frame(false, x, area.y + 12, width, height);
+      return { placed: true, x, y: area.y + 12, width, height };
+    }
     if (c.op === 'caption') {
       if (sender !== this._captionOwner || c.runId !== this._captionRun) throw new Error('Caption permission expired');
       this._showCaption(String(c.text ?? '').slice(0, 220), c.finished === true);
@@ -184,6 +203,7 @@ export default class FridayDesktop extends Extension {
       return {
         ready: true,
         protocolVersion: 4,
+        companionLayout: true,
         presentation: this._presentation(),
         lastStop: this._lastStop ?? null,
         display: this._display(),
@@ -640,22 +660,22 @@ export default class FridayDesktop extends Extension {
     if (!this._caption) {
       this._caption = new St.BoxLayout({
         vertical: true,
-        reactive: false,
+        reactive: true,
+        track_hover: true,
         can_focus: false,
         style:
-          'background-color: rgba(27,31,27,0.96); color: #fbfaf4; border: 1px solid #748042; border-radius: 18px; padding: 16px; spacing: 10px;',
-        width: 420,
+          'background-color: rgba(27,31,27,0.96); color: #fbfaf4; border: 1px solid #748042; border-radius: 18px; padding: 12px 16px; spacing: 10px;',
+        width: 520,
       });
       this._caption.connect('notify::visible', () => this._syncCompositing());
+      const header = new St.BoxLayout({ style: 'spacing: 14px;' });
       this._captionTitle = new St.Label({
         text: 'Friday',
+        x_expand: true,
+        y_align: Clutter.ActorAlign.CENTER,
         style: 'font-size: 13px; font-weight: bold; color: #d9ff63;',
       });
-      this._caption.add_child(this._captionTitle);
-      this._captionLabel = new St.Label({ text, style: 'font-size: 15px; color: #fbfaf4;' });
-      this._captionLabel.clutter_text.line_wrap = true;
-      this._caption.add_child(this._captionLabel);
-      const buttons = new St.BoxLayout({ style: 'spacing: 14px;' });
+      header.add_child(this._captionTitle);
       this._replyButton = new St.Button({
         label: 'Reply',
         can_focus: false,
@@ -671,40 +691,26 @@ export default class FridayDesktop extends Extension {
         style: 'color: #fbfaf4; padding: 6px 14px;',
       });
       this._captionStop.connect('clicked', () => this._stop(true, 'user_stop'));
-      buttons.add_child(this._replyButton);
-      buttons.add_child(this._captionStop);
-      this._caption.add_child(buttons);
+      header.add_child(this._replyButton);
+      header.add_child(this._captionStop);
+      this._caption.add_child(header);
+      this._captionLabel = new St.Label({ text, visible: false, style: 'font-size: 14px; color: #fbfaf4;' });
+      this._captionLabel.clutter_text.line_wrap = true;
+      this._caption.add_child(this._captionLabel);
+      this._caption.connect('notify::hover', () => {
+        this._captionLabel.visible = this._caption.hover;
+      });
       Main.layoutManager.addTopChrome(this._caption, {
         affectsInputRegion: true,
         affectsStruts: false,
         trackFullscreen: false,
       });
     }
-    this._captionTitle.text = finished ? 'Friday' : 'Friday · Working';
+    this._captionTitle.text = finished ? 'Friday · Ready' : 'Friday · Guiding you';
     this._captionLabel.text = text || 'Friday is working…';
     this._captionStop.label = finished ? 'Clear' : 'Stop';
     this._captionExpires = Date.now() + 90000;
-    const height = 240;
-    const candidates = [
-      { x: 1480, y: 820 },
-      { x: 20, y: 820 },
-      { x: 1480, y: 50 },
-      { x: 20, y: 50 },
-    ];
-    const box =
-      candidates.find((candidate) =>
-        [...this._items.values()].every((item) => {
-          const xs = [item.x, item.toX ?? item.x, item.x + (item.width ?? 0), ...(item.points?.map((p) => p.x) ?? [])];
-          const ys = [item.y, item.toY ?? item.y, item.y + (item.height ?? 0), ...(item.points?.map((p) => p.y) ?? [])];
-          return (
-            Math.max(...xs) + 20 < candidate.x ||
-            Math.min(...xs) - 20 > candidate.x + 420 ||
-            Math.max(...ys) + 20 < candidate.y ||
-            Math.min(...ys) - 20 > candidate.y + height
-          );
-        }),
-      ) ?? candidates[0];
-    this._caption.set_position(box.x, box.y);
+    this._caption.set_position(700, 44);
     this._caption.show();
     this._raiseOverlays();
     this._syncCompositing();

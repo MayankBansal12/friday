@@ -1,10 +1,22 @@
 /// <reference types="vite/client" />
 import type { DesktopStatus } from '../electron/desktop-status';
-import type { BuddySettings, ListeningState, TaskRecord, TranscriptResult } from '../electron/types';
+import type {
+  BuddySettings,
+  FridayState,
+  ListeningState,
+  SurfaceLayout,
+  TaskRecord,
+  TranscriptResult,
+} from '../electron/types';
 
 declare global {
   interface Window {
     buddy: {
+      fridayState(): Promise<FridayState>;
+      stopChild(id: string): Promise<unknown>;
+      stopForeground(): Promise<void>;
+      setSurface(layout: SurfaceLayout, height?: number): Promise<void>;
+      onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, conversationId?: string): Promise<TaskRecord>;
       newConversation(): Promise<string>;

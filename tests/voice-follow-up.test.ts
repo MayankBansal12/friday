@@ -35,3 +35,14 @@ describe('voice follow-up listening', () => {
     expect(followUp.taskChanged(task('voice-task', 'completed'))).toBe(false);
   });
 });
+
+it('accepts the new parent thinking event before IPC resolves, ignoring children', () => {
+  const followUp = new VoiceFollowUp();
+  followUp.beginSubmission();
+  expect(followUp.taskChanged({ ...task('child', 'thinking'), role: 'child' })).toBe(false);
+  expect(followUp.taskChanged({ ...task('parent', 'thinking'), role: 'parent' })).toBe(false);
+  expect(followUp.taskChanged({ ...task('child', 'completed'), role: 'child' })).toBe(false);
+  expect(followUp.taskChanged({ ...task('parent', 'completed'), role: 'parent' })).toBe(true);
+  followUp.submitted('parent');
+  expect(followUp.taskChanged(task('parent', 'completed'))).toBe(false);
+});

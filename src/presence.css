@@ -1,0 +1,351 @@
+.presence-root {
+  width: 100%;
+  height: 100%;
+  padding: 10px;
+  font-family: Inter, system-ui, sans-serif;
+  color: #f3f4ef;
+}
+.orb-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 12px;
+}
+.friday-orb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid #526047;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 22%, #354232, #161c19 72%);
+  box-shadow:
+    0 5px 20px #0005,
+    inset 0 1px #c7ffc51f;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+.friday-orb:hover {
+  transform: scale(1.04);
+  border-color: #b8d987;
+}
+.presence-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.presence-mark i {
+  display: block;
+  width: 4px;
+  height: 12px;
+  background: #d9ff91;
+  border-radius: 9px;
+}
+.presence-mark i:nth-child(2) {
+  height: 23px;
+}
+.presence-mark i:nth-child(3) {
+  height: 16px;
+}
+.presence-mark.working i,
+.presence-mark.speaking i {
+  animation: friday-breathe 1.4s ease-in-out infinite;
+}
+.presence-mark i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.presence-mark i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes friday-breathe {
+  50% {
+    transform: scaleY(0.55);
+    opacity: 0.6;
+  }
+}
+.orb-badge {
+  position: absolute;
+  right: -1px;
+  top: -2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #e3efdb;
+  color: #203023;
+  font-size: 10px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  border: 2px solid #1a211b;
+}
+.orb-badge.ready {
+  background: #d9ff91;
+}
+.orb-listening {
+  position: absolute;
+  bottom: 5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #d9ff91;
+}
+.orb-details {
+  position: absolute;
+  right: 3px;
+  bottom: 4px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  color: #e4e9dd;
+  background: #202821;
+  cursor: pointer;
+}
+.friday-presence {
+  overflow: hidden;
+  border: 1px solid #4b5747;
+  border-radius: 21px;
+  background: linear-gradient(125deg, #242d27f7, #171e1bf7);
+  box-shadow:
+    0 5px 24px #0005,
+    inset 0 1px #fff08;
+}
+.presence-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  height: 54px;
+  padding: 0 14px;
+}
+.presence-heading {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.presence-heading strong {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.presence-heading span {
+  font-size: 11px;
+  color: #afbbae;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.presence-action {
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #afbead;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+}
+.presence-action:hover,
+.presence-action.lit {
+  color: #e1ffa6;
+  background: #ffffff0b;
+}
+.voice-meter {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 23px;
+}
+.voice-meter i {
+  width: 3px;
+  height: 20px;
+  border-radius: 3px;
+  background: #c7ed96;
+  transition: transform 0.07s;
+}
+.presence-body {
+  max-height: 340px;
+  overflow: auto;
+  border-top: 1px solid #ffffff0b;
+  padding: 18px;
+  scrollbar-width: thin;
+  scrollbar-color: #58634b transparent;
+}
+.presence-reply {
+  font-size: 14px;
+  line-height: 1.65;
+  margin: 0 0 17px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.presence-reply.is-error {
+  color: #f1b69d;
+}
+.presence-hint {
+  color: #b2bdb0;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 20px;
+}
+.heard-text {
+  color: #d8e6c4;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.background-list {
+  margin-top: 18px;
+}
+.background-list h2 {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #a3b09e;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.background-list h2 span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.background-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #ffffff08;
+}
+.task-dot {
+  color: #b7d294;
+  width: 19px;
+  display: grid;
+  place-items: center;
+}
+.task-dot > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #aeb695;
+}
+.task-dot.needs_input > span,
+.task-dot.failed > span {
+  background: #e7b684;
+}
+.background-task-copy {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.background-task-copy strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.background-task-copy small {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #9eac9b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.presence-footer {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 17px;
+}
+.presence-footer button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 0;
+  color: #a5b19f;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.presence-footer button:hover {
+  color: #e2efcc;
+}
+.presence-composer {
+  display: flex;
+  margin-top: 17px;
+  padding: 5px;
+  border: 1px solid #687658;
+  border-radius: 10px;
+  background: #101712;
+}
+.presence-composer input {
+  flex: 1;
+  min-width: 0;
+  color: #eef5e6;
+  background: none;
+  border: 0;
+  outline: none;
+  padding: 7px;
+  font: inherit;
+  font-size: 13px;
+}
+.presence-composer button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  border: 0;
+  border-radius: 7px;
+  color: #28331f;
+  background: #d9ff91;
+  cursor: pointer;
+}
+.presence-composer button:disabled {
+  opacity: 0.3;
+}
+.presence-approval {
+  padding: 12px;
+  margin: 12px 0;
+  background: #c9ae6310;
+  border: 1px solid #bb9c4b66;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.presence-approval p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 120px;
+  overflow: auto;
+}
+.presence-approval button {
+  margin-right: 10px;
+  padding: 5px 10px;
+  border: 1px solid #a5ba83;
+  border-radius: 5px;
+  color: #e1efd1;
+  background: #35422d;
+  cursor: pointer;
+}
+@media (prefers-reduced-motion: reduce) {
+  .presence-mark i {
+    animation: none !important;
+  }
+}

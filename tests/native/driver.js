@@ -4,6 +4,7 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
+import Meta from 'gi://Meta';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 const XML =
@@ -28,6 +29,10 @@ export default class Driver extends Extension {
       const c = JSON.parse(raw);
       let result = {};
       if (c.op === 'ready') result = { ready: !Main.layoutManager._startingUp };
+      if (c.op === 'displayEnvironment') {
+        result = {};
+        for (const key of ['DISPLAY', 'XAUTHORITY']) if (GLib.getenv(key)) result[key] = GLib.getenv(key);
+      }
       if (c.op === 'markStatus') {
         const f = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
         result = {
@@ -67,7 +72,13 @@ export default class Driver extends Extension {
         const target = global.get_window_actors().find((a) => a.meta_window.get_title().startsWith('Friday —'));
         if (!target) throw new Error('Friday window is missing');
         if (c.activate) target.meta_window.activate(global.get_current_time());
+        if (c.move) target.meta_window.move_frame(false, 300, 300);
+        const frame = target.meta_window.get_frame_rect();
+        const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
         result = {
+          frame: { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+          workArea: { x: area.x, y: area.y, width: area.width, height: area.height },
+          clientType: target.meta_window.get_client_type() === Meta.WindowClientType.X11 ? 'x11' : 'wayland',
           minimized: target.meta_window.minimized,
           skipTaskbar: target.meta_window.skip_taskbar,
           showing: target.meta_window.showing_on_its_workspace(),

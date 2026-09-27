@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -51,4 +51,47 @@ describe('task persistence', () => {
     expect(await new TaskStore(path).loadState()).toEqual({ tasks: [] });
     expect((await readdir(dir)).some((name) => name.startsWith('tasks.json.corrupt-'))).toBe(true);
   });
+});
+
+it('pages and searches Pi transcripts without exposing reasoning or image data', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'friday-history-'));
+  dirs.push(dir);
+  const store = new TaskStore(join(dir, 'state.json'));
+  await mkdir(store.sessionDirectory);
+  await writeFile(
+    store.sessionPath('session-1'),
+    [
+      { type: 'session', id: 'session-1' },
+      { message: { role: 'user', content: 'Find the invoice' } },
+      {
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'private' },
+            { type: 'text', text: 'I found invoice 42' },
+          ],
+        },
+      },
+      {
+        message: {
+          role: 'toolResult',
+          content: [
+            { type: 'image', data: 'secret-image' },
+            { type: 'text', text: 'Document path' },
+          ],
+        },
+      },
+    ]
+      .map((value) => JSON.stringify(value))
+      .join('\n'),
+  );
+  const first = await store.history('session-1', 0, 2);
+  expect(first.entries.map((entry) => entry.text)).toEqual(['Find the invoice', 'I found invoice 42']);
+  expect(first.nextOffset).toBe(2);
+  const second = await store.history('session-1', first.nextOffset!, 2);
+  expect(second.entries.map((entry) => entry.text)).toEqual(['Document path']);
+  expect(second.nextOffset).toBeNull();
+  expect((await store.history('session-1', 0, 2, 'INVOICE 42')).entries).toHaveLength(1);
+  expect((await store.history('missing')).entries).toEqual([]);
+  expect(() => store.sessionPath('../outside')).toThrow('Invalid session');
 });

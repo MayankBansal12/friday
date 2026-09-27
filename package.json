@@ -19,10 +19,13 @@
     "desktop:build": "tsc -p tsconfig.node.json",
     "desktop:install": "pnpm desktop:build && python3 scripts/install-desktop.py",
     "desktop:status": "python3 scripts/desktop-command.py",
-    "start:desktop": "env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus electron --no-sandbox --ozone-platform=wayland .",
+    "stt:setup": "python3 scripts/setup-stt.py",
+    "stt:benchmark": "pnpm desktop:build && node scripts/benchmark-stt.mjs",
+    "start:desktop": "python3 scripts/start-desktop.py",
     "test:native": "pnpm desktop:build && python3 tests/native/run.py",
     "test:native:ui": "pnpm build && python3 tests/native/run.py --ui",
-    "test:native:agent": "pnpm build && python3 tests/native/run.py --agent"
+    "test:native:agent": "pnpm build && python3 tests/native/run.py --agent",
+    "test:sessions:agent": "pnpm desktop:build && node tests/native/sessions.mjs"
   },
   "build": {
     "appId": "dev.linuxbuddy.app",
@@ -49,6 +52,10 @@
       {
         "from": "native/desktop-client.py",
         "to": "desktop-client.py"
+      },
+      {
+        "from": "native/parakeet-worker.py",
+        "to": "parakeet-worker.py"
       }
     ]
   },

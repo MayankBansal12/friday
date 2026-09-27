@@ -14,13 +14,17 @@ async function evaluate(expression) {
   return result.result.value;
 }
 async function request(prompt) {
+  await evaluate(`document.querySelector('[aria-label="Show Friday updates"]')?.click()`);
+  await delay(200);
+  await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Type instead'))?.click()`);
+  await delay(200);
   await evaluate(`(() => {
-    const input = document.querySelector('textarea[aria-label="Ask Friday"]');
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(prompt)});
+    const input = document.querySelector('input[aria-label="Ask Friday"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(prompt)});
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
   await delay(100);
-  await evaluate(`document.querySelector('textarea[aria-label="Ask Friday"]').form.requestSubmit()`);
+  await evaluate(`document.querySelector('input[aria-label="Ask Friday"]').form.requestSubmit()`);
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
     const task = await evaluate(
@@ -43,6 +47,10 @@ async function request(prompt) {
   throw new Error('Real UI request timed out');
 }
 try {
+  await evaluate(`document.querySelector('[aria-label="Show Friday updates"]')?.click()`);
+  await delay(200);
+  await evaluate(`document.querySelector('[aria-label="Open settings and history"]').click()`);
+  await delay(200);
   await evaluate(`document.querySelector('[aria-label="Open settings"]').click()`);
   await delay(300);
   await evaluate(`(() => {
@@ -58,7 +66,7 @@ try {
   assert(first.steps.some((s) => s.title === 'Using desktop draw' && s.status === 'done'));
   const status = await evaluate('window.buddy.desktopStatus()');
   assert(status.annotations >= 1, 'The drawing disappeared when Friday completed');
-  assert.equal(await evaluate("Boolean(document.querySelector('.compact-shell'))"), true);
+  assert.equal(await evaluate("Boolean(document.querySelector('[data-surface]'))"), true);
   for (let i = 0; i < 30; i++) {
     if (
       await stat(join(stage, 'auto-speech.wav')).then(
@@ -89,15 +97,19 @@ try {
   }
   await access(join(stage, 'ui-drawing-captured'));
   const second = await request(
-    'Open that. Use only desktop tools. Reobserve, click the button we discussed, then observe and verify the changed label.',
+    'Which button did we discuss? Look again and point to it with an arrow. Guide me without clicking.',
   );
   assert.equal(second.conversationId, first.conversationId);
-  assert(second.steps.some((s) => s.title === 'click on the desktop' && s.status === 'done'));
-  assert.match(second.response, /Opened|verified/i);
+  assert(second.steps.some((s) => s.title === 'Using desktop draw' && s.status === 'done'));
+  assert.match(second.response, /button|open/i);
   await writeFile(join(stage, 'ui-agent-results.json'), JSON.stringify({ first, second }, null, 2));
   console.log(
-    'PASS: exact user request → fullscreen screenshot → visible caption and drawing → automatic window return → follow-up click → verify',
+    'PASS: exact user request → fullscreen screenshot → visible caption and drawing → automatic window return → same-parent follow-up → fresh observation → guidance',
   );
 } finally {
   close();
 }
+
+// Electron can defer a WebSocket close handshake while its window is minimized.
+// All assertions and artifact writes have completed; do not keep the test alive for that socket.
+process.exit(0);

@@ -1,16 +1,4 @@
-import {
-  app,
-  BrowserWindow,
-  globalShortcut,
-  ipcMain,
-  Menu,
-  nativeImage,
-  Notification,
-  session,
-  screen,
-  shell,
-  Tray,
-} from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, session, screen, shell, Tray } from 'electron';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -22,11 +10,18 @@ import { Speaker } from '../speaker.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { TaskStore } from '../store.js';
-import type { BuddySettings, ListeningState } from '../types.js';
+import type { BuddySettings, ListeningState, SurfaceLayout, TaskRecord } from '../types.js';
 import { validAudio, validId, validListeningState, validPrompt, validSettings } from '../validation.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 loadEnvironment({ path: join(process.cwd(), '.env.local'), quiet: true });
+// The companion needs absolute positioning and always-on-top support. Electron
+// cannot provide those on native Wayland; use XWayland when an X display exists.
+if (process.platform === 'linux' && process.env.DISPLAY && !app.commandLine.hasSwitch('ozone-platform'))
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
+const nativeWindowPlacement =
+  process.platform === 'linux' &&
+  (app.commandLine.getSwitchValue('ozone-platform') === 'wayland' || !process.env.DISPLAY);
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
@@ -35,29 +30,63 @@ let service: AgentService;
 let speech: SpeechService;
 let bridge: DesktopBridge;
 const speaker = new Speaker();
+let native: GnomeClient;
+let surface: SurfaceLayout = 'orb';
+let surfaceHeight: number | undefined;
+let placementTimer: NodeJS.Timeout | undefined;
+
+function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
+  const area = screen.getPrimaryDisplay().workArea;
+  const [wantedWidth, wantedHeight] =
+    layout === 'orb' ? [96, 96] : layout === 'bar' ? [520, 76] : layout === 'panel' ? [560, 420] : [760, 800];
+  const width = Math.min(wantedWidth, area.width - 24);
+  const height = Math.min(
+    layout === 'panel' && contentHeight ? Math.max(96, Math.min(420, Math.ceil(contentHeight))) : wantedHeight,
+    area.height - 24,
+  );
+  const x = layout === 'orb' ? area.x + area.width - width - 18 : area.x + Math.round((area.width - width) / 2);
+  const y = area.y + 12;
+  return { x, y, width, height };
+}
+
+function setSurface(layout: SurfaceLayout, contentHeight?: number) {
+  if (!window || window.isDestroyed()) return;
+  surface = layout;
+  surfaceHeight = contentHeight;
+  const bounds = surfaceBounds(layout, contentHeight);
+  const current = window.getBounds();
+  if (Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value))
+    window.setBounds(bounds);
+  if (nativeWindowPlacement)
+    void native
+      ?.command({ op: 'place_companion', pid: process.pid, layout, width: bounds.width, height: bounds.height })
+      .catch((error) => console.warn('Friday window placement requires the updated GNOME extension:', error.message));
+}
+
+function reanchorSurface() {
+  if (placementTimer) clearTimeout(placementTimer);
+  placementTimer = setTimeout(() => {
+    placementTimer = undefined;
+    setSurface(surface, surfaceHeight);
+  }, 60);
+}
 
 function setExpanded(value: boolean) {
   if (!window) return;
-  const area = screen.getPrimaryDisplay().workArea;
-  const width = value ? 760 : 460;
-  const height = value ? 800 : 300;
-  window.setMinimumSize(value ? 560 : 360, value ? 620 : 240);
-  window.setBounds({
-    x: Math.max(area.x, area.x + area.width - width - 18),
-    y: Math.max(area.y, area.y + area.height - height - 18),
-    width,
-    height,
-  });
+  setSurface(value ? 'details' : 'orb');
   window.webContents.send('window:expanded', value);
 }
 function showCompanion() {
   const task = service
     .list()
-    .find((task) => ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status));
+    .find(
+      (task) => task.role !== 'child' && ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(task.status),
+    );
   if (task) void bridge.setCaption(task.id, task.response || task.steps.at(-1)?.title || 'Friday is working…');
 }
 
 function stopListening() {
+  service?.silence();
   speaker.stop();
   window?.webContents.send('voice:stop');
   speech?.reset();
@@ -69,20 +98,24 @@ function activateFriday(startVoice = true) {
   window.setFocusable(true);
   if (window.isMinimized()) window.hide();
   window.show();
+  if (startVoice) {
+    window.webContents.send('window:expanded', false);
+    setSurface('bar');
+  }
   window.focus();
   if (startVoice) window.webContents.send('voice:start');
 }
 
 function createWindow(openSilently: boolean) {
   window = new BrowserWindow({
-    width: 460,
-    height: 300,
-    minWidth: 360,
-    minHeight: 240,
+    ...surfaceBounds(surface, surfaceHeight),
+    minWidth: 1,
+    minHeight: 1,
     show: false,
     frame: false,
     transparent: true,
-    resizable: true,
+    resizable: false,
+    hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: false,
     webPreferences: {
@@ -115,9 +148,15 @@ function createWindow(openSilently: boolean) {
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
   window.once('ready-to-show', () => {
-    setExpanded(false);
+    setSurface(surface, surfaceHeight);
     if (!openSilently) activateFriday(false);
   });
+  window.on('show', () => setSurface(surface, surfaceHeight));
+  window.on('restore', reanchorSurface);
+  window.on('move', reanchorSurface);
+  screen.on('display-metrics-changed', reanchorSurface);
+  screen.on('display-added', reanchorSurface);
+  screen.on('display-removed', reanchorSurface);
 }
 
 function createTray() {
@@ -163,13 +202,18 @@ if (hasSingleInstanceLock)
       defaultCwd: process.env.HOME || process.cwd(),
       launchAtLogin: app.getLoginItemSettings().openAtLogin,
       wakeWord: process.env.LINUX_BUDDY_WAKE_WORD || 'Friday',
-      model: process.env.LINUX_BUDDY_MODEL || 'kimi-k2.6',
+      model: process.env.LINUX_BUDDY_MODEL || 'glm-5.3-flash',
+      autoSpeak: true,
     };
-    speech = new SpeechService(settings.wakeWord);
-    const native = new GnomeClient(
+    speech = new SpeechService(settings.wakeWord, {
+      workerPath: app.isPackaged
+        ? join(process.resourcesPath, 'parakeet-worker.py')
+        : join(root, 'native/parakeet-worker.py'),
+    });
+    native = new GnomeClient(
       app.isPackaged ? join(process.resourcesPath, 'desktop-client.py') : join(root, 'native/desktop-client.py'),
     );
-    native.onReveal = () => activateFriday(false);
+    native.onReveal = () => activateFriday(true);
     native.onStopped = (id, error) => bridge.nativeStopped(id, error);
     bridge = new DesktopBridge(
       native,
@@ -209,6 +253,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
+      { speak: (text) => speaker.speak(text), silence: () => speaker.stop() },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -230,25 +275,15 @@ if (hasSingleInstanceLock)
     if (!globalShortcut.register('CommandOrControl+Shift+Space', activateFriday))
       console.warn('Global shortcut Ctrl+Shift+Space is unavailable');
 
-    service.on('task', (task) => {
+    service.on('state', (state) => window?.webContents.send('friday:state', state));
+    service.on('task', (task: TaskRecord) => {
       window?.webContents.send('task:changed', task);
-      void bridge.setCaption(
-        task.id,
-        task.error || task.response || task.steps.at(-1)?.title || 'Friday is working…',
-        ['completed', 'failed', 'cancelled'].includes(task.status),
-      );
-      if (
-        (task.status === 'completed' || task.status === 'failed' || task.status === 'awaiting_approval') &&
-        Notification.isSupported()
-      ) {
-        const title =
-          task.status === 'completed'
-            ? 'Friday finished'
-            : task.status === 'failed'
-              ? 'Friday needs attention'
-              : 'Friday needs approval';
-        new Notification({ title, body: task.response || task.error || task.prompt }).show();
-      }
+      if (task.role !== 'child')
+        void bridge.setCaption(
+          task.id,
+          task.error || task.response || task.steps.at(-1)?.title || 'Friday is working…',
+          ['completed', 'failed', 'cancelled'].includes(task.status),
+        );
     });
 
     const fromWindow = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) => {
@@ -258,10 +293,36 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       return service.list();
     });
+    ipcMain.handle('friday:state', (event) => {
+      fromWindow(event);
+      return service.state();
+    });
+    ipcMain.handle('sessions:stop', (event, id: unknown) => {
+      fromWindow(event);
+      return service.stopChild(validId(id));
+    });
+    ipcMain.handle('window:surface', (event, layout: unknown, height: unknown) => {
+      fromWindow(event);
+      if (!['orb', 'bar', 'panel', 'details'].includes(String(layout))) throw new Error('Invalid surface');
+      setSurface(layout as SurfaceLayout, typeof height === 'number' && Number.isFinite(height) ? height : undefined);
+    });
+    ipcMain.handle('foreground:stop', async (event) => {
+      fromWindow(event);
+      stopListening();
+      bridge.stop();
+      const task = service
+        .list()
+        .find(
+          (item) =>
+            item.role !== 'child' && ['queued', 'thinking', 'acting', 'awaiting_approval'].includes(item.status),
+        );
+      if (task) await service.cancel(task.id);
+    });
     ipcMain.handle('tasks:submit', (event, prompt: unknown, conversationId: unknown) => {
       fromWindow(event);
       speaker.stop();
-      return service.submit(validPrompt(prompt), conversationId === undefined ? undefined : validId(conversationId));
+      if (conversationId !== undefined) validId(conversationId);
+      return service.submit(validPrompt(prompt));
     });
     ipcMain.handle('tasks:cancel', (event, id: unknown) => {
       fromWindow(event);
@@ -275,7 +336,7 @@ if (hasSingleInstanceLock)
     });
     ipcMain.handle('conversation:new', async (event) => {
       fromWindow(event);
-      const id = service.newConversation();
+      const id = await service.newConversation();
       bridge.stop();
       await bridge.clear().catch(() => {});
       return id;
@@ -310,7 +371,7 @@ if (hasSingleInstanceLock)
     });
     ipcMain.handle('voice:silence', (event) => {
       fromWindow(event);
-      speaker.stop();
+      service.silence();
     });
     ipcMain.handle('voice:transcribe', (event, audio: unknown, mimeType: unknown) => {
       fromWindow(event);
@@ -349,7 +410,11 @@ if (hasSingleInstanceLock)
     ipcMain.on('voice:state', (event, state: ListeningState) => {
       try {
         fromWindow(event);
-        tray?.setToolTip(`Friday — ${validListeningState(state)}`);
+        const next = validListeningState(state);
+        tray?.setToolTip(`Friday — ${next}`);
+        if (next === 'listening' || next === 'armed')
+          void speech.prepare().catch((error) => console.error('Local STT preparation failed', error.message));
+        if (next === 'idle' || next === 'error') speech.reset();
       } catch {
         /* Ignore forged one-way renderer messages. */
       }
@@ -362,6 +427,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   quitting = true;
   stopListening();
+  speech?.close();
   void (async () => {
     bridge?.stop();
     await service?.shutdown();
@@ -370,6 +436,7 @@ app.on('before-quit', (event) => {
   })();
 });
 app.on('will-quit', () => {
+  if (placementTimer) clearTimeout(placementTimer);
   globalShortcut.unregisterAll();
   bridge?.close();
 });
