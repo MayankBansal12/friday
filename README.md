@@ -1,6 +1,6 @@
 # Friday
 
-Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. The prototype supports guidance and background work; computer input is deferred. The current model provider is OpenCode Go.
+Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. Friday can look at and draw on your screen, but never clicks or types for you. The current model provider is OpenCode Go.
 
 See [the current request flow](docs/request-flow.md) for session boundaries, speech behavior, and the implementation diagram.
 
@@ -23,7 +23,7 @@ pnpm start:desktop
 
 The floating companion uses XWayland so Electron can place it at fixed screen coordinates: the circle at the upper right, and the bar/panel at the top center. Placement is reapplied after reopening, moving, and display changes. `pnpm start:desktop` retrieves the logged-in display settings when launched remotely. Native Wayland can still be explicitly selected, but its placement requires the updated GNOME extension. [Electron documents this positioning limitation](https://www.electronjs.org/docs/latest/api/browser-window).
 
-`desktop:status` must report `ready: true` and `protocolVersion: 4` for screen guidance. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
+`desktop:status` must report `ready: true` and `protocolVersion: 5` for screen guidance. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
 
 The installer writes the extension to `~/.local/share/gnome-shell/extensions/friday-desktop@linux-buddy.local`, creates a private token at `~/.config/friday-desktop/token`, and enables Friday in GNOME. It does not restart the desktop or log you out.
 
@@ -52,13 +52,13 @@ The Python worker starts when listening begins, stays loaded until Friday quits,
 
 This is utterance-based recognition, not streaming: the existing recorder submits after a pause (850 ms) or microphone-button release, with a 25-second segment limit. The worker accepts up to 30 seconds. Keeping the model loaded avoids loading it for each utterance. `LINUX_BUDDY_STT_THREADS` controls CPU inference threads (default 4).
 
-Run `pnpm stt:benchmark` to measure cold startup and five warm requests through Friday's actual transcription service. It generates a temporary synthetic speech file without using the microphone or playing audio. `pnpm stt:benchmark /path/to/sample.wav` uses your own recording. Results include conversion, model-wait, inference, and total times; synthetic audio is a smoke test, not a real-world accuracy evaluation.
-
 ## Desktop integration and permissions
 
-The parent Pi session exposes `desktop_observe`, `desktop_draw`, and `desktop_clear`. The runtime rejects desktop input; children cannot call screen or presentation tools. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
+The parent Pi session exposes `desktop_observe`, `desktop_draw`, and `desktop_clear`. There is no desktop input tool, and children cannot call screen or presentation tools. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
 
 Screen guidance is visual first: usually 1–3 marks, with text only when it adds useful information. Use `circle`, `arrow`, `highlight`, `step`, or `note`; `rectangle`, `underline`, `bracket`, and the existing `ellipse`, `label`, and `path` also work. Text wraps into padded cards placed beside targets when space permits. Notes can have a short heading. Styling and placement are handled by the native renderer, with no browser overlay or extra dependency.
+
+Pen marks use two thin, slightly irregular strokes inspired by Rough Notation. Circles and underlines default to red; arrows, boxes, brackets, paths, and numbered markers use blue. Highlights retain a translucent citron wash, and labels retain the warm paper style. Custom colors still work. Stroke variation stays fixed across repaints.
 
 | Annotation                                        | Optional text limit | Geometry in screenshot pixels                                                  |
 | ------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
@@ -82,7 +82,7 @@ All items need an `id`. Text is plain, not Markdown. A note needs text or a titl
 }
 ```
 
-The native layer retains its existing input/consent implementation and regression tests for future computer use, but input is not available to either agent role in this prototype. Stop, lock, overview, display changes, disconnect, and task completion revoke the active desktop lease; a heartbeat expires abandoned sessions.
+Stop, lock, overview, display changes, disconnect, and task completion revoke the active desktop lease; a heartbeat expires abandoned sessions.
 
 Normal agent requests also have file and shell tools running as the logged-in user. Consequential shell commands request confirmation through a heuristic check; this is not an operating-system sandbox. Screenshot/tool results are sent to the configured model and retained in local conversation files under Electron's user-data directory. Microphone audio is transcribed locally; recognized requests go to the model.
 
@@ -98,18 +98,18 @@ pnpm build
 
 | Command                  | Coverage                                                                                    |
 | ------------------------ | ------------------------------------------------------------------------------------------- |
-| `pnpm test:native`       | Local GNOME rendering, fullscreen pixels, click-through, consent, marking, and cancellation |
+| `pnpm test:native`       | Local GNOME rendering, fullscreen pixels, click-through, marking, Stop/Escape/overview      |
 | `pnpm test:native:ui`    | Native checks plus the packaged UI with integration available, unavailable, and reconnected |
 | `pnpm test:native:agent` | Optional real-model UI request → drawing → window return → same-parent follow-up guidance   |
 
-Native tests run in an isolated headless GNOME session with a synthetic GTK target. They require Python Pillow for pixel checks and print a temporary artifact directory for screenshots/logs. The model test uses configured OpenCode credentials and sends the synthetic desktop screenshots to that provider. `pnpm test:sessions:agent` exercises real parent/child delegation, concurrent replies, history search, and result presentation without a desktop. These two model tests need configured Pi credentials. Other checks make no model calls. The test driver is never installed in the user's desktop or bundled with the app.
+Native tests run in an isolated headless GNOME session with a synthetic GTK target. They require Python Pillow for pixel checks and print a temporary artifact directory for screenshots/logs. `pnpm test:sessions:agent` exercises real parent/child delegation, concurrent replies, history search, and result presentation without a desktop. It and `test:native:agent` use your configured credentials (the latter sends the synthetic desktop screenshots to the provider); all other checks make no model calls. The test driver is never installed in the user's desktop or bundled with the app.
 
 Code layout:
 
 - `electron/`: app lifecycle, agent sessions, desktop bridge/validation, and speech services.
-- `native/`: authenticated D-Bus transport and GNOME drawing/input extension.
+- `native/`: authenticated D-Bus transport, GNOME drawing extension, and local speech worker.
 - `src/`: React interface and voice interaction.
-- `scripts/`: desktop installation and status commands.
+- `scripts/`: desktop install/status, speech setup, and the desktop launcher.
 - `tests/`: unit tests and reusable native/UI integration harness.
 
 Settings include working folder, model, wake word, launch at login, and automatic spoken replies. Environment overrides include `LINUX_BUDDY_MODEL`, `LINUX_BUDDY_WAKE_WORD`, `LINUX_BUDDY_STT_MODEL`, `LINUX_BUDDY_STT_PYTHON`, `LINUX_BUDDY_STT_THREADS`, `LINUX_BUDDY_PI_BIN`, and `LINUX_BUDDY_FFMPEG_BIN`. Activity reports model/tool/capture/transcription timings; hosted inference remains the main source of latency.

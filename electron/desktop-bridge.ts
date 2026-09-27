@@ -1,24 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
-import {
-  action,
-  drawing,
-  mode,
-  nativeAction,
-  nativeDrawing,
-  record,
-  type CompanionMode,
-  type Observation,
-} from './desktop-protocol.js';
+import { drawing, nativeDrawing, protocolVersion, record, type Observation } from './desktop-protocol.js';
 import type { NativeDesktop } from './gnome-client.js';
 import { desktopErrorMessage, desktopUpdateMessage, type DesktopStatus } from './desktop-status.js';
 
 interface Run {
   id: string;
   token: string;
-  mode: CompanionMode;
   revoked: boolean;
-  request: string;
   ready?: Promise<void>;
   observation?: Observation;
   nativeObservation?: Observation;
@@ -81,17 +70,11 @@ export class DesktopBridge {
   get url() {
     return `http://127.0.0.1:${this.port}`;
   }
-  beginRun(id: string, selectedMode: CompanionMode, request = '') {
+  beginRun(id: string) {
     if (this.returnTimer) clearTimeout(this.returnTimer);
     this.returnTimer = undefined;
     if (this.active) this.revokeRun(this.active.id);
-    this.active = {
-      id,
-      token: randomBytes(32).toString('hex'),
-      mode: mode(selectedMode),
-      revoked: false,
-      request: request.slice(0, 1200),
-    };
+    this.active = { id, token: randomBytes(32).toString('hex'), revoked: false };
     return this.active.token;
   }
   private assert(run: Run) {
@@ -99,20 +82,18 @@ export class DesktopBridge {
   }
   private async ready(run: Run) {
     this.assert(run);
-    run.ready ??= this.native
-      .command({ op: 'begin', runId: run.id, mode: run.mode, request: run.request })
-      .then((result) => {
-        this.assert(run);
-        if (result.protocolVersion !== 4) throw new Error(desktopUpdateMessage);
-        this.heartbeat = setInterval(() => {
-          void this.native.command({ op: 'heartbeat', runId: run.id }).catch((error: unknown) => {
-            if (this.active !== run) return;
-            this.revokeRun(run.id);
-            this.onStopped?.(run.id, error);
-          });
-        }, 4000);
-        this.heartbeat.unref();
-      });
+    run.ready ??= this.native.command({ op: 'begin', runId: run.id }).then((result) => {
+      this.assert(run);
+      if (result.protocolVersion !== protocolVersion) throw new Error(desktopUpdateMessage);
+      this.heartbeat = setInterval(() => {
+        void this.native.command({ op: 'heartbeat', runId: run.id }).catch((error: unknown) => {
+          if (this.active !== run) return;
+          this.revokeRun(run.id);
+          this.onStopped?.(run.id, error);
+        });
+      }, 4000);
+      this.heartbeat.unref();
+    });
     await run.ready;
     this.assert(run);
   }
@@ -125,7 +106,7 @@ export class DesktopBridge {
     this.heartbeat = undefined;
     if (this.markTimer) clearTimeout(this.markTimer);
     this.markTimer = undefined;
-    // Deliberately outside the serialized input queue. Native code checks this lease between input events.
+    // Deliberately outside the serialized operation queue so Stop never waits behind a capture.
     void this.native.command({ op: preserveDrawing ? 'finish' : 'stop', runId: id }).catch(() => {});
     if (!preserveDrawing) this.captionRunId = undefined;
     if (!preserveDrawing || this.captionRunId !== id || !this.getWindow()?.showCompanion) this.restore();
@@ -189,41 +170,29 @@ export class DesktopBridge {
       const route = request.url;
       if (request.method === 'GET' && route === '/screenshot')
         return json(response, 200, await this.enqueue(run, () => this.observe(run)));
-      if (request.method === 'POST' && ['/draw', '/clear', '/action'].includes(route ?? '')) {
+      if (request.method === 'POST' && route === '/draw')
         return json(
           response,
           200,
           await this.enqueue(run, async () => {
-            if (route === '/draw') {
-              if (run.mode === 'explain') throw new Error('Drawing requires Guide or Act mode');
-              const d = drawing(value, run.observation);
-              this.hide();
-              const result = await this.native.command({
-                ...nativeDrawing(d, run.observation!, run.nativeObservation!),
-                op: 'draw',
-                runId: run.id,
-              });
-              if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
-              this.getWindow()?.showCompanion?.();
-              return result;
-            }
-            if (route === '/clear') return this.native.command({ op: 'clear', runId: run.id, ids: value.ids });
-            if (run.mode !== 'act') throw new Error('Desktop input requires Act mode');
-            const a = nativeAction(action(value, run.observation), run.observation!, run.nativeObservation!);
-            // The host gates every GUI action. No optional model-supplied safety flag can bypass it.
-            await this.approve(run, a);
-            this.assert(run);
-            action(value, run.observation); // approval delays must not revive stale coordinates
+            const d = drawing(value, run.observation);
             this.hide();
-            await new Promise((resolve) => setTimeout(resolve, 180));
-            this.assert(run);
-            const result = await this.native.command({ ...a, op: 'action', runId: run.id });
-            run.observation = undefined;
+            const result = await this.native.command({
+              ...nativeDrawing(d, run.observation!, run.nativeObservation!),
+              op: 'draw',
+              runId: run.id,
+            });
+            if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
             this.getWindow()?.showCompanion?.();
             return result;
           }),
         );
-      }
+      if (request.method === 'POST' && route === '/clear')
+        return json(
+          response,
+          200,
+          await this.enqueue(run, () => this.native.command({ op: 'clear', runId: run.id, ids: value.ids })),
+        );
       return json(response, 404, { error: 'Not found' });
     } catch (error) {
       return json(response, 400, { error: desktopErrorMessage(error) });
@@ -285,11 +254,6 @@ export class DesktopBridge {
     this.getWindow()?.showCompanion?.();
     return result;
   }
-  private async approve(run: Run, value: unknown) {
-    const result = await this.native.command({ op: 'confirm', runId: run.id, action: value });
-    this.assert(run);
-    if (!result.approved) throw new Error('Desktop action was declined or stopped');
-  }
   async setCaption(runId: string, text: string, finished = false) {
     if (runId !== this.captionRunId) return false;
     try {
@@ -319,7 +283,7 @@ export class DesktopBridge {
   async status(): Promise<DesktopStatus> {
     try {
       const status = await this.native.command({ op: 'status' });
-      const compatible = status.protocolVersion === 4;
+      const compatible = status.protocolVersion === protocolVersion;
       return {
         ready: status.ready === true && compatible,
         protocolVersion: typeof status.protocolVersion === 'number' ? status.protocolVersion : 1,
@@ -341,7 +305,7 @@ export class DesktopBridge {
         this.native.command({ op: 'clear', runId: this.active!.id, forgetMark: true }),
       );
     const id = `clear-${randomUUID()}`;
-    this.beginRun(id, 'guide');
+    this.beginRun(id);
     try {
       await this.enqueue(this.active!, () => this.native.command({ op: 'clear', runId: id, forgetMark: true }));
     } finally {
@@ -351,7 +315,7 @@ export class DesktopBridge {
   async mark() {
     if (this.active) throw new Error('Stop the current task before marking the screen');
     const id = `mark-${randomUUID()}`;
-    this.beginRun(id, 'guide');
+    this.beginRun(id);
     const run = this.active!;
     try {
       await this.enqueue(run, async () => {

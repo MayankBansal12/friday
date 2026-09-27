@@ -8,7 +8,7 @@ import { config } from 'dotenv';
 import { AgentService } from '../../dist-electron/agent-service.js';
 import { TaskStore } from '../../dist-electron/store.js';
 
-config({ path: '.env.local', quiet: true });
+config({ path: '.env', quiet: true });
 const dir = await mkdtemp(join(tmpdir(), 'friday-sessions-'));
 const service = new AgentService(
   new TaskStore(join(dir, 'state.json')),

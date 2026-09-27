@@ -1,5 +1,6 @@
 // Deliberately dependency-free: the same compiled validators run inside GNOME Shell.
-export type CompanionMode = 'explain' | 'guide' | 'act';
+/** Bumped whenever the app and the installed GNOME extension stop being interchangeable. */
+export const protocolVersion = 5;
 export interface Display {
   id: string;
   x: number;
@@ -55,18 +56,6 @@ export interface Drawing {
   items: Annotation[];
   replace?: boolean;
 }
-export interface DesktopAction {
-  action: 'click' | 'double_click' | 'right_click' | 'type' | 'key' | 'scroll';
-  forceConfirmation?: boolean;
-  observationId: string;
-  displayId: string;
-  x?: number;
-  y?: number;
-  text?: string;
-  keys?: string[];
-  amount?: number;
-}
-
 // Model screenshots may be smaller than the native capture. Translate once at the host boundary.
 export function nativeDrawing(value: Drawing, observed: Observation, native: Observation): Drawing {
   const sx = native.width / observed.width;
@@ -84,18 +73,6 @@ export function nativeDrawing(value: Drawing, observed: Observation, native: Obs
       ...(item.points === undefined ? {} : { points: item.points.map((p) => ({ x: p.x * sx, y: p.y * sy })) }),
     })),
   };
-}
-export function nativeAction(value: DesktopAction, observed: Observation, native: Observation): DesktopAction {
-  return {
-    ...value,
-    ...(value.x === undefined ? {} : { x: (value.x * native.width) / observed.width }),
-    ...(value.y === undefined ? {} : { y: (value.y * native.height) / observed.height }),
-  };
-}
-
-export function mode(value: unknown): CompanionMode {
-  if (value !== 'explain' && value !== 'guide' && value !== 'act') throw new Error('Invalid companion mode');
-  return value;
 }
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an object');
@@ -115,16 +92,6 @@ export function assertObservation(value: Record<string, unknown>, observation?: 
     throw new Error('Observe again: the observation or display is no longer current');
   if (now - observation.capturedAt > 60_000) throw new Error('Observe again: this screenshot is over 60 seconds old');
   return observation;
-}
-export function stagePoint(point: Point, observation: Observation): Point {
-  return {
-    x:
-      observation.display.x +
-      (finite(point.x, 0, observation.width - 1) * observation.display.width) / observation.width,
-    y:
-      observation.display.y +
-      (finite(point.y, 0, observation.height - 1) * observation.display.height) / observation.height,
-  };
 }
 export function drawing(value: unknown, observation?: Observation): Drawing {
   const v = record(value);
@@ -193,64 +160,4 @@ function annotationText(value: unknown, limit: number, name: string) {
     .trim();
   if (Array.from(text).length > limit) throw new Error(`${name} is limited to ${limit} characters`);
   return text;
-}
-export const keyNames: Record<string, number> = {
-  ctrl: 0xffe3,
-  control: 0xffe3,
-  shift: 0xffe1,
-  alt: 0xffe9,
-  super: 0xffeb,
-  meta: 0xffeb,
-  enter: 0xff0d,
-  return: 0xff0d,
-  escape: 0xff1b,
-  esc: 0xff1b,
-  tab: 0xff09,
-  space: 0x20,
-  backspace: 0xff08,
-  delete: 0xffff,
-  up: 0xff52,
-  down: 0xff54,
-  left: 0xff51,
-  right: 0xff53,
-  home: 0xff50,
-  end: 0xff57,
-  pageup: 0xff55,
-  pagedown: 0xff56,
-};
-for (const char of 'abcdefghijklmnopqrstuvwxyz0123456789') keyNames[char] = char.charCodeAt(0);
-export function action(value: unknown, observation?: Observation): DesktopAction {
-  const a = record(value);
-  const o = assertObservation(a, observation);
-  if (a.forceConfirmation !== undefined && typeof a.forceConfirmation !== 'boolean')
-    throw new Error('Invalid confirmation flag');
-  const base = {
-    observationId: o.id,
-    displayId: o.display.id,
-    ...(a.forceConfirmation === undefined ? {} : { forceConfirmation: a.forceConfirmation }),
-  };
-  if (['click', 'double_click', 'right_click'].includes(String(a.action)))
-    return {
-      ...base,
-      action: a.action as DesktopAction['action'],
-      x: finite(a.x, 0, o.width - 1),
-      y: finite(a.y, 0, o.height - 1),
-    };
-  if (a.action === 'type') {
-    if (typeof a.text !== 'string' || !a.text.length || a.text.length > 2000)
-      throw new Error('Type 1–2000 characters at a time');
-    return { ...base, action: 'type', text: a.text };
-  }
-  if (a.action === 'key') {
-    if (
-      !Array.isArray(a.keys) ||
-      !a.keys.length ||
-      a.keys.length > 6 ||
-      a.keys.some((k) => typeof k !== 'string' || !Object.hasOwn(keyNames, k.toLowerCase()))
-    )
-      throw new Error('Unsupported key combination');
-    return { ...base, action: 'key', keys: [...new Set(a.keys.map((k) => String(k).toLowerCase()))] };
-  }
-  if (a.action === 'scroll') return { ...base, action: 'scroll', amount: finite(a.amount, -20, 20) };
-  throw new Error('Unsupported desktop action');
 }

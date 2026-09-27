@@ -6,7 +6,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path';
 import { parentPrompt, childPrompt } from './agent-prompts.js';
 import { desktopInterruption } from './desktop-status.js';
-import type { CompanionMode } from './desktop-protocol.js';
 import { TaskStore } from './store.js';
 import type { AgentStep, BuddySettings, FridayState, PresentationState, SessionRecord, TaskRecord } from './types.js';
 import { validSettings } from './validation.js';
@@ -107,8 +106,7 @@ export class AgentService extends EventEmitter {
     private readonly extensionPath: string,
     private readonly bridge: {
       url: string;
-      token?: string;
-      beginRun?(id: string, mode: CompanionMode, request?: string): string;
+      beginRun?(id: string): string;
       revokeRun?(id: string, preserveDrawing?: boolean): void;
     },
     private readonly options: AgentServiceOptions = {},
@@ -410,7 +408,6 @@ export class AgentService extends EventEmitter {
       conversationId: session.id,
       role: session.role,
       parentId: session.parentId,
-      mode: 'guide',
       prompt,
       status: 'thinking',
       createdAt: Date.now(),
@@ -430,8 +427,7 @@ export class AgentService extends EventEmitter {
       worker.assistantText = '';
       worker.error = undefined;
       worker.toolSteps.clear();
-      if (session.role === 'parent')
-        worker.desktopToken = this.bridge.beginRun?.(task.id, 'guide', prompt) ?? this.bridge.token;
+      if (session.role === 'parent') worker.desktopToken = this.bridge.beginRun?.(task.id);
       await this.changed(task);
       const context =
         session.role === 'parent'
@@ -489,8 +485,6 @@ export class AgentService extends EventEmitter {
           LINUX_BUDDY_RUNTIME_URL: this.runtimeUrl,
           LINUX_BUDDY_RUNTIME_TOKEN: token,
           LINUX_BUDDY_ROLE: session.role,
-          LINUX_BUDDY_BRIDGE_URL: '',
-          LINUX_BUDDY_BRIDGE_TOKEN: '',
         },
       },
     ) as ChildProcessWithoutNullStreams;
@@ -802,8 +796,7 @@ export class AgentService extends EventEmitter {
         if (worker.session.role !== 'parent' || !worker.desktopToken)
           throw new Error('Only the parent can use the screen');
         const route = request.url.slice('/desktop'.length);
-        if (!['/screenshot', '/draw', '/clear'].includes(route))
-          throw new Error('Desktop input is disabled in this prototype');
+        if (!['/screenshot', '/draw', '/clear'].includes(route)) throw new Error('Unknown desktop route');
         const result = await fetch(`${this.bridge.url}${route}`, {
           method: request.method,
           headers: { authorization: `Bearer ${worker.desktopToken}`, 'content-type': 'application/json' },

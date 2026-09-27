@@ -8,7 +8,6 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron --no-sandbox .\"",
     "build": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
-    "build:unpacked": "tsc -p tsconfig.node.json && vite build && electron-builder --linux dir",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -20,7 +19,6 @@
     "desktop:install": "pnpm desktop:build && python3 scripts/install-desktop.py",
     "desktop:status": "python3 scripts/desktop-command.py",
     "stt:setup": "python3 scripts/setup-stt.py",
-    "stt:benchmark": "pnpm desktop:build && node scripts/benchmark-stt.mjs",
     "start:desktop": "python3 scripts/start-desktop.py",
     "test:native": "pnpm desktop:build && python3 tests/native/run.py",
     "test:native:ui": "pnpm build && python3 tests/native/run.py --ui",
@@ -31,6 +29,7 @@
     "appId": "dev.linuxbuddy.app",
     "productName": "Linux Buddy",
     "asar": true,
+    "publish": null,
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -60,35 +59,34 @@
     ]
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "dotenv": "^17.4.2",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
-    "@eslint/js": "latest",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "concurrently": "latest",
-    "cross-env": "latest",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "concurrently": "^10.0.4",
+    "cross-env": "^10.1.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "eslint": "9.39.1",
-    "eslint-plugin-react-hooks": "latest",
-    "eslint-plugin-react-refresh": "latest",
-    "globals": "latest",
-    "prettier": "latest",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.4",
+    "globals": "^17.11.0",
+    "lucide-react": "^1.31.0",
+    "prettier": "^3.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "typescript": "6.0.2",
-    "typescript-eslint": "latest",
-    "vite": "latest",
-    "vitest": "latest",
-    "wait-on": "latest"
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10",
+    "wait-on": "^9.1.0"
   },
   "engines": {
     "node": ">=22"
   },
-  "author": "Linux Buddy Contributors <noreply@linux-buddy.local>",
-  "homepage": "https://github.com/mayank/linux-buddy"
+  "author": "Linux Buddy Contributors <noreply@linux-buddy.local>"
 }
