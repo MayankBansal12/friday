@@ -1,8 +1,9 @@
 // Native Cairo only: the agent supplies geometry and words, never styling or layout.
-// Palette follows the app (src/styles.css): warm paper cards, dark ink text, coral pen, citron marker.
+// Paper labels follow the app; red/blue double pen strokes take inspiration from Rough Notation.
 const PAPER = '#fbfaf4';
 const INK = '#1d1f1b';
-const CORAL = '#ff735d';
+const RED = '#e5484d';
+const BLUE = '#4169e1';
 const CITRON = '#d9ff63';
 const CITRON_DEEP = '#b9e73a';
 const FONT = 'Noto Sans';
@@ -27,30 +28,52 @@ function roundedRect(cr, x, y, width, height, radius = 9) {
   cr.closePath();
 }
 
-// Fixed, gentle curves keep the sketch stable across repaints.
+// Two slightly different passes, with fixed variation so repaints never jitter.
 function sketchLine(cr, x, y, toX, toY) {
   const dx = toX - x;
   const dy = toY - y;
   const length = Math.hypot(dx, dy) || 1;
-  const bend = Math.min(1.6, length / 50);
-  cr.moveTo(x, y);
-  cr.curveTo(
-    x + dx / 3 - (dy / length) * bend,
-    y + dy / 3 + (dx / length) * bend,
-    x + (dx * 2) / 3,
-    y + (dy * 2) / 3,
-    toX,
-    toY,
-  );
+  const nx = -dy / length;
+  const ny = dx / length;
+  const amount = Math.min(1, length / 45);
+  for (const pass of [0, 1]) {
+    const bend = (pass ? 5 : -2.5) * amount;
+    cr.moveTo(x + nx * pass * amount, y + ny * pass * amount);
+    cr.curveTo(
+      x + dx / 3 + nx * bend,
+      y + dy / 3 + ny * bend,
+      x + (dx * 2) / 3 + nx * bend * (pass ? 0.7 : 1.2),
+      y + (dy * 2) / 3 + ny * bend * (pass ? 0.7 : 1.2),
+      toX,
+      toY,
+    );
+  }
 }
 
-// A soft ink halo under the pen keeps strokes legible on both light and dark desktops.
+function sketchEllipse(cr, x, y, width, height) {
+  const amount = Math.min(1, width / 28, height / 28);
+  const k = 0.5523;
+  for (const pass of [0, 1]) {
+    const cx = x + width / 2 + (pass ? 0.8 : -0.4) * amount;
+    const cy = y + height / 2 + (pass ? -0.8 : 0.5) * amount;
+    const rx = width / 2 + (pass ? 2.2 : -0.4) * amount;
+    const ry = height / 2 + (pass ? 2 : -0.3) * amount;
+    const wobble = (pass ? -2.8 : 1.6) * amount;
+    cr.moveTo(cx + rx, cy);
+    cr.curveTo(cx + rx, cy + ry * k + wobble, cx + rx * k, cy + ry, cx, cy + ry);
+    cr.curveTo(cx - rx * k, cy + ry + wobble, cx - rx, cy + ry * k, cx - rx, cy);
+    cr.curveTo(cx - rx, cy - ry * k, cx - rx * k + wobble, cy - ry, cx, cy - ry);
+    cr.curveTo(cx + rx * k, cy - ry + wobble, cx + rx, cy - ry * k, cx + rx, cy + amount);
+  }
+}
+
+// A narrow, faint halo preserves contrast without turning the two pen passes into a thick outline.
 function strokePen(cr, ink) {
-  color(cr, INK, 0.4);
-  cr.setLineWidth(6.5);
+  color(cr, INK, 0.18);
+  cr.setLineWidth(3.25);
   cr.strokePreserve();
   color(cr, ink);
-  cr.setLineWidth(3.5);
+  cr.setLineWidth(1.8);
   cr.stroke();
 }
 
@@ -145,18 +168,11 @@ export function paintAnnotations(cr, items, screenWidth, screenHeight, pulse) {
   const obstacles = items.map((a) => bounds(a, screenWidth, screenHeight));
   const cards = [];
   for (const a of items) {
-    const ink = a.color ?? (a.kind === 'highlight' ? CITRON : CORAL);
+    const ink =
+      a.color ?? (a.kind === 'highlight' ? CITRON : ['circle', 'ellipse', 'underline'].includes(a.kind) ? RED : BLUE);
     cr.newPath();
     if (a.kind === 'ellipse' || a.kind === 'circle') {
-      cr.save();
-      cr.translate(a.x + a.width / 2, a.y + a.height / 2);
-      cr.scale(a.width / 2, a.height / 2);
-      cr.moveTo(1, 0);
-      cr.curveTo(1.02, 0.57, 0.55, 1.02, 0, 1);
-      cr.curveTo(-0.57, 0.98, -1.01, 0.54, -1, 0);
-      cr.curveTo(-0.98, -0.55, -0.54, -1.02, 0, -1);
-      cr.curveTo(0.57, -0.98, 1.01, -0.54, 1, 0.04);
-      cr.restore();
+      sketchEllipse(cr, a.x, a.y, a.width, a.height);
       strokePen(cr, ink);
     } else if (a.kind === 'rectangle') {
       sketchLine(cr, a.x, a.y, a.x + a.width, a.y);
@@ -196,14 +212,13 @@ export function paintAnnotations(cr, items, screenWidth, screenHeight, pulse) {
         cr.stroke();
       }
     } else if (a.kind === 'step') {
-      // Ink badge with a citron numeral, ringed in the pen colour, as in the app's active tabs.
+      // Keep the numeral crisp inside the sketch ring.
       const c = stepCenter(a, screenWidth, screenHeight);
       cr.arc(c.x, c.y, 15, 0, Math.PI * 2);
       color(cr, INK);
-      cr.fillPreserve();
-      color(cr, ink);
-      cr.setLineWidth(3);
-      cr.stroke();
+      cr.fill();
+      sketchEllipse(cr, c.x - 15, c.y - 15, 30, 30);
+      strokePen(cr, ink);
       cr.selectFontFace(FONT, 0, 1);
       cr.setFontSize(16);
       const number = String(a.step);
@@ -212,7 +227,19 @@ export function paintAnnotations(cr, items, screenWidth, screenHeight, pulse) {
       cr.moveTo(c.x - e.width / 2 - e.xBearing, c.y - e.height / 2 - e.yBearing);
       cr.showText(number);
     } else if (a.kind === 'path') {
-      a.points.forEach((p, i) => (i ? cr.lineTo(p.x, p.y) : cr.moveTo(p.x, p.y)));
+      if (a.points.length === 2) {
+        sketchLine(cr, a.points[0].x, a.points[0].y, a.points[1].x, a.points[1].y);
+      } else {
+        for (const pass of [0, 1]) {
+          a.points.forEach((p, i) => {
+            const offset = pass && i > 0 && i < a.points.length - 1 ? 2 : 0;
+            const x = p.x + offset * Math.sin(i * 0.65);
+            const y = p.y + offset * Math.cos(i * 0.65);
+            if (i) cr.lineTo(x, y);
+            else cr.moveTo(x, y);
+          });
+        }
+      }
       strokePen(cr, ink);
     }
     if (!a.text && !a.title) continue;
