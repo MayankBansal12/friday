@@ -259,6 +259,17 @@ describe('AgentService lifecycle', () => {
 });
 
 describe('parent and child runtime boundary', () => {
+  it('keeps the final spoken answer after non-blocking computer progress', async () => {
+    const speak = vi.fn(async () => {});
+    const { service, children } = await fixture({ speak });
+    const task = await service.submit('Click the button');
+    service.controlProgress(task.id, 'Clicking', 'Opening it now.');
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Opened and verified.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    expect(speak).toHaveBeenCalledWith('Opening it now.');
+    expect(speak).toHaveBeenCalledWith('Opened and verified.');
+  });
   it('rejects child UI, screen access and delegation even with a valid token', async () => {
     const { service, tool } = await fixture();
     await service.submit('Delegate');
@@ -269,6 +280,7 @@ describe('parent and child runtime boundary', () => {
       '/tools/session_start',
       '/tools/session_list',
       '/desktop/screenshot',
+      '/desktop/control',
     ]) {
       expect((await tool(1, path, { text: 'Hi', title: 'Nested', prompt: 'Run' })).status).toBe(400);
     }

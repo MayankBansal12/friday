@@ -21,7 +21,7 @@ export class GnomeClient implements NativeDesktop {
     const child = spawn('python3', ['-u', this.script], {
       env: {
         ...process.env,
-        XDG_RUNTIME_DIR: '/run/user/1000',
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/run/user/1000',
         DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS || 'unix:path=/run/user/1000/bus',
       },
       stdio: ['pipe', 'pipe', 'pipe'],

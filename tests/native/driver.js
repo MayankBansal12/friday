@@ -49,9 +49,11 @@ export default class Driver extends Extension {
           .find((a) => a.meta_window.get_title() === 'Friday native smoke target');
         if (!target) throw new Error('No test target window');
         const { x, y, width, height } = target.meta_window.get_frame_rect();
+        const buffer = target.meta_window.get_buffer_rect();
         result = {
           items: [...friday._items.values()],
           frame: { x, y, width, height },
+          buffer: { x: buffer.x, y: buffer.y },
           fullscreen: target.meta_window.is_fullscreen(),
         };
       }

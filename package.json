@@ -21,6 +21,7 @@
     "stt:setup": "python3 scripts/setup-stt.py",
     "start:desktop": "python3 scripts/start-desktop.py",
     "test:native": "pnpm desktop:build && python3 tests/native/run.py",
+    "test:native:computer": "pnpm desktop:build && python3 tests/native/run.py --computer",
     "test:native:ui": "pnpm build && python3 tests/native/run.py --ui",
     "test:native:agent": "pnpm build && python3 tests/native/run.py --agent",
     "test:sessions:agent": "pnpm desktop:build && node tests/native/sessions.mjs"

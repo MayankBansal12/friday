@@ -1,6 +1,6 @@
 # Friday
 
-Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. Friday can look at and draw on your screen, but never clicks or types for you. The current model provider is OpenCode Go.
+Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. Friday can look, draw, and complete short GUI tasks. The parent uses OpenCode Go; computer control uses your signed-in Codex CLI.
 
 See [the current request flow](docs/request-flow.md) for session boundaries, speech behavior, and the implementation diagram.
 
@@ -9,6 +9,8 @@ See [the current request flow](docs/request-flow.md) for session boundaries, spe
 Requirements: Node.js 22+, pnpm, Python 3.12+ with venv/pip and PyGObject, GNOME Shell 49, `pi` 0.85.1+, local Parakeet V3 int8 ONNX model files (available through Handy), `ffmpeg`, and `espeak-ng`. Desktop integration currently supports the built-in 1920×1080 display at 100% scale.
 
 Configure OpenCode Go through `OPENCODE_API_KEY` in `.env` or existing Pi authentication. See [.env.example](.env.example) for environment overrides.
+
+For computer control, install Codex CLI (tested with 0.155.1), run `codex login`, and check `codex login status`. Your existing ChatGPT sign-in works; no separate OpenAI API key is required. Chat, speech, guidance, and background tasks still work without Codex. The operator uses the [Codex app-server protocol](https://developers.openai.com/codex/app-server) with Friday's bounded desktop tools.
 
 ```sh
 pnpm install
@@ -23,7 +25,7 @@ pnpm start:desktop
 
 The floating companion uses XWayland so Electron can place it at fixed screen coordinates: the circle at the upper right, and the bar/panel at the top center. Placement is reapplied after reopening, moving, and display changes. `pnpm start:desktop` retrieves the logged-in display settings when launched remotely. Native Wayland can still be explicitly selected, but its placement requires the updated GNOME extension. [Electron documents this positioning limitation](https://www.electronjs.org/docs/latest/api/browser-window).
 
-`desktop:status` must report `ready: true` and `protocolVersion: 5` for screen guidance. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
+`desktop:status` must report `ready: true` and `protocolVersion: 6` for screen guidance/control. GNOME caches loaded extension modules, so reopening Friday alone cannot activate an extension update. App-only changes need a rebuild and app restart, without another login.
 
 The installer writes the extension to `~/.local/share/gnome-shell/extensions/friday-desktop@linux-buddy.local`, creates a private token at `~/.config/friday-desktop/token`, and enables Friday in GNOME. It does not restart the desktop or log you out.
 
@@ -37,6 +39,7 @@ For development, use `pnpm dev`. The local launch commands use `--no-sandbox` be
 - Click the microphone or use the shortcut to interrupt speech. A submitted request interrupts the current parent turn and continues in the same saved parent session. Background children keep running. This version does not support automatic interruption by speaking over TTS.
 - Background tasks quietly update the circle badge and task panel. Click a task to ask the parent about its result or what it needs. The parent can search/read saved sessions, resume a child, or stop it. There is no automatic spoken completion queue.
 - During screen guidance, a native top bar with **Reply** and **Stop/Clear** remains visible while the Electron window is hidden for capture/drawing. Hover it for text. The Electron companion returns when the drawing clears or expires.
+- During computer control, a non-clickable bottom banner shows progress and **Esc twice to stop**. Press Escape twice within 1.5 seconds, or activate Friday to stop before speaking. Short speech updates run alongside actions. Missing information releases control and returns a question to the parent.
 - **Settings & history** opens the detailed view for settings, previous requests, timing details, and **Mark screen**. Its **New task** button explicitly resets the parent conversation; normal requests reuse it. Selecting historical requests only inspects them.
 - **Stop foreground** stops listening, speech, and the parent turn; background children continue. A child has its own stop button. **Ctrl+Shift+Escape** and Stop in the detailed view stop all work. Native **Escape** clears the active overlay and stops its current desktop request.
 - Agent drawings are click-through and preserve normal pointer movement. Drawings expire after 30 seconds and clear when input, focus, or geometry changes make them stale. Guidance advances when you ask; it does not continuously watch the screen.
@@ -54,7 +57,15 @@ This is utterance-based recognition, not streaming: the existing recorder submit
 
 ## Desktop integration and permissions
 
-The parent Pi session exposes `desktop_observe`, `desktop_draw`, and `desktop_clear`. There is no desktop input tool, and children cannot call screen or presentation tools. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
+The parent Pi session exposes `desktop_observe`, `desktop_draw`, `desktop_clear`, and `desktop_control`. Children cannot call screen or presentation tools. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Captures exclude overlays without erasing valid drawings. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
+
+`desktop_control` runs one bounded Codex task within the parent's existing desktop lease. It supports clicks, double clicks, pointer movement, dragging, scrolling, text, key combinations, and drawing. Input batches consume one fresh observation and automatically return another screenshot. Drawings use a separate call after observing the changed screen. The operator has no shell, environment, browser, MCP, or plugin tools. Ordinary shell/file tasks stay with the parent because they are faster there.
+
+GNOME cannot guarantee exclusive physical input while accepting Friday's virtual events. V0 shields the screen between short action bursts; physical input can get through during those bursts, and some system shortcuts or input-method composition can bypass the shield. A physical click may dismiss a popup. This reduces interference; it is not a security boundary or a complete keyboard/mouse lock. Avoid interacting until the banner clears, or stop first. Hardware touchpad/touchscreen and non-default input methods still need hands-on validation.
+
+Control is limited to four minutes, 25 action batches, and 60 tool calls. Each batch has at most 12 actions, 500 ASCII characters, and three seconds of explicit waits. ASCII typing is supported across the current backends; unsupported text fails explicitly. The native heartbeat expires within about 3.25 seconds if the app stops responding. Errors and cancellation release held keys/buttons and remove the shield. The operator asks when an exact consequential action or target has not been explicitly authorized; this is a model instruction, not a transaction-enforcement layer.
+
+Screenshots for control are sent through Codex to its configured model using ephemeral threads. Friday does not read or copy Codex credentials, and retains only the operator summary/progress and timings in parent history. Model calls dominate latency: the runner batches predictable actions, uses low reasoning, keeps its authenticated process warm, and avoids the usual 180ms capture delay on each control step. `LINUX_BUDDY_COMPUTER_MODEL` optionally overrides the Codex model; otherwise `gpt-6-sol` is used.
 
 Screen guidance is visual first: usually 1–3 marks, with text only when it adds useful information. Use `circle`, `arrow`, `highlight`, `step`, or `note`; `rectangle`, `underline`, `bracket`, and the existing `ellipse`, `label`, and `path` also work. Text wraps into padded cards placed beside targets when space permits. Notes can have a short heading. Styling and placement are handled by the native renderer, with no browser overlay or extra dependency.
 
@@ -96,13 +107,14 @@ pnpm test
 pnpm build
 ```
 
-| Command                  | Coverage                                                                                    |
-| ------------------------ | ------------------------------------------------------------------------------------------- |
-| `pnpm test:native`       | Local GNOME rendering, fullscreen pixels, click-through, marking, Stop/Escape/overview      |
-| `pnpm test:native:ui`    | Native checks plus the packaged UI with integration available, unavailable, and reconnected |
-| `pnpm test:native:agent` | Optional real-model UI request → drawing → window return → same-parent follow-up guidance   |
+| Command                     | Coverage                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------- |
+| `pnpm test:native`          | Local GNOME rendering, fullscreen pixels, click-through, marking, Stop/Escape/overview      |
+| `pnpm test:native:ui`       | Native checks plus the packaged UI with integration available, unavailable, and reconnected |
+| `pnpm test:native:agent`    | Optional real-model UI request → drawing → window return → same-parent follow-up guidance   |
+| `pnpm test:native:computer` | Real signed-in Codex → isolated GTK input/menu → fresh visual verification → drawing        |
 
-Native tests run in an isolated headless GNOME session with a synthetic GTK target. They require Python Pillow for pixel checks and print a temporary artifact directory for screenshots/logs. `pnpm test:sessions:agent` exercises real parent/child delegation, concurrent replies, history search, and result presentation without a desktop. It and `test:native:agent` use your configured credentials (the latter sends the synthetic desktop screenshots to the provider); all other checks make no model calls. The test driver is never installed in the user's desktop or bundled with the app.
+Native tests run in an isolated headless GNOME session with a synthetic GTK target. They require Python Pillow for pixel checks and print a temporary artifact directory for screenshots/logs. They check controlled input, independent input shielding, popup survival, Enter delivery, double Escape, stop during typing, watchdog release, and drawing/capture coexistence. `pnpm test:sessions:agent` exercises real parent/child delegation, concurrent replies, history search, and result presentation without a desktop. It and `test:native:agent` use Pi credentials; `test:native:computer` uses Codex login and sends only the synthetic desktop to its configured model. Other checks make no model calls. The test driver is never installed in the user's desktop or bundled with the app.
 
 Code layout:
 

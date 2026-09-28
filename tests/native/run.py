@@ -29,7 +29,7 @@ if '--inside' not in sys.argv:
     speaker.chmod(0o700)
     env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'], XDG_RUNTIME_DIR=str(runtime), XDG_DATA_HOME=str(stage / 'data'), XDG_CONFIG_HOME=str(stage / 'config'), XDG_CACHE_HOME=str(stage / 'cache'), FRIDAY_ISOLATED_TEST='1', FRIDAY_TEST_STAGE=str(stage), FRIDAY_TEST_RESULT=str(stage / 'clicked'), WAYLAND_DISPLAY='wayland-friday-smoke', NO_AT_BRIDGE='1')
     print('Native smoke artifacts:', stage, flush=True)
-    result = subprocess.run(['dbus-run-session', '--', sys.executable, __file__, '--inside', *[flag for flag in ['--agent', '--ui'] if flag in sys.argv]], env=env)
+    result = subprocess.run(['dbus-run-session', '--', sys.executable, __file__, '--inside', *[flag for flag in ['--agent', '--ui', '--computer'] if flag in sys.argv]], env=env)
     sys.exit(result.returncode)
 
 import gi
@@ -259,6 +259,10 @@ try:
             errors = (stage / 'ui.log').read_text()
             assert 'Error launching app' not in errors and 'Unable to find Electron app' not in errors and 'A JavaScript error occurred' not in errors, errors
             print('PASS: packaged Electron app launches with the native helper present', flush=True)
+    from control import exercise
+    exercise(command, driver, observe, stage)
+    if '--computer' in sys.argv:
+        subprocess.run(['node', str(ROOT/'tests/native/computer.mjs')], check=True, timeout=330)
     errors = (stage / 'shell.log').read_text()
     assert 'JS ERROR' not in errors and 'Extension friday-desktop' not in errors, errors[-4000:]
     print('PASS: GNOME integration smoke suite. Artifacts:', stage, flush=True)

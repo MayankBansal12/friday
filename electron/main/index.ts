@@ -94,8 +94,9 @@ function stopListening() {
   speech?.reset();
 }
 
-function activateFriday(startVoice = true) {
+async function activateFriday(startVoice = true) {
   if (!window) return;
+  await bridge?.interruptControl();
   bridge?.restore();
   window.setFocusable(true);
   if (window.isMinimized()) window.hide();
@@ -261,6 +262,7 @@ if (hasSingleInstanceLock)
       void service.desktopInterrupted(id, error).catch(() => {});
     };
     bridge.onMark = (mark) => window?.webContents.send('desktop:marked', mark);
+    bridge.onControlProgress = (id, text, spoken) => service.controlProgress(id, text, spoken);
     await service.init();
     const persistedSettings = service.getSettings();
     speech.setWakeWord(persistedSettings.wakeWord);

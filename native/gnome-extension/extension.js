@@ -5,9 +5,10 @@ import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
 import { paintAnnotations } from './drawing.js';
+import { ComputerControl } from './control.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import { drawing, identifier, protocolVersion, record } from './protocol.js';
+import { computerBatch, drawing, identifier, protocolVersion, record } from './protocol.js';
 
 const IFACE = `<node><interface name="dev.Friday.Desktop1">
 <method name="Command"><arg type="s" direction="in" name="token"/><arg type="s" direction="in" name="command"/><arg type="s" direction="out" name="result"/></method>
@@ -44,8 +45,11 @@ export default class FridayDesktop extends Extension {
       this._invalidate();
       this._watchWindow();
     });
-    connect(global.display, 'accelerator-activated', (_display, actionId) => {
-      if (actionId === this._escapeAction) this._stop(true, 'escape');
+    connect(global.display, 'accelerator-activated', (_display, actionId, _device, time) => {
+      if (actionId === this._escapeAction) {
+        if (this._control) this._control.escape(time);
+        else this._stop(true, 'escape');
+      }
     });
     this._watchWindow();
     connect(global.workspace_manager, 'active-workspace-changed', () => this._invalidate());
@@ -75,6 +79,7 @@ export default class FridayDesktop extends Extension {
         (this._observation || this._items.size) &&
         !this._busy &&
         !this._mark &&
+        !this._control &&
         Date.now() > (this._ignorePointerUntil ?? 0) &&
         pointer[2] !== this._lastPointer[2]
       )
@@ -82,7 +87,7 @@ export default class FridayDesktop extends Extension {
       this._lastPointer = pointer;
       return GLib.SOURCE_CONTINUE;
     });
-    this._watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+    this._watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
       if (this._lease && Date.now() > this._deadline) this._stop(true, 'lease_expired');
       if (this._expires && Date.now() > this._expires) this._clear();
       if (this._captionExpires && Date.now() > this._captionExpires && !this._lease) this._clearCaption();
@@ -199,6 +204,9 @@ export default class FridayDesktop extends Extension {
         marking: Boolean(this._mark),
         lastMark: this._lastMark ?? null,
         active: Boolean(this._lease),
+        controlling: Boolean(this._control),
+        inputBlocked: this._control?.shield.visible ?? false,
+        inputState: { keys: this._control?.keys.size ?? 0, buttons: this._control?.buttons.size ?? 0 },
       };
     if (c.op === 'begin') {
       if (this._busy) throw new Error('Previous desktop operation is stopping; retry shortly');
@@ -230,8 +238,60 @@ export default class FridayDesktop extends Extension {
     }
     this._check(c, sender);
     if (c.op === 'heartbeat') {
-      this._deadline = Date.now() + 15000;
+      this._deadline = Date.now() + (this._control ? 3000 : 15000);
       return { alive: true };
+    }
+    if (c.op === 'control_begin') {
+      if (this._busy || this._mark || this._control) throw new Error('Desktop is already busy');
+      if (Main.modalCount) throw new Error('Close the system dialog before computer control');
+      this._control = new ComputerControl(this);
+      this._deadline = Date.now() + 3000;
+      try {
+        this._showCaption('Starting computer control…', false);
+        await this._waitForPresentation(this._caption);
+        this._check(c, sender);
+        return { controlling: true, inputPolicy: 'blocked-between-actions' };
+      } catch (error) {
+        this._stop(true, 'control_failed');
+        throw error;
+      }
+    }
+    if (c.op === 'control_end') {
+      if (this._busy) throw new Error('Stop the active action before ending computer control');
+      this._endControl();
+      this._deadline = Date.now() + 15000;
+      return { controlling: false };
+    }
+    if (c.op === 'act') {
+      if (!this._control || this._busy) throw new Error('Computer control is not ready');
+      let batch;
+      try {
+        if (!this._observation || this._observation.scene !== this._scene || this._observation.focus !== this._focus())
+          throw new Error('Observe again: the focused app or desktop changed');
+        batch = computerBatch(c, this._observation);
+      } catch (error) {
+        throw Object.assign(error, { code: 'invalid_action' });
+      }
+      const control = this._control;
+      this._busy = true;
+      this._invalidate();
+      const started = Date.now();
+      try {
+        const result = await control.execute(batch.actions, () => {
+          this._check(c, sender);
+          if (Main.modalCount) throw new Error('System dialog opened; computer control stopped');
+        });
+        await this._wait(100);
+        this._check(c, sender);
+        return { executed: batch.actions.length, ...result, actionMs: Date.now() - started };
+      } catch (error) {
+        this._stop(true, 'control_failed');
+        throw error;
+      } finally {
+        control.release();
+        this._busy = false;
+        this._lastPointer = global.get_pointer();
+      }
     }
     if (c.op === 'clear') {
       if (c.forgetMark) this._lastMark = null;
@@ -240,7 +300,7 @@ export default class FridayDesktop extends Extension {
     }
     if (c.op === 'observe') return this._observe(c, sender);
     if (c.op === 'mark') {
-      if (this._busy) throw new Error('Wait for the current desktop operation');
+      if (this._busy || this._control) throw new Error('Wait for the current desktop operation');
       this._startMark();
       return { marking: true };
     }
@@ -293,14 +353,25 @@ export default class FridayDesktop extends Extension {
   async _observe(c, sender) {
     if (this._busy || this._mark) throw new Error('Finish the current desktop operation first');
     this._busy = true;
-    this._clear();
-    this._caption?.hide();
+    // Retain guidance across observations when the scene is unchanged. Hide only
+    // for Shell's synchronous offscreen paint, not the asynchronous PNG encode.
+    const areaVisible = this._area.visible;
+    const captionVisible = this._caption?.visible;
     const scene = this._scene;
     const focus = this._focus();
     const stream = Gio.MemoryOutputStream.new_resizable();
     try {
       const shooter = new Shell.Screenshot();
-      await shooter.screenshot(false, stream);
+      this._area.hide();
+      this._caption?.hide();
+      let capture;
+      try {
+        capture = shooter.screenshot(false, stream);
+      } finally {
+        if (areaVisible) this._area.show();
+        if (captionVisible) this._caption?.show();
+      }
+      await capture;
       stream.close(null);
       this._check(c, sender);
       if (scene !== this._scene || focus !== this._focus())
@@ -345,6 +416,7 @@ export default class FridayDesktop extends Extension {
   }
 
   _stop(clear = true, reason = 'user_stop') {
+    this._endControl();
     const runId = this._lease;
     if (runId && !['completed', 'superseded'].includes(reason))
       this._dbus?.emit_signal(
@@ -374,6 +446,17 @@ export default class FridayDesktop extends Extension {
     }
     this._timers?.clear();
     if (!this._items?.size) this._disarmEscape();
+  }
+
+  _endControl() {
+    if (!this._control) return;
+    const control = this._control;
+    this._control = null;
+    control.end();
+    if (this._caption) this._clearCaption();
+    // The same parent lease remains available for subsequent guidance.
+    this._captionOwner = this._owner;
+    this._captionRun = this._lease;
   }
 
   _clearCaption() {
@@ -441,10 +524,15 @@ export default class FridayDesktop extends Extension {
   }
 
   _showCaption(text, finished) {
+    if (this._caption && this._captionControl !== Boolean(this._control)) {
+      this._caption.destroy();
+      this._caption = null;
+    }
+    this._captionControl = Boolean(this._control);
     if (!this._caption) {
       this._caption = new St.BoxLayout({
         vertical: true,
-        reactive: true,
+        reactive: !this._control,
         track_hover: true,
         can_focus: false,
         style:
@@ -482,19 +570,26 @@ export default class FridayDesktop extends Extension {
       this._captionLabel.clutter_text.line_wrap = true;
       this._caption.add_child(this._captionLabel);
       this._caption.connect('notify::hover', () => {
-        this._captionLabel.visible = this._caption.hover;
+        this._captionLabel.visible = Boolean(this._control) || this._caption.hover;
       });
       Main.layoutManager.addTopChrome(this._caption, {
-        affectsInputRegion: true,
+        affectsInputRegion: !this._control,
         affectsStruts: false,
         trackFullscreen: false,
       });
     }
-    this._captionTitle.text = finished ? 'Friday · Ready' : 'Friday · Guiding you';
+    this._captionTitle.text = this._control
+      ? 'Friday is controlling your computer · Esc twice to stop'
+      : finished
+        ? 'Friday · Ready'
+        : 'Friday · Guiding you';
+    this._replyButton.visible = !this._control;
+    this._captionStop.visible = !this._control;
+    this._captionLabel.visible = Boolean(this._control) || this._caption.hover;
     this._captionLabel.text = text || 'Friday is working…';
     this._captionStop.label = finished ? 'Clear' : 'Stop';
     this._captionExpires = Date.now() + 90000;
-    this._caption.set_position(700, 44);
+    this._caption.set_position(700, this._control ? 950 : 44);
     this._caption.show();
     this._raiseOverlays();
     this._syncCompositing();
@@ -583,6 +678,7 @@ export default class FridayDesktop extends Extension {
   }
 
   _event(event) {
+    if (this._control) return this._control.event(event);
     const type = event.type();
     if (
       type === Clutter.EventType.KEY_PRESS &&

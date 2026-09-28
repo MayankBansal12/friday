@@ -12,7 +12,7 @@ import { validSettings } from './validation.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},desktop_observe,desktop_draw,desktop_clear,speak,show_text,set_presentation,session_start,session_list,session_read,session_search,session_update,session_stop`;
+const parentTools = `${fileTools},desktop_observe,desktop_draw,desktop_clear,desktop_control,speak,show_text,set_presentation,session_start,session_list,session_read,session_search,session_update,session_stop`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -348,6 +348,18 @@ export class AgentService extends EventEmitter {
     this.options.silence?.();
     this.presentation.speaking = false;
     this.publish();
+  }
+  controlProgress(id: string, text: string, speech?: string) {
+    const worker = this.workers.get(this.parentId);
+    const task = worker?.task;
+    if (!task || task.id !== id || terminal.has(task.status)) return;
+    this.addStep(task, 'status', text, 'done');
+    if (speech) {
+      const spoken = task.spoken;
+      this.speak(task, speech);
+      task.spoken = spoken; // Progress is not the final spoken answer.
+    }
+    this.changedDeferred(task);
   }
   async shutdown() {
     if (this.shuttingDown) return;
@@ -796,12 +808,16 @@ export class AgentService extends EventEmitter {
         if (worker.session.role !== 'parent' || !worker.desktopToken)
           throw new Error('Only the parent can use the screen');
         const route = request.url.slice('/desktop'.length);
-        if (!['/screenshot', '/draw', '/clear'].includes(route)) throw new Error('Unknown desktop route');
+        if (!['/screenshot', '/draw', '/clear', '/control'].includes(route)) throw new Error('Unknown desktop route');
+        const disconnect = new AbortController();
+        response.on('close', () => {
+          if (!response.writableEnded) disconnect.abort();
+        });
         const result = await fetch(`${this.bridge.url}${route}`, {
           method: request.method,
           headers: { authorization: `Bearer ${worker.desktopToken}`, 'content-type': 'application/json' },
           ...(request.method === 'POST' ? { body: JSON.stringify(data) } : {}),
-          signal: AbortSignal.timeout(90_000),
+          signal: AbortSignal.any([disconnect.signal, AbortSignal.timeout(route === '/control' ? 330_000 : 90_000)]),
         });
         return reply(result.status, await result.json());
       }

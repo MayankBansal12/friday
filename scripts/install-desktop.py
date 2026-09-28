@@ -26,7 +26,7 @@ else:
 uuid = 'friday-desktop@linux-buddy.local'
 target = data / 'gnome-shell/extensions' / uuid
 target.mkdir(parents=True, exist_ok=True)
-for name in ['metadata.json', 'extension.js', 'drawing.js']:
+for name in ['metadata.json', 'extension.js', 'drawing.js', 'control.js']:
     shutil.copy2(root / 'native/gnome-extension' / name, target / name)
 shutil.copy2(compiled, target / 'protocol.js')
 private = config / 'friday-desktop'

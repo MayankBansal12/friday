@@ -9,6 +9,10 @@ flowchart TD
     typedRequest["Optional typed request"] --> parentSession
     parentSession --> directReply["Reply or guide directly"]
     directReply --> presentation["Speak · show text · draw on screen"]
+    parentSession --> control["desktop_control · same desktop lease"]
+    control --> codex["Signed-in Codex · ephemeral GUI task"]
+    codex <-->|"Screenshot · bounded input · drawing"| native["GNOME desktop integration"]
+    control --> presentation
     parentSession --> backgroundChild["Start or resume a background child"]
     backgroundChild --> savedResult["Save progress, result, or question"]
     savedResult --> taskBadge["Quiet task badge and panel update"]
@@ -28,15 +32,16 @@ flowchart TD
 
 ## Parent tools
 
-| Tool                                                 | Purpose                                                     |
-| ---------------------------------------------------- | ----------------------------------------------------------- |
-| `session_start`                                      | Start a child and immediately return its ID                 |
-| `session_list`                                       | Inspect saved sessions and statuses                         |
-| `session_read` / `session_search`                    | Fetch a result or relevant saved history                    |
-| `session_update` / `session_stop`                    | Resume, redirect, or stop a child                           |
-| `desktop_observe` / `desktop_draw` / `desktop_clear` | Guide directly on the current screen                        |
-| `speak`                                              | Start short local speech; playback does not block the model |
-| `show_text` / `set_presentation`                     | Show details or expand/collapse Friday                      |
+| Tool                                                 | Purpose                                                              |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `session_start`                                      | Start a child and immediately return its ID                          |
+| `session_list`                                       | Inspect saved sessions and statuses                                  |
+| `session_read` / `session_search`                    | Fetch a result or relevant saved history                             |
+| `session_update` / `session_stop`                    | Resume, redirect, or stop a child                                    |
+| `desktop_observe` / `desktop_draw` / `desktop_clear` | Guide directly on the current screen                                 |
+| `desktop_control`                                    | Complete a short GUI task with Codex, returning a result or question |
+| `speak`                                              | Start short local speech; playback does not block the model          |
+| `show_text` / `set_presentation`                     | Show details or expand/collapse Friday                               |
 
 The host enforces tool ownership with a per-process token and an active-turn check. Children have `task_report`, file tools, and shell tools. Shell execution is still under the user's account with the existing consequential-command check, not an OS sandbox.
 
@@ -46,7 +51,9 @@ Only the parent speaks. `speak` starts espeak-ng immediately and a newer utteran
 
 Clicking the microphone or the talk shortcut stops speech and opens listening; the parent's current turn is interrupted when the new request is submitted. Speaking over TTS alone does not interrupt it, and stopping the foreground leaves children running. Wake recognition uses Parakeet transcription, not a dedicated wake detector. The README describes the companion surfaces.
 
-During capture and drawing, the Electron surface is minimized and GNOME shows a native bar with Reply/Stop until the drawing clears. Friday has no desktop input and does not continuously watch the screen.
+During guidance, the Electron surface is minimized and GNOME shows a native bar with Reply/Stop until the drawing clears. During control, a non-clickable bottom banner replaces it, with progress and Esc-twice instructions. Speech updates do not pause the operator. Activating Friday stops control before bringing its window forward. Guidance remains request-driven; only an active control task runs an observation/action loop.
+
+The Codex operator is a blocking parent tool, not another child session. It shares the native permission, validates bounded input against the latest screenshot, and refreshes the screen after each batch. It uses the existing Codex login and an ephemeral thread, disables inherited integrations/environment tools, and returns only summary/progress/timing data to the parent. A question releases input before the parent asks the user. The README documents time limits and the limits of GNOME input shielding.
 
 ## Implementation and validation
 

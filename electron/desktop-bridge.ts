@@ -1,8 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { drawing, nativeDrawing, protocolVersion, record, type Observation } from './desktop-protocol.js';
+import {
+  computerBatch,
+  nativeBatch,
+  drawing,
+  nativeDrawing,
+  protocolVersion,
+  record,
+  type Observation,
+} from './desktop-protocol.js';
+import { CodexComputerRunner, type ComputerRunner, type ComputerFrame } from './computer-runner.js';
 import type { NativeDesktop } from './gnome-client.js';
-import { desktopErrorMessage, desktopUpdateMessage, type DesktopStatus } from './desktop-status.js';
+import { DesktopError, desktopErrorMessage, desktopUpdateMessage, type DesktopStatus } from './desktop-status.js';
 
 interface Run {
   id: string;
@@ -11,6 +20,7 @@ interface Run {
   ready?: Promise<void>;
   observation?: Observation;
   nativeObservation?: Observation;
+  control?: AbortController;
 }
 interface CompanionWindow {
   isVisible(): boolean;
@@ -50,11 +60,13 @@ export class DesktopBridge {
   private markTimer?: NodeJS.Timeout;
   onStopped?: (runId: string, error: unknown) => void;
   onMark?: (mark: Record<string, unknown>) => void;
+  onControlProgress?: (runId: string, text: string, spoken?: string) => void;
 
   constructor(
     private readonly native: NativeDesktop,
     private readonly getWindow: () => CompanionWindow | null,
     private readonly prepareImage?: (data: string) => { data: string; width: number; height: number; mimeType: string },
+    private readonly computer: ComputerRunner = new CodexComputerRunner(),
   ) {}
   async start() {
     this.server.requestTimeout = 30_000;
@@ -91,7 +103,7 @@ export class DesktopBridge {
           this.revokeRun(run.id);
           this.onStopped?.(run.id, error);
         });
-      }, 4000);
+      }, 1000);
       this.heartbeat.unref();
     });
     await run.ready;
@@ -101,15 +113,20 @@ export class DesktopBridge {
     const run = this.active;
     if (!run || run.id !== id) return;
     run.revoked = true;
+    run.control?.abort();
     this.active = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     if (this.markTimer) clearTimeout(this.markTimer);
     this.markTimer = undefined;
     // Deliberately outside the serialized operation queue so Stop never waits behind a capture.
-    void this.native.command({ op: preserveDrawing ? 'finish' : 'stop', runId: id }).catch(() => {});
+    const released = this.native.command({ op: preserveDrawing ? 'finish' : 'stop', runId: id }).catch(() => {});
     if (!preserveDrawing) this.captionRunId = undefined;
-    if (!preserveDrawing || this.captionRunId !== id || !this.getWindow()?.showCompanion) this.restore();
+    if (run.control)
+      void released.then(() => {
+        if (!this.active) this.restore();
+      });
+    else if (!preserveDrawing || this.captionRunId !== id || !this.getWindow()?.showCompanion) this.restore();
     else this.returnAfterDrawing(id, Date.now() + 35_000);
   }
   private returnAfterDrawing(id: string, deadline: number) {
@@ -168,6 +185,16 @@ export class DesktopBridge {
       const value = request.method === 'POST' ? await body(request) : {};
       this.assert(run);
       const route = request.url;
+      if (request.method === 'POST' && route === '/control') {
+        if (typeof value.goal !== 'string' || !value.goal.trim() || value.goal.length > 8000)
+          throw new Error('Computer control needs a goal of 1–8000 characters');
+        if (run.control) throw new Error('Computer control is already running');
+        const goal = value.goal.trim();
+        response.on('close', () => {
+          if (!response.writableEnded && this.active === run && run.control) this.revokeRun(run.id);
+        });
+        return json(response, 200, await this.enqueue(run, () => this.control(run, goal)));
+      }
       if (request.method === 'GET' && route === '/screenshot')
         return json(response, 200, await this.enqueue(run, () => this.observe(run)));
       if (request.method === 'POST' && route === '/draw')
@@ -200,7 +227,7 @@ export class DesktopBridge {
   }
   private async observe(run: Run) {
     this.captionRunId = run.id;
-    if (this.getWindow()?.showCompanion) {
+    if (!run.control && this.getWindow()?.showCompanion) {
       const visible = await this.setCaption(
         run.id,
         'Looking at your screen… Friday will return when the highlight clears.',
@@ -210,7 +237,7 @@ export class DesktopBridge {
       this.assert(run);
     }
     this.hide();
-    await new Promise((resolve) => setTimeout(resolve, 180));
+    if (!run.control) await new Promise((resolve) => setTimeout(resolve, 180));
     this.assert(run);
     const started = performance.now();
     const result = await this.native.command({ op: 'observe', runId: run.id });
@@ -251,8 +278,98 @@ export class DesktopBridge {
       outputBytes: typeof result.data === 'string' ? Buffer.byteLength(result.data, 'base64') : 0,
     };
     run.observation = result as unknown as Observation;
-    this.getWindow()?.showCompanion?.();
+    if (!run.control) this.getWindow()?.showCompanion?.();
     return result;
+  }
+  private async control(run: Run, goal: string) {
+    this.assert(run);
+    const controller = new AbortController();
+    run.control = controller;
+    this.captionRunId = run.id;
+    let spoken = 0;
+    try {
+      this.hide();
+      // Minimize Electron once, rather than before every frame.
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      this.assert(run);
+      await this.native.command({ op: 'control_begin', runId: run.id });
+      this.assert(run);
+      const result = await this.computer.run(
+        goal,
+        {
+          observe: async () => {
+            this.assert(run);
+            return (await this.observe(run)) as unknown as ComputerFrame;
+          },
+          act: async (value) => {
+            this.assert(run);
+            let batch;
+            try {
+              batch = computerBatch(value, run.observation);
+            } catch (error) {
+              throw new DesktopError(desktopErrorMessage(error), 'invalid_action');
+            }
+            const native = nativeBatch(batch, run.observation!, run.nativeObservation!);
+            // One observation authorizes one bounded batch, never two concurrent/replayed batches.
+            run.observation = undefined;
+            const result = await this.native.command({ ...native, op: 'act', runId: run.id });
+            this.assert(run);
+            return result;
+          },
+          draw: async (value) => {
+            this.assert(run);
+            let d;
+            try {
+              d = drawing(value, run.observation);
+            } catch (error) {
+              throw new DesktopError(desktopErrorMessage(error), 'invalid_action');
+            }
+            const result = await this.native.command({
+              ...nativeDrawing(d, run.observation!, run.nativeObservation!),
+              op: 'draw',
+              runId: run.id,
+            });
+            this.assert(run);
+            if (result.rendered !== true) throw new Error('GNOME did not confirm the drawing');
+            return result;
+          },
+          progress: (text, speech) => {
+            this.assert(run);
+            void this.setCaption(run.id, text);
+            this.onControlProgress?.(run.id, text, speech && spoken++ < 2 ? speech : undefined);
+          },
+        },
+        controller.signal,
+      );
+      this.assert(run);
+      await this.native.command({ op: 'control_end', runId: run.id });
+      this.assert(run);
+      await this.setCaption(run.id, result.summary, true);
+      return result;
+    } catch (error) {
+      if (this.active === run) this.revokeRun(run.id);
+      throw error;
+    } finally {
+      controller.abort();
+      run.control = undefined;
+    }
+  }
+  async interruptControl() {
+    const run = this.active;
+    if (!run?.control) return;
+    this.revokeRun(run.id);
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.native.command({ op: 'stop', runId: run.id }).catch(() => this.native.close()),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          this.native.close();
+          resolve();
+        }, 3500);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    this.onStopped?.(run.id, new DesktopError('Computer control stopped', 'user_stop'));
   }
   async setCaption(runId: string, text: string, finished = false) {
     if (runId !== this.captionRunId) return false;
@@ -263,14 +380,13 @@ export class DesktopBridge {
     } catch (error) {
       if (runId !== this.captionRunId) return false;
       const active = this.active?.id === runId;
-      this.restore();
       if (active) {
         this.revokeRun(runId);
         this.onStopped?.(
           runId,
           new Error(`Could not display Friday’s on-screen controls: ${desktopErrorMessage(error)}`),
         );
-      }
+      } else this.restore();
       return false;
     }
   }
@@ -345,13 +461,15 @@ export class DesktopBridge {
     }
   }
   stop() {
+    const controlling = Boolean(this.active?.control);
     this.captionRunId = undefined;
     if (this.active) this.revokeRun(this.active.id);
     else void this.native.command({ op: 'stop' }).catch(() => {});
-    this.restore();
+    if (!controlling) this.restore();
   }
   close() {
     this.stop();
+    this.computer.close();
     this.server.close();
     this.native.close();
   }

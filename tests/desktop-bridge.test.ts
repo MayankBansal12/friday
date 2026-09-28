@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DesktopBridge } from '../electron/desktop-bridge.js';
 import type { NativeDesktop } from '../electron/gnome-client.js';
+import { protocolVersion } from '../electron/desktop-protocol.js';
+import type { ComputerRunner } from '../electron/computer-runner.js';
 
 const bridges: DesktopBridge[] = [];
-async function fixture(compressed = false, companion = false) {
+async function fixture(compressed = false, companion = false, computer?: ComputerRunner) {
   const calls: Record<string, unknown>[] = [];
   let blockDraw: (() => Promise<Record<string, unknown>>) | undefined;
   let captionError = false;
@@ -13,7 +15,7 @@ async function fixture(compressed = false, companion = false) {
     close: vi.fn(),
     async command(value) {
       calls.push(value);
-      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion: 5, annotations };
+      if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion, annotations };
       if (value.op === 'draw' && blockDraw) return blockDraw();
       if (value.op === 'draw') return rendered ? { rendered: true } : { ids: ['button'] };
       if (value.op === 'caption') {
@@ -46,6 +48,7 @@ async function fixture(compressed = false, companion = false) {
     native,
     () => window,
     compressed ? () => ({ data: 'small', width: 1440, height: 810, mimeType: 'image/jpeg' }) : undefined,
+    computer,
   );
   bridges.push(bridge);
   await bridge.start();
@@ -200,12 +203,62 @@ describe('host desktop permissions and cancellation', () => {
     f.bridge.nativeStopped('run-1', reason);
     expect(f.bridge.onStopped).toHaveBeenCalledTimes(1);
   });
-  it('exposes no desktop input route', async () => {
+  it('exposes no unbounded single-action route', async () => {
     const f = await fixture();
     await f.request('/screenshot');
     const click = { action: 'click', observationId: 'obs', displayId: 'screen', x: 10, y: 20 };
     expect((await f.request('/action', click)).status).toBe(404);
     expect(f.calls.map((c) => c.op)).toEqual(['begin', 'observe']);
+  });
+  it('runs control inside the current lease, maps input, draws, and preserves guidance afterwards', async () => {
+    const computer: ComputerRunner = {
+      close: vi.fn(),
+      run: async (_goal, runtime) => {
+        const frame = await runtime.observe();
+        const args = {
+          observationId: frame.id,
+          displayId: frame.display.id,
+          actions: [{ type: 'click', x: 750, y: 300 }],
+        };
+        await runtime.act(args);
+        await expect(runtime.act(args)).rejects.toThrow('no longer current');
+        await runtime.observe();
+        await runtime.draw(guide);
+        runtime.progress('Verified', 'Finished clicking.');
+        return {
+          status: 'completed',
+          summary: 'Done',
+          batches: 1,
+          timings: { totalMs: 1, actionMs: 1, modelWaitMs: 0 },
+        };
+      },
+    };
+    const f = await fixture(true, true, computer);
+    f.bridge.onControlProgress = vi.fn();
+    expect((await f.request('/control', { goal: 'Click the target' })).status).toBe(200);
+    expect(f.calls.filter((c) => c.op === 'begin')).toHaveLength(1);
+    expect(f.calls.find((c) => c.op === 'act')).toMatchObject({ actions: [{ type: 'click', x: 1000, y: 400 }] });
+    expect(f.calls.some((c) => c.op === 'control_end')).toBe(true);
+    expect(f.window.showCompanion).not.toHaveBeenCalled();
+    expect(f.bridge.onControlProgress).toHaveBeenCalledWith('run-1', 'Verified', 'Finished clicking.');
+    expect((await f.request('/screenshot')).status).toBe(200);
+    expect(f.window.showCompanion).toHaveBeenCalledOnce();
+  });
+  it('activation aborts control and revokes its bearer before showing Friday', async () => {
+    const computer: ComputerRunner = {
+      close: vi.fn(),
+      run: async (_goal, _runtime, signal) =>
+        new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('stopped')))),
+    };
+    const f = await fixture(false, true, computer);
+    f.bridge.onStopped = vi.fn();
+    const response = f.request('/control', { goal: 'Click' });
+    await vi.waitFor(() => expect(f.calls.some((c) => c.op === 'control_begin')).toBe(true));
+    await f.bridge.interruptControl();
+    expect((await response).status).toBe(400);
+    expect((await f.request('/screenshot')).status).toBe(401);
+    expect(f.calls.at(-1)?.op).toBe('stop');
+    expect(f.bridge.onStopped).toHaveBeenCalledWith('run-1', expect.objectContaining({ code: 'user_stop' }));
   });
   it('revokes accepted queued operations immediately, including requests racing stop', async () => {
     const f = await fixture();
