@@ -1,7 +1,7 @@
 .presence-root {
   width: 100%;
   height: 100%;
-  padding: 10px;
+  padding: 0 10px 10px;
   font-family: Inter, system-ui, sans-serif;
   color: #f3f4ef;
 }
@@ -131,6 +131,12 @@
   min-width: 0;
   flex-direction: column;
   gap: 2px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  text-align: left;
+  cursor: pointer;
 }
 .presence-heading strong {
   font-size: 13px;
@@ -347,5 +353,205 @@
 @media (prefers-reduced-motion: reduce) {
   .presence-mark i {
     animation: none !important;
+  }
+}
+/* The top pill keeps its width and top edge as content opens below it. */
+.friday-presence {
+  border-radius: 999px;
+}
+.friday-presence.is-expanded {
+  border-radius: 28px;
+}
+.presence-action {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+.presence-root button:focus-visible {
+  outline: 2px solid #d9ff91;
+  outline-offset: -2px;
+}
+.presence-body {
+  max-height: 324px;
+  overflow-y: auto;
+}
+.background-root {
+  padding: 12px;
+}
+.background-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.task-popover {
+  width: 100%;
+  padding: 18px;
+  border: 1px solid #4b5747;
+  border-radius: 26px;
+  background: linear-gradient(125deg, #242d27fa, #171e1bfa);
+  box-shadow: 0 5px 20px #0005;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.task-popover .background-list {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.background-task-copy {
+  padding: 8px 0;
+  min-height: 44px;
+}
+.background-task-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-count {
+  border: 1px solid #69775a;
+  border-radius: 999px;
+  color: #d2e6bb;
+  background: #ffffff08;
+  padding: 7px 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  font-size: 11px;
+}
+.task-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 18px 10px;
+  padding: 0 5px 0 12px;
+  border-radius: 18px;
+  background: #ffffff09;
+  color: #c4d4b7;
+  font-size: 12px;
+}
+.task-context span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.presence-mark.speaking i {
+  animation-duration: 0.65s;
+}
+.presence-footer button {
+  min-height: 34px;
+}
+@media (max-width: 420px) {
+  .presence-bar {
+    gap: 5px;
+    padding: 0 8px;
+  }
+  .task-count span {
+    display: none;
+  }
+  .voice-meter {
+    display: none;
+  }
+}
+.friday-presence {
+  display: flex;
+  flex-direction: column;
+  max-height: 400px;
+}
+.presence-bar,
+.task-context {
+  flex-shrink: 0;
+}
+.presence-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.presence-content {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #58634b transparent;
+}
+.presence-composer,
+.presence-footer {
+  flex-shrink: 0;
+}
+.presence-composer {
+  margin-top: 0;
+}
+.presence-composer:focus-within {
+  border-color: #d9ff91;
+  box-shadow: 0 0 0 1px #d9ff9140;
+}
+.presence-composer input:focus-visible {
+  outline: none;
+}
+.orb-badge.attention {
+  background: #f4c68d;
+}
+.task-dot.needs_input {
+  color: #f4c68d;
+}
+.task-dot.failed,
+.task-dot.interrupted {
+  color: #f0ab98;
+}
+.orb-mic {
+  position: absolute;
+  bottom: 5px;
+  color: #899780;
+  display: flex;
+}
+.orb-mic.on {
+  color: #d9ff91;
+}
+.footer-mic {
+  padding: 0 8px !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .presence-root .spin {
+    animation: none;
+  }
+}
+.task-popover {
+  display: flex;
+  flex-direction: column;
+  max-height: 322px;
+  overflow: hidden;
+}
+.task-popover .background-list {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #58634b transparent;
+}
+.task-popover .background-task {
+  padding: 5px 0;
+}
+.task-popover .presence-footer {
+  padding-top: 10px;
+}
+.selected-question {
+  flex-shrink: 0;
+  margin: 0 18px 12px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: #f4c68d0b;
+  color: #efd1a9;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 100px;
+  overflow-y: auto;
+}
+.presence-content > .background-list:first-child {
+  margin-top: 0;
+}
+@media (max-width: 420px) {
+  .presence-footer {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding-top: 10px;
   }
 }

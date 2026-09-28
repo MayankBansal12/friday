@@ -93,7 +93,17 @@ export class ParakeetClient {
     return ready;
   }
 
-  async transcribe(path: string) {
+  transcribe(path: string) {
+    return this.request({ path });
+  }
+
+  transcribePcm(audio: ArrayBuffer) {
+    if (!(audio instanceof ArrayBuffer) || !audio.byteLength || audio.byteLength > 800_000 || audio.byteLength % 2)
+      return Promise.reject(new Error('Invalid PCM audio.'));
+    return this.request({ pcm: Buffer.from(audio).toString('base64'), sampleRate: 16000 });
+  }
+
+  private async request(input: { path: string } | { pcm: string; sampleRate: number }) {
     await this.prepare();
     const worker = this.worker;
     if (!worker) throw new Error('Parakeet worker is unavailable.');
@@ -105,7 +115,7 @@ export class ParakeetClient {
         this.options.requestTimeoutMs ?? 60_000,
       );
       worker.pending = { id, resolve, reject, timer };
-      worker.child.stdin.write(`${JSON.stringify({ id, path })}\n`);
+      worker.child.stdin.write(`${JSON.stringify({ id, ...input })}\n`);
     });
   }
 

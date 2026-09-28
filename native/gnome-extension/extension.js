@@ -85,7 +85,6 @@ export default class FridayDesktop extends Extension {
     this._watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
       if (this._lease && Date.now() > this._deadline) this._stop(true, 'lease_expired');
       if (this._expires && Date.now() > this._expires) this._clear();
-      if (this._captionExpires && Date.now() > this._captionExpires && !this._lease) this._clearCaption();
       return GLib.SOURCE_CONTINUE;
     });
   }
@@ -163,7 +162,7 @@ export default class FridayDesktop extends Extension {
 
   async _command(c, sender) {
     if (c.op === 'place_companion') {
-      if (!Number.isInteger(c.pid) || !['orb', 'bar', 'panel', 'details'].includes(c.layout))
+      if (!Number.isInteger(c.pid) || !['orb', 'tasks', 'quiet', 'bar', 'panel', 'details'].includes(c.layout))
         throw new Error('Invalid companion placement');
       const win = global
         .get_window_actors()
@@ -177,15 +176,13 @@ export default class FridayDesktop extends Extension {
       const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
       const width = Math.min(Math.max(Number(c.width) || 96, 76), Math.min(800, area.width - 24));
       const height = Math.min(Math.max(Number(c.height) || 96, 60), Math.min(850, area.height - 24));
-      const x = c.layout === 'orb' ? area.x + area.width - width - 18 : area.x + Math.round((area.width - width) / 2);
-      win.move_resize_frame(false, x, area.y + 12, width, height);
-      return { placed: true, x, y: area.y + 12, width, height };
-    }
-    if (c.op === 'caption') {
-      if (sender !== this._captionOwner || c.runId !== this._captionRun) throw new Error('Caption permission expired');
-      this._showCaption(String(c.text ?? '').slice(0, 220), c.finished === true);
-      await this._waitForPresentation(this._caption);
-      return { visible: true };
+      const x = ['orb', 'tasks'].includes(c.layout)
+        ? area.x + area.width - width - 18
+        : area.x + Math.round((area.width - width) / 2);
+      // The notch surfaces hug the top of the usable screen; the renderer adds no top padding.
+      const y = area.y + (['quiet', 'bar', 'panel'].includes(c.layout) ? 8 : 12);
+      win.move_resize_frame(false, x, y, width, height);
+      return { placed: true, layout: c.layout, x, y, width, height };
     }
     if (c.op === 'status')
       return {
@@ -209,8 +206,6 @@ export default class FridayDesktop extends Extension {
       this._stop(true, 'superseded');
       this._lease = identifier(c.runId);
       this._owner = sender;
-      this._captionOwner = sender;
-      this._captionRun = this._lease;
       this._deadline = Date.now() + 15000;
       this._armEscape();
       this._ownerWatch = Gio.bus_watch_name_on_connection(
@@ -294,7 +289,6 @@ export default class FridayDesktop extends Extension {
     if (this._busy || this._mark) throw new Error('Finish the current desktop operation first');
     this._busy = true;
     this._clear();
-    this._caption?.hide();
     const scene = this._scene;
     const focus = this._focus();
     const stream = Gio.MemoryOutputStream.new_resizable();
@@ -329,7 +323,6 @@ export default class FridayDesktop extends Extension {
     } finally {
       if (!stream.is_closed()) stream.close(null);
       this._busy = false;
-      if (this._lease) this._caption?.show();
     }
   }
 
@@ -351,21 +344,12 @@ export default class FridayDesktop extends Extension {
         'Event',
         new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason })]),
       );
-    if (clear) this._clearCaption();
     if (this._lease) this._lastStop = { runId: this._lease, reason, at: Date.now() };
     this._lease = null;
     this._observation = null;
     if (this._ownerWatch) Gio.bus_unwatch_name(this._ownerWatch);
     this._ownerWatch = 0;
     this._owner = null;
-    if (!clear && this._captionOwner && !this._captionWatch)
-      this._captionWatch = Gio.bus_watch_name_on_connection(
-        Gio.DBus.session,
-        this._captionOwner,
-        Gio.BusNameWatcherFlags.NONE,
-        null,
-        () => this._clearCaption(),
-      );
     this._endMark();
     if (clear) this._clear();
     for (const [id, resolve] of this._timers ?? []) {
@@ -376,25 +360,11 @@ export default class FridayDesktop extends Extension {
     if (!this._items?.size) this._disarmEscape();
   }
 
-  _clearCaption() {
-    this._caption?.destroy();
-    this._caption = null;
-    this._captionLabel = null;
-    this._replyButton = null;
-    this._captionStop = null;
-    this._captionOwner = null;
-    this._captionRun = null;
-    this._captionExpires = 0;
-    if (this._captionWatch) Gio.bus_unwatch_name(this._captionWatch);
-    this._captionWatch = 0;
-    this._syncCompositing();
-  }
-
   _syncCompositing() {
     // Fullscreen Wayland surfaces may be scanned out directly to the display.
     // Shell chrome alone does not prevent that. Match GNOME's own OSD lifecycle:
-    // inhibit unredirect for as long as either Friday overlay is visible.
-    const needed = Boolean(this._alive && (this._area?.visible || this._caption?.visible));
+    // inhibit unredirect for as long as Friday's overlay is visible.
+    const needed = Boolean(this._alive && this._area?.visible);
     if (needed === this._compositingHeld) return;
     if (needed) global.compositor.disable_unredirect();
     else global.compositor.enable_unredirect();
@@ -402,9 +372,7 @@ export default class FridayDesktop extends Extension {
   }
 
   _raiseOverlays() {
-    for (const actor of [this._area, this._caption]) {
-      if (actor?.visible) actor.get_parent()?.set_child_above_sibling(actor, null);
-    }
+    if (this._area?.visible) this._area.get_parent()?.set_child_above_sibling(this._area, null);
   }
 
   _presentation() {
@@ -412,7 +380,6 @@ export default class FridayDesktop extends Extension {
       compositingHeld: this._compositingHeld,
       drawingMapped: this._area?.is_mapped() ?? false,
       drawingSize: this._area?.get_size() ?? [0, 0],
-      captionMapped: this._caption?.is_mapped() ?? false,
       paintSerial: this._paintSerial,
       paintError: this._paintError,
     };
@@ -422,10 +389,7 @@ export default class FridayDesktop extends Extension {
     const deadline = Date.now() + 1500;
     while (this._alive && Date.now() < deadline) {
       await this._wait(32);
-      if (actor !== this._area && actor !== this._caption) break;
-      // Capture temporarily hides the caption; concurrent progress updates must
-      // wait for it to return instead of turning a successful capture into Stop.
-      if (!actor.visible && !(actor === this._caption && this._busy)) break;
+      if (actor !== this._area || !actor.visible) break;
       if (afterPaint !== undefined && this._paintError) throw new Error(`Drawing failed: ${this._paintError}`);
       if (
         this._compositingHeld &&
@@ -438,66 +402,6 @@ export default class FridayDesktop extends Extension {
         return;
     }
     throw new Error('Friday could not display its screen overlay. Clear it and try again.');
-  }
-
-  _showCaption(text, finished) {
-    if (!this._caption) {
-      this._caption = new St.BoxLayout({
-        vertical: true,
-        reactive: true,
-        track_hover: true,
-        can_focus: false,
-        style:
-          'background-color: rgba(27,31,27,0.96); color: #fbfaf4; border: 1px solid #748042; border-radius: 18px; padding: 12px 16px; spacing: 10px;',
-        width: 520,
-      });
-      this._caption.connect('notify::visible', () => this._syncCompositing());
-      const header = new St.BoxLayout({ style: 'spacing: 14px;' });
-      this._captionTitle = new St.Label({
-        text: 'Friday',
-        x_expand: true,
-        y_align: Clutter.ActorAlign.CENTER,
-        style: 'font-size: 13px; font-weight: bold; color: #d9ff63;',
-      });
-      header.add_child(this._captionTitle);
-      this._replyButton = new St.Button({
-        label: 'Reply',
-        can_focus: false,
-        style: 'background-color: #d9ff63; color: #1d1f1b; border-radius: 8px; padding: 6px 14px;',
-      });
-      this._replyButton.connect('clicked', () => {
-        this._dbus?.emit_signal('Event', new GLib.Variant('(s)', [JSON.stringify({ event: 'reveal' })]));
-        this._caption?.hide();
-      });
-      this._captionStop = new St.Button({
-        label: 'Stop',
-        can_focus: false,
-        style: 'color: #fbfaf4; padding: 6px 14px;',
-      });
-      this._captionStop.connect('clicked', () => this._stop(true, 'user_stop'));
-      header.add_child(this._replyButton);
-      header.add_child(this._captionStop);
-      this._caption.add_child(header);
-      this._captionLabel = new St.Label({ text, visible: false, style: 'font-size: 14px; color: #fbfaf4;' });
-      this._captionLabel.clutter_text.line_wrap = true;
-      this._caption.add_child(this._captionLabel);
-      this._caption.connect('notify::hover', () => {
-        this._captionLabel.visible = this._caption.hover;
-      });
-      Main.layoutManager.addTopChrome(this._caption, {
-        affectsInputRegion: true,
-        affectsStruts: false,
-        trackFullscreen: false,
-      });
-    }
-    this._captionTitle.text = finished ? 'Friday · Ready' : 'Friday · Guiding you';
-    this._captionLabel.text = text || 'Friday is working…';
-    this._captionStop.label = finished ? 'Clear' : 'Stop';
-    this._captionExpires = Date.now() + 90000;
-    this._caption.set_position(700, 44);
-    this._caption.show();
-    this._raiseOverlays();
-    this._syncCompositing();
   }
 
   _watchWindow() {

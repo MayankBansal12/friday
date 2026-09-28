@@ -37,7 +37,7 @@ describe('task persistence', () => {
     const dir = await mkdtemp(join(tmpdir(), 'buddy-store-'));
     dirs.push(dir);
     const store = new TaskStore(join(dir, 'state.json'));
-    const settings = { defaultCwd: '/tmp', launchAtLogin: true, wakeWord: 'Computer', model: 'kimi-k2.6' };
+    const settings = { defaultCwd: '/tmp', launchAtLogin: true, wakeWord: 'Computer', model: 'gpt-6-luna' };
     await store.save([], settings);
     expect(await store.loadState()).toEqual({ tasks: [], settings });
     expect(await store.load()).toEqual([]);

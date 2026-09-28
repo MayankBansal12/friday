@@ -1,7 +1,15 @@
 import { resolve } from 'node:path';
 import type { BuddySettings, ListeningState } from './types.js';
 
-const listeningStates = new Set<ListeningState>(['idle', 'listening', 'transcribing', 'armed', 'error']);
+const listeningStates = new Set<ListeningState>([
+  'idle',
+  'paused',
+  'starting',
+  'listening',
+  'transcribing',
+  'armed',
+  'error',
+]);
 const idPattern = /^[a-zA-Z0-9_.:-]{1,128}$/;
 const modelPattern = /^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/;
 

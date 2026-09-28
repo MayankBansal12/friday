@@ -4,13 +4,13 @@ import { openCodeGoModelOptions } from '../src/model-options.js';
 describe('OpenCode Go model picker', () => {
   it('offers every model in the OpenCode Go provider catalog', () => {
     expect(openCodeGoModelOptions.map(({ value }) => value)).toEqual([
+      'gpt-6-luna',
       'deepseek-v4-flash',
       'deepseek-v4-pro',
       'glm-5.1',
       'glm-5.2',
       'glm-5.3',
       'glm-5.3-flash',
-      'kimi-k2.6',
       'kimi-k2.7-code',
       'mimo-v2.5',
       'mimo-v2.5-pro',
