@@ -982,8 +982,8 @@ export default function App() {
       // Reset host wake-only state even when this activation keeps the live stream.
       window.buddy.listening('paused');
       listeningRef.current = 'paused';
-      interruptOnlyRef.current = false;
-      conversationOpenRef.current = engaged || direct;
+      interruptOnlyRef.current = typingRef.current;
+      conversationOpenRef.current = !typingRef.current && (engaged || direct);
       directVoiceRef.current = direct;
       setDirectVoice(direct);
       void window.buddy.silence();
@@ -992,7 +992,7 @@ export default function App() {
       setHeard('');
       const generation = generationRef.current;
       if (streamRef.current?.active && captureRef.current) {
-        updateListening(engaged || direct ? 'armed' : 'listening');
+        updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
         beginSegmentRef.current?.(streamRef.current, captureRef.current, generation);
         return;
       }
@@ -1034,7 +1034,7 @@ export default function App() {
             { once: true },
           );
         });
-        updateListening(engaged || direct ? 'armed' : 'listening');
+        updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
         beginSegmentRef.current?.(stream, capture, generation);
       } catch (error) {
         if (generation !== generationRef.current) return;
@@ -1519,12 +1519,7 @@ export default function App() {
           void startListening(false, true);
         }}
         onMicOn={() => {
-          if (!typingRef.current) void startListening(false, false);
-          else {
-            micEnabledRef.current = true;
-            setMicEnabled(true);
-            updateListening('paused');
-          }
+          void startListening(false, false);
         }}
         onMicOff={disableMicrophone}
         onSelectTask={(id) => {

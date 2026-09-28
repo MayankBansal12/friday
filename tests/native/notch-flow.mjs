@@ -137,6 +137,19 @@ try {
   assert.equal(await evaluate('fixture.listening'), 'listening');
   await speech('Hey Friday');
   assert.equal(await evaluate('fixture.listening'), 'armed');
+  // Enabling audio during text entry must create capture for addressed Stop too.
+  await open('off');
+  await hover();
+  await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Type instead')).click()");
+  await pause();
+  await click('[aria-label="Turn microphone on"]');
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  assert.equal(await evaluate('fixture.listening'), 'paused');
+  await speech('Hey Friday, ignore this while I type');
+  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='submit').length"), 0);
+  await speech('Friday stop');
+  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='stop').length"), 1);
+  assert.equal(await evaluate('fixture.listening'), 'listening');
   // Approval/error content stays discoverable without automatic expansion.
   for (const state of ['approval', 'error', 'guidance']) {
     await open(state);
