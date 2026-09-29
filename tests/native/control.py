@@ -35,7 +35,7 @@ def _exercise(command, driver, observe, stage,heartbeat_enabled):
     result=act([{'type':'click', **targets()['button']}])
     assert (stage/'clicked').exists(), 'Friday click did not reach GTK'
     print('Control click timing:', result, flush=True)
-    act([{'type':'click', **targets()['entry']}, {'type':'type','text':'Friday 123'}])
+    act([{'type':'click', **targets()['entry']}, {'type':'keypress','keys':['ctrl','a']}, {'type':'type','text':'Friday 123'}])
     assert (stage/'typed').read_text()=='Friday 123', (stage/'typed').read_text()
     driver('key', key=ord('x')); time.sleep(.1)
     assert (stage/'typed').read_text()=='Friday 123', 'Driver keyboard input escaped the shield'
