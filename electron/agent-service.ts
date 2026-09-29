@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 import { parentPrompt, childPrompt } from './agent-prompts.js';
-import { desktopInterruption } from './desktop-status.js';
+import { desktopInterruption, type DesktopStatus } from './desktop-status.js';
 import { TaskStore } from './store.js';
 import type { AgentStep, BuddySettings, FridayState, PresentationState, SessionRecord, TaskRecord } from './types.js';
 import { validateSpeech, speechRecovery } from './speech-policy.js';
@@ -118,6 +118,7 @@ export class AgentService extends EventEmitter {
       url: string;
       beginRun?(id: string): string;
       revokeRun?(id: string, preserveDrawing?: boolean): void;
+      status?(): Promise<DesktopStatus>;
     },
     private readonly options: AgentServiceOptions = {},
   ) {
@@ -495,6 +496,7 @@ export class AgentService extends EventEmitter {
       worker.toolSteps.clear();
       if (session.role === 'parent') worker.desktopToken = this.bridge.beginRun?.(task.id);
       await this.changed(task);
+      const desktop = session.role === 'parent' ? await this.desktopContext() : '';
       if (generation !== this.actionGeneration || terminal.has(task.status)) return structuredClone(task);
       const context =
         session.role === 'parent'
@@ -519,7 +521,7 @@ export class AgentService extends EventEmitter {
             },
           )}`
         : '';
-      this.send(worker, { id: randomUUID(), type: 'prompt', message: `${prompt}${context}${subject}` });
+      this.send(worker, { id: randomUUID(), type: 'prompt', message: `${prompt}${context}${subject}${desktop}` });
     } catch (error) {
       if (worker) await this.fail(worker, error instanceof Error ? error.message : String(error));
       else {
@@ -530,6 +532,31 @@ export class AgentService extends EventEmitter {
       }
     }
     return structuredClone(task);
+  }
+  private async desktopContext() {
+    if (!this.bridge.status) return '';
+    let timer: NodeJS.Timeout | undefined;
+    let status: DesktopStatus | undefined;
+    try {
+      status = await Promise.race([
+        this.bridge.status().catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), 1200);
+        }),
+      ]);
+    } catch {
+      // A readiness check must not prevent ordinary conversation.
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    return `\n\n[Friday desktop status — checked for this request, not a screenshot. Use this instead of old setup errors in conversation history. If ready, attempt the requested desktop tool; Codex/input can still report their own errors. If unknown, do not claim a reinstall or sign-in is required.]\n${JSON.stringify(
+      {
+        checkedAt: Date.now(),
+        ready: status?.ready ?? 'unknown',
+        ...(status?.protocolVersion !== undefined ? { protocolVersion: status.protocolVersion } : {}),
+        ...(status?.error ? { error: status.error.slice(0, 1000) } : {}),
+      },
+    )}`;
   }
   private launch(session: SessionRecord) {
     const token = randomBytes(32).toString('hex');

@@ -44,7 +44,10 @@ class FakeChild extends EventEmitter {
   }
 }
 
-async function fixture(options: ConstructorParameters<typeof AgentService>[4] = {}) {
+async function fixture(
+  options: ConstructorParameters<typeof AgentService>[4] = {},
+  bridgeOptions: Partial<ConstructorParameters<typeof AgentService>[3]> = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'buddy-agent-'));
   dirs.push(dir);
   const children: FakeChild[] = [];
@@ -59,7 +62,7 @@ async function fixture(options: ConstructorParameters<typeof AgentService>[4] = 
     new TaskStore(join(dir, 'state.json')),
     settings,
     '/tmp/extension.mjs',
-    { url: 'http://127.0.0.1:1', beginRun: () => 'token' },
+    { url: 'http://127.0.0.1:1', beginRun: () => 'token', ...bridgeOptions },
     { spawn: spawnMock, terminateGraceMs: 100, persistDebounceMs: 5, ...options },
   );
   services.push(service);
@@ -275,6 +278,65 @@ describe('AgentService lifecycle', () => {
     expect(service.list().find((item) => item.id === task.id)?.status).toBe('failed');
     expect(children[0].signals).toContain('SIGTERM');
     await expect(service.submit('too late')).rejects.toThrow('shutting down');
+  });
+});
+
+describe('fresh desktop readiness', () => {
+  it('refreshes a recovered extension in the same saved parent conversation', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce({ ready: false, protocolVersion: 5, error: 'Sign out and back in.' })
+      .mockResolvedValueOnce({ ready: true, protocolVersion: 6 });
+    const { service, children } = await fixture({}, { status });
+    const first = await service.submit('Open the app');
+    const previous = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(previous).toContain('"ready":false');
+    expect(previous).toContain('Sign out and back in.');
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Please sign in again.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    const retry = await service.submit('I signed back in. Check again.');
+    const current = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(retry.conversationId).toBe(first.conversationId);
+    expect(children).toHaveLength(1);
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(current).toContain('"ready":true');
+    expect(current).toContain('"protocolVersion":6');
+    expect(current).not.toContain('Sign out and back in.');
+  });
+  it('does not check or send desktop readiness to background children', async () => {
+    const status = vi.fn(async () => ({ ready: true }));
+    const { service, children } = await fixture({}, { status });
+    await service.startChild('Research', 'Read project files');
+    expect(status).not.toHaveBeenCalled();
+    expect(children[0].stdin.read().toString()).not.toContain('Friday desktop status');
+  });
+  it.each(['failure', 'timeout'])('keeps conversation available after a status %s', async (mode) => {
+    const status = vi.fn(() =>
+      mode === 'timeout' ? new Promise<never>(() => {}) : Promise.reject(new Error('Disconnected')),
+    );
+    const { service, children } = await fixture({}, { status });
+    await service.submit('Hello');
+    const sent = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(sent).toContain('"ready":"unknown"');
+    expect(sent).not.toContain('"ready":false');
+    expect(status).toHaveBeenCalledOnce();
+  });
+  it('does not send a queued prompt when Stop arrives during the readiness check', async () => {
+    let finish!: (value: { ready: boolean }) => void;
+    const status = vi.fn(
+      () =>
+        new Promise<{ ready: boolean }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { service, children } = await fixture({}, { status });
+    const pending = service.submit('Open the app');
+    await vi.waitFor(() => expect(status).toHaveBeenCalledOnce());
+    await service.stop();
+    finish({ ready: true });
+    expect((await pending).status).toBe('cancelled');
+    expect(children[0].stdin.read()?.toString()).not.toContain('"type":"prompt"');
   });
 });
 
