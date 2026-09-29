@@ -1,15 +1,16 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, session, screen, shell, Tray } from 'electron';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { DesktopBridge } from '../desktop-bridge.js';
-import { Speaker } from '../speaker.js';
+import { createSpeakerFromEnvironment } from '../speaker.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { TaskStore } from '../store.js';
+import { stageRuntimeExtension } from '../runtime-extension.js';
 import {
   activeStatuses,
   type BuddySettings,
@@ -35,37 +36,79 @@ let shutdownComplete = false;
 let service: AgentService;
 let speech: SpeechService;
 let bridge: DesktopBridge;
-const speaker = new Speaker();
+const speaker = createSpeakerFromEnvironment();
 let native: GnomeClient;
-let surface: SurfaceLayout = 'orb';
+let surface: SurfaceLayout = 'quiet';
 let surfaceHeight: number | undefined;
+let surfaceWidth: number | undefined;
+let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
 
 function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const area = screen.getPrimaryDisplay().workArea;
+  const notch = ['quiet', 'bar', 'panel'].includes(layout);
   const [wantedWidth, wantedHeight] =
-    layout === 'orb' ? [96, 96] : layout === 'bar' ? [520, 76] : layout === 'panel' ? [560, 420] : [760, 800];
+    layout === 'orb'
+      ? [96, 96]
+      : layout === 'tasks'
+        ? [400, 420]
+        : layout === 'quiet'
+          ? [520, 54]
+          : layout === 'bar'
+            ? [520, 66]
+            : layout === 'panel'
+              ? [520, 420]
+              : [760, 800];
   const width = Math.min(wantedWidth, area.width - 24);
   const height = Math.min(
-    layout === 'panel' && contentHeight ? Math.max(96, Math.min(420, Math.ceil(contentHeight))) : wantedHeight,
+    (notch || layout === 'tasks') && contentHeight
+      ? Math.max(notch ? 1 : 96, Math.min(420, Math.ceil(contentHeight)))
+      : wantedHeight,
     area.height - 24,
   );
-  const x = layout === 'orb' ? area.x + area.width - width - 18 : area.x + Math.round((area.width - width) / 2);
-  const y = area.y + 12;
+  const x = ['orb', 'tasks'].includes(layout)
+    ? area.x + area.width - width - 18
+    : area.x + Math.round((area.width - width) / 2);
+  // Keep the visible edge 5px below the desktop's system panel, outside its input region.
+  const y = area.y + (notch ? 5 : 12);
   return { x, y, width, height };
 }
 
-function setSurface(layout: SurfaceLayout, contentHeight?: number) {
+function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?: number) {
   if (!window || window.isDestroyed()) return;
+  const layoutChanged = layout !== surface;
   surface = layout;
   surfaceHeight = contentHeight;
+  surfaceWidth = contentWidth;
   const bounds = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
-  if (Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value))
-    window.setBounds(bounds);
-  if (nativeWindowPlacement)
+  const boundsChanged = Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value);
+  if (boundsChanged) window.setBounds(bounds);
+  // XWayland input shape leaves the empty space beside the task circle click-through.
+  // Keep a small margin for the shadow and the bridge into the hover panel.
+  if (process.platform === 'linux') {
+    const { width, height } = bounds;
+    const notchWidth = Math.max(1, Math.min(width, Math.ceil((contentWidth ?? (layout === 'quiet' ? 360 : 500)) + 20)));
+    const regions =
+      layout === 'tasks'
+        ? [
+            { x: width - 84, y: 4, width: 80, height: 80 },
+            { x: 4, y: 82, width: width - 8, height: Math.max(1, height - 86) },
+          ]
+        : layout === 'orb'
+          ? [{ x: width - 84, y: 4, width: 80, height: 80 }]
+          : layout === 'details'
+            ? [{ x: 0, y: 0, width, height }]
+            : [{ x: Math.floor((width - notchWidth) / 2), y: 0, width: notchWidth, height }];
+    window.setShape(regions);
+  }
+  const placement = JSON.stringify({ layout, ...bounds });
+  if (nativeWindowPlacement && (layoutChanged || boundsChanged || nativePlacement !== placement))
     void native
       ?.command({ op: 'place_companion', pid: process.pid, layout, width: bounds.width, height: bounds.height })
+      .then((result) => {
+        if (result.placed) nativePlacement = placement;
+      })
       .catch((error) => console.warn('Friday window placement requires the updated GNOME extension:', error.message));
 }
 
@@ -73,20 +116,16 @@ function reanchorSurface() {
   if (placementTimer) clearTimeout(placementTimer);
   placementTimer = setTimeout(() => {
     placementTimer = undefined;
-    setSurface(surface, surfaceHeight);
+    setSurface(surface, surfaceHeight, surfaceWidth);
   }, 60);
 }
 
 function setExpanded(value: boolean) {
   if (!window) return;
-  setSurface(value ? 'details' : 'orb');
+  if (value) setSurface('details');
+  else if (surface === 'details') setSurface('quiet');
   window.webContents.send('window:expanded', value);
 }
-function showCompanion() {
-  const task = service.list().find((task) => task.role !== 'child' && activeStatuses.has(task.status));
-  if (task) void bridge.setCaption(task.id, task.response || task.steps.at(-1)?.title || 'Friday is working…');
-}
-
 function stopListening() {
   service?.silence();
   speaker.stop();
@@ -126,6 +165,7 @@ function createWindow(openSilently: boolean) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
   window.on('close', (event) => {
@@ -150,11 +190,17 @@ function createWindow(openSilently: boolean) {
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
   window.once('ready-to-show', () => {
-    setSurface(surface, surfaceHeight);
+    setSurface(surface, surfaceHeight, surfaceWidth);
     if (!openSilently) activateFriday(false);
   });
-  window.on('show', () => setSurface(surface, surfaceHeight));
-  window.on('restore', reanchorSurface);
+  window.on('show', () => {
+    nativePlacement = undefined;
+    setSurface(surface, surfaceHeight, surfaceWidth);
+  });
+  window.on('restore', () => {
+    nativePlacement = undefined;
+    reanchorSurface();
+  });
   window.on('move', reanchorSurface);
   screen.on('display-metrics-changed', reanchorSurface);
   screen.on('display-added', reanchorSurface);
@@ -204,7 +250,7 @@ if (hasSingleInstanceLock)
       defaultCwd: process.env.HOME || process.cwd(),
       launchAtLogin: app.getLoginItemSettings().openAtLogin,
       wakeWord: process.env.LINUX_BUDDY_WAKE_WORD || 'Friday',
-      model: process.env.LINUX_BUDDY_MODEL || 'glm-5.3-flash',
+      model: process.env.LINUX_BUDDY_MODEL || 'gpt-6-luna',
       autoSpeak: true,
     };
     speech = new SpeechService(settings.wakeWord, {
@@ -223,15 +269,10 @@ if (hasSingleInstanceLock)
         window
           ? {
               isVisible: () => window!.isVisible() && !window!.isMinimized(),
-              hide: () => window!.minimize(),
+              hide: () => window!.hide(),
               showInactive: () => {
-                window!.restore();
-                // Wayland has no xdg-shell unminimize request. Remap the surface to bring it back.
-                window!.hide();
-                window!.show();
-                window!.focus();
+                window!.showInactive();
               },
-              showCompanion,
             }
           : null,
       (data) => {
@@ -244,12 +285,7 @@ if (hasSingleInstanceLock)
     );
     await bridge.start();
     const runtimeDirectory = join(app.getPath('userData'), 'runtime');
-    const extensionPath = join(runtimeDirectory, 'friday-extension.mjs');
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-    await Promise.all([
-      copyFile(join(root, 'dist-electron/friday-extension.js'), extensionPath),
-      copyFile(join(root, 'dist-electron/desktop-protocol.js'), join(runtimeDirectory, 'desktop-protocol.js')),
-    ]);
+    const extensionPath = await stageRuntimeExtension(join(root, 'dist-electron'), runtimeDirectory);
     service = new AgentService(
       new TaskStore(join(app.getPath('userData'), 'tasks.json')),
       settings,
@@ -277,15 +313,12 @@ if (hasSingleInstanceLock)
     if (!globalShortcut.register('CommandOrControl+Shift+Space', activateFriday))
       console.warn('Global shortcut Ctrl+Shift+Space is unavailable');
 
+    bridge.onGuidanceChanged = (guiding) => {
+      if (window && !window.isDestroyed()) window.webContents.send('desktop:guidance', guiding);
+    };
     service.on('state', (state) => window?.webContents.send('friday:state', state));
     service.on('task', (task: TaskRecord) => {
       window?.webContents.send('task:changed', task);
-      if (task.role !== 'child')
-        void bridge.setCaption(
-          task.id,
-          task.error || task.response || task.steps.at(-1)?.title || 'Friday is working…',
-          ['completed', 'failed', 'cancelled'].includes(task.status),
-        );
     });
 
     const fromWindow = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) => {
@@ -303,22 +336,34 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       return service.stopChild(validId(id));
     });
-    ipcMain.handle('window:surface', (event, layout: unknown, height: unknown) => {
+    ipcMain.handle('window:surface', (event, layout: unknown, height: unknown, width: unknown) => {
       fromWindow(event);
-      if (!['orb', 'bar', 'panel', 'details'].includes(String(layout))) throw new Error('Invalid surface');
-      setSurface(layout as SurfaceLayout, typeof height === 'number' && Number.isFinite(height) ? height : undefined);
+      if (!['orb', 'tasks', 'quiet', 'bar', 'panel', 'details'].includes(String(layout)))
+        throw new Error('Invalid surface');
+      setSurface(
+        layout as SurfaceLayout,
+        typeof height === 'number' && Number.isFinite(height) ? height : undefined,
+        typeof width === 'number' && Number.isFinite(width) ? width : undefined,
+      );
     });
     ipcMain.handle('foreground:stop', async (event) => {
       fromWindow(event);
-      stopListening();
+      service.silence();
+      speaker.stop();
       bridge.stop();
       const task = service.list().find((item) => item.role !== 'child' && activeStatuses.has(item.status));
       if (task) await service.cancel(task.id);
     });
-    ipcMain.handle('tasks:submit', (event, prompt: unknown) => {
+    ipcMain.handle('tasks:submit', (event, prompt: unknown, context: unknown) => {
       fromWindow(event);
       speaker.stop();
-      return service.submit(validPrompt(prompt));
+      let selectedChildId: string | undefined;
+      if (context !== undefined) {
+        if (!context || typeof context !== 'object' || Array.isArray(context)) throw new Error('Invalid task context');
+        const id = (context as { selectedChildId?: unknown }).selectedChildId;
+        if (id !== undefined) selectedChildId = validId(id);
+      }
+      return service.submit(validPrompt(prompt), { selectedChildId });
     });
     ipcMain.handle('tasks:approve', (event, id: unknown, approved: unknown) => {
       fromWindow(event);
@@ -331,6 +376,10 @@ if (hasSingleInstanceLock)
       bridge.stop();
       await bridge.clear().catch(() => {});
       return id;
+    });
+    ipcMain.handle('desktop:guidance', (event) => {
+      fromWindow(event);
+      return bridge.guiding;
     });
     ipcMain.handle('desktop:status', (event) => {
       fromWindow(event);
@@ -346,23 +395,22 @@ if (hasSingleInstanceLock)
     });
     ipcMain.handle('desktop:stop', async (event) => {
       fromWindow(event);
-      stopListening();
       bridge.stop();
-      await Promise.all(
-        service
-          .list()
-          .filter((task) => activeStatuses.has(task.status))
-          .map((task) => service.cancel(task.id)),
-      );
+      speaker.stop();
+      await service.stop();
     });
-    ipcMain.handle('voice:speak', (event, text: unknown) => {
+    ipcMain.handle('voice:speak', (event, taskId: unknown) => {
       fromWindow(event);
-      if (typeof text !== 'string') throw new Error('Invalid speech text');
-      return speaker.speak(text);
+      if (typeof taskId !== 'string') throw new Error('Invalid reply');
+      return service.readAloud(taskId);
     });
     ipcMain.handle('voice:silence', (event) => {
       fromWindow(event);
       service.silence();
+    });
+    ipcMain.handle('voice:pcm', (event, request: unknown) => {
+      fromWindow(event);
+      return speech.transcribePcm(request);
     });
     ipcMain.handle('voice:transcribe', (event, audio: unknown, mimeType: unknown) => {
       fromWindow(event);
@@ -385,9 +433,10 @@ if (hasSingleInstanceLock)
       if (typeof next.wakeWord === 'string') speech.setWakeWord(next.wakeWord);
       return updated;
     });
-    ipcMain.handle('window:expand', (event, value: unknown) => {
+    ipcMain.handle('window:expand', async (event, value: unknown) => {
       fromWindow(event);
       if (typeof value !== 'boolean') throw new Error('Invalid window layout');
+      await bridge.interruptControl();
       setExpanded(value);
       window?.setFocusable(true);
       window?.show();
@@ -402,10 +451,22 @@ if (hasSingleInstanceLock)
       try {
         fromWindow(event);
         const next = validListeningState(state);
-        tray?.setToolTip(`Friday — ${next}`);
+        tray?.setToolTip(
+          `Friday — ${
+            {
+              idle: 'Microphone off',
+              paused: 'Microphone paused',
+              starting: 'Opening microphone…',
+              listening: `Say Hey ${service.getSettings().wakeWord}`,
+              transcribing: 'One moment…',
+              armed: 'Go ahead…',
+              error: 'Check your microphone',
+            }[next as ListeningState]
+          }`,
+        );
         if (next === 'listening' || next === 'armed')
           void speech.prepare().catch((error) => console.error('Local STT preparation failed', error.message));
-        if (next === 'idle' || next === 'error') speech.reset();
+        if (next === 'idle' || next === 'paused' || next === 'error' || next === 'listening') speech.reset();
       } catch {
         /* Ignore forged one-way renderer messages. */
       }
@@ -418,6 +479,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   quitting = true;
   stopListening();
+  speaker.dispose();
   speech?.close();
   void (async () => {
     bridge?.stop();

@@ -17,7 +17,7 @@ const service = new AgentService(
     launchAtLogin: false,
     wakeWord: 'Friday',
     autoSpeak: false,
-    model: process.env.LINUX_BUDDY_MODEL || 'glm-5.3-flash',
+    model: process.env.LINUX_BUDDY_MODEL || 'gpt-6-luna',
   },
   fileURLToPath(new URL('../../dist-electron/friday-extension.js', import.meta.url)),
   { url: 'http://127.0.0.1:1' },

@@ -1,6 +1,7 @@
 // Real signed-in Codex, restricted to a synthetic GTK app in the isolated seat.
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { DesktopBridge } from '../../dist-electron/desktop-bridge.js';
@@ -8,6 +9,7 @@ import { GnomeClient } from '../../dist-electron/gnome-client.js';
 
 assert.equal(process.env.FRIDAY_ISOLATED_TEST, '1');
 const stage = process.env.FRIDAY_TEST_STAGE;
+let frameNumber = 0;
 const native = new GnomeClient(new URL('../../native/desktop-client.py', import.meta.url).pathname);
 const bridge = new DesktopBridge(
   native,
@@ -22,7 +24,9 @@ const bridge = new DesktopBridge(
       { input: Buffer.from(data, 'base64'), maxBuffer: 4 * 1024 * 1024 },
     );
     assert.equal(result.status, 0, result.stderr.toString());
-    return { data: result.stdout.toString().trim(), width: 1440, height: 810, mimeType: 'image/jpeg' };
+    const prepared = result.stdout.toString().trim();
+    writeFileSync(join(stage, `computer-frame-${++frameNumber}.jpg`), Buffer.from(prepared, 'base64'));
+    return { data: prepared, width: 1440, height: 810, mimeType: 'image/jpeg' };
   },
 );
 native.onStopped = (id, error) => bridge.nativeStopped(id, error);

@@ -1,10 +1,12 @@
 /// <reference types="vite/client" />
+import type { PcmRequest, PcmResult } from '../electron/pcm-transcription';
 import type { DesktopStatus } from '../electron/desktop-status';
 import type {
   BuddySettings,
   FridayState,
   ListeningState,
   SurfaceLayout,
+  RequestContext,
   TaskRecord,
   TranscriptResult,
 } from '../electron/types';
@@ -12,13 +14,15 @@ import type {
 declare global {
   interface Window {
     buddy: {
+      guidance(): Promise<boolean>;
+      onGuidance(callback: (guiding: boolean) => void): () => void;
       fridayState(): Promise<FridayState>;
       stopChild(id: string): Promise<unknown>;
       stopForeground(): Promise<void>;
-      setSurface(layout: SurfaceLayout, height?: number): Promise<void>;
+      setSurface(layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void>;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
-      submit(prompt: string): Promise<TaskRecord>;
+      submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;
       newConversation(): Promise<string>;
       desktopStatus(): Promise<DesktopStatus>;
       mark(): Promise<void>;
@@ -26,10 +30,11 @@ declare global {
       stop(): Promise<void>;
       onMark(callback: (mark: Record<string, unknown>) => void): () => void;
       approve(id: string, approved: boolean): Promise<void>;
+      transcribePcm(request: PcmRequest): Promise<PcmResult>;
       transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult>;
       getSettings(): Promise<BuddySettings>;
       updateSettings(value: Partial<BuddySettings>): Promise<BuddySettings>;
-      speak(text: string): Promise<void>;
+      speak(taskId: string): Promise<void>;
       silence(): Promise<void>;
       setExpanded(value: boolean): Promise<void>;
       onExpanded(callback: (expanded: boolean) => void): () => void;

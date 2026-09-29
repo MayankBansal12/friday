@@ -41,12 +41,15 @@ import {
   type FridayState,
   type ListeningState,
   type RunStatus,
+  type RequestContext,
   type TaskRecord,
-  type TranscriptResult,
 } from '../electron/types';
 import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
+import { PcmCapture } from './pcm-capture';
+import { ProgressiveTranscription } from './progressive-transcription';
 import { VoiceFollowUp } from './voice-follow-up';
+import { detectStopCommand, detectWakeCommand } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
 
 const starterIdeas = [
@@ -83,18 +86,26 @@ function statusLabel(status: RunStatus) {
 }
 
 function voiceCopy(state: ListeningState, wakeWord: string) {
+  if (state === 'paused')
+    return {
+      eyebrow: 'Microphone paused',
+      title: 'Voice is paused.',
+      detail: 'Friday will listen again when you’re done.',
+    };
+  if (state === 'starting')
+    return { eyebrow: 'Opening microphone…', title: 'One moment…', detail: 'Getting ready to listen.' };
   if (state === 'listening') {
     return {
-      eyebrow: 'Waiting for wake word',
-      title: `Say “${wakeWord}”.`,
-      detail: `Try “${wakeWord}, open my calendar.”`,
+      eyebrow: 'Microphone on',
+      title: `Say “Hey ${wakeWord}”.`,
+      detail: `Try “Hey ${wakeWord}, open my calendar.”`,
     };
   }
   if (state === 'armed') {
-    return { eyebrow: 'Wake word heard', title: 'Go ahead.', detail: 'I’m ready for the task.' };
+    return { eyebrow: 'Go ahead…', title: 'Go ahead.', detail: 'I’m ready for the task.' };
   }
   if (state === 'transcribing') {
-    return { eyebrow: 'On-device speech', title: 'Making sense of that…', detail: 'Transcribing on your computer.' };
+    return { eyebrow: 'One moment…', title: 'Making sense of that…', detail: 'Making sense of that…' };
   }
   if (state === 'error') {
     return {
@@ -106,7 +117,7 @@ function voiceCopy(state: ListeningState, wakeWord: string) {
   return {
     eyebrow: 'Voice ready',
     title: 'Start listening',
-    detail: `Then say “${wakeWord}” before your request.`,
+    detail: `Then say “Hey ${wakeWord}” before your request.`,
   };
 }
 
@@ -156,6 +167,7 @@ function TaskView({
   onApprove,
   approvalPending,
   speaking,
+  replayDisabledReason,
   onSpeak,
 }: {
   task: TaskRecord;
@@ -166,6 +178,7 @@ function TaskView({
   onApprove: (approved: boolean) => void;
   approvalPending: boolean;
   speaking: boolean;
+  replayDisabledReason?: string;
   onSpeak: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -213,8 +226,14 @@ function TaskView({
                 className="copy-button pressable"
                 type="button"
                 onClick={onSpeak}
-                aria-label={speaking ? 'Stop speaking' : 'Read aloud'}
-                title={speaking ? 'Stop speaking' : 'Read aloud'}
+                disabled={!speaking && (!task.speechText || Boolean(replayDisabledReason))}
+                aria-label={speaking ? 'Stop speaking' : 'Read short reply'}
+                title={
+                  speaking
+                    ? 'Stop speaking'
+                    : replayDisabledReason ||
+                      (task.speechText ? 'Read short reply' : 'This reply is available on screen')
+                }
               >
                 {speaking ? <CircleStop size={14} /> : <Volume2 size={14} />}
               </button>
@@ -226,6 +245,7 @@ function TaskView({
           )}
         </header>
 
+        {task.speechIssue && <p className="answer-copy">{task.speechIssue}</p>}
         {task.response ? (
           <p className="answer-copy">{task.response}</p>
         ) : task.status === 'failed' || task.status === 'cancelled' ? null : (
@@ -658,6 +678,7 @@ export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [friday, setFriday] = useState<FridayState>();
   const [selected, setSelected] = useState<string>();
+  const [foregroundTaskId, setForegroundTaskId] = useState<string>();
   const [view, setView] = useState<ProductView>('now');
   const [expanded, setExpanded] = useState(false);
   const [settings, setSettings] = useState<BuddySettings>();
@@ -665,6 +686,16 @@ export default function App() {
   const [listenState, setListenState] = useState<ListeningState>('idle');
   const [heard, setHeard] = useState('');
   const [voiceLevel, setVoiceLevel] = useState(0);
+  const [micEnabled, setMicEnabled] = useState(false);
+  const micEnabledRef = useRef(false);
+  const [typing, setTyping] = useState(false);
+  const typingRef = useRef(false);
+  const typingTransitionRef = useRef<((value: boolean) => void) | undefined>(undefined);
+  const changeTyping = useCallback((value: boolean) => {
+    typingRef.current = value;
+    setTyping(value);
+    typingTransitionRef.current?.(value);
+  }, []);
   const [showSettings, setShowSettings] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -674,13 +705,12 @@ export default function App() {
 
   const persistedSettingsRef = useRef<BuddySettings | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
-  const recorderRef = useRef<MediaRecorder | undefined>(undefined);
-  const audioContextRef = useRef<AudioContext | undefined>(undefined);
-  const animationRef = useRef<number | undefined>(undefined);
+  const captureRef = useRef<PcmCapture | undefined>(undefined);
+  const transcriptionRef = useRef<ProgressiveTranscription | undefined>(undefined);
   const generationRef = useRef(0);
-  const beginSegmentRef = useRef<
-    ((stream: MediaStream, analyser: AnalyserNode, generation: number) => void) | undefined
-  >(undefined);
+  const beginSegmentRef = useRef<((stream: MediaStream, capture: PcmCapture, generation: number) => void) | undefined>(
+    undefined,
+  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [desktopState, setDesktopState] = useState<DesktopStatus>();
@@ -691,10 +721,25 @@ export default function App() {
   const [directVoice, setDirectVoice] = useState(false);
   const pttHeldRef = useRef(false);
   const [speaking, setSpeaking] = useState(false);
+  const [replayPending, setReplayPending] = useState(false);
+  const replayGenerationRef = useRef(0);
+  const [guiding, setGuiding] = useState(false);
+  const interruptOnlyRef = useRef(false);
+  const stopFridayRef = useRef<(() => void) | undefined>(undefined);
+  const requestEpochRef = useRef(0);
+  const stoppingRef = useRef(false);
   const voiceFollowUpRef = useRef(new VoiceFollowUp());
   const submittingRef = useRef(false);
   const conversationOpenRef = useRef(false);
   const followUpPendingRef = useRef(false);
+  const followUpEngagedRef = useRef(true);
+  const startListeningRef = useRef<((direct?: boolean, engaged?: boolean) => Promise<void>) | undefined>(undefined);
+  const [selectedChildId, setSelectedChildId] = useState<string>();
+  const selectedChildRef = useRef<string | undefined>(undefined);
+  const selectChild = useCallback((id?: string) => {
+    selectedChildRef.current = id;
+    setSelectedChildId(id);
+  }, []);
 
   const task = useMemo(() => (selected ? tasks.find((item) => item.id === selected) : undefined), [selected, tasks]);
   const activeTask = useMemo(
@@ -703,156 +748,224 @@ export default function App() {
   );
   const wakeWord = settings?.wakeWord || 'Friday';
 
+  const listeningRef = useRef<ListeningState>('idle');
   const updateListening = useCallback((state: ListeningState) => {
+    if (listeningRef.current === state) return;
+    listeningRef.current = state;
     setListenState(state);
     window.buddy.listening(state);
   }, []);
 
+  const stopCapture = useCallback((release = true) => {
+    generationRef.current += 1;
+    transcriptionRef.current?.close();
+    transcriptionRef.current = undefined;
+    captureRef.current?.pause();
+    if (release) {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      captureRef.current?.close();
+      streamRef.current = undefined;
+      captureRef.current = undefined;
+    }
+    setVoiceLevel(0);
+  }, []);
+
   const stopListening = useCallback(() => {
+    micEnabledRef.current = false;
+    setMicEnabled(false);
     voiceFollowUpRef.current.cancel();
     followUpPendingRef.current = false;
     conversationOpenRef.current = false;
+    selectChild();
     void window.buddy.silence();
     setSpeaking(false);
-    generationRef.current += 1;
-    if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    void audioContextRef.current?.close();
-    recorderRef.current = undefined;
-    streamRef.current = undefined;
-    audioContextRef.current = undefined;
-    setVoiceLevel(0);
+    stopCapture();
     updateListening('idle');
-  }, [updateListening]);
+  }, [updateListening, selectChild, stopCapture]);
+
+  const disableMicrophone = useCallback(() => {
+    micEnabledRef.current = false;
+    setMicEnabled(false);
+    voiceFollowUpRef.current.cancel();
+    followUpPendingRef.current = false;
+    conversationOpenRef.current = false;
+    stopCapture();
+    updateListening('idle');
+  }, [stopCapture, updateListening]);
+
+  // Text interactions also expire when audio is explicitly off. Editing and active
+  // work hold this timer; panel expansion is deliberately independent of it.
+  useEffect(() => {
+    if (!selectedChildId || typing || activeTask || speaking || submitting || listenState !== 'idle') return;
+    const timer = setTimeout(() => selectChild(), 10_000);
+    return () => clearTimeout(timer);
+  }, [selectedChildId, typing, activeTask, speaking, submitting, listenState, selectChild]);
 
   const runPrompt = useCallback(
-    async (value: string, resumeVoice = false) => {
+    async (value: string, resumeVoice = false, context?: RequestContext) => {
       const cleaned = value.trim();
       if (!cleaned || submittingRef.current) return;
-      stopListening();
-      if (resumeVoice) voiceFollowUpRef.current.beginSubmission();
+      const childId = context ? context.selectedChildId : selectedChildRef.current;
+      const resumeMic = micEnabledRef.current;
+      voiceFollowUpRef.current.cancel();
+      followUpPendingRef.current = false;
+      conversationOpenRef.current = false;
+      interruptOnlyRef.current = true;
+      updateListening(resumeMic ? 'paused' : 'idle');
+      void window.buddy.silence();
+      setSpeaking(false);
+      followUpEngagedRef.current = resumeVoice;
+      if (resumeMic) voiceFollowUpRef.current.beginSubmission();
       submittingRef.current = true;
       setSubmitting(true);
       setActionError(undefined);
+      // PTT flush ends its capture segment. Start an ordinary endpointed segment
+      // so an addressed Stop still works while that request runs or speaks.
+      stopCapture(false);
+      directVoiceRef.current = false;
+      setDirectVoice(false);
+      if (resumeMic && streamRef.current?.active && captureRef.current)
+        beginSegmentRef.current?.(streamRef.current, captureRef.current, generationRef.current);
+      const epoch = requestEpochRef.current;
       try {
-        const created = await window.buddy.submit(cleaned);
-        if (resumeVoice) voiceFollowUpRef.current.submitted(created.id);
+        const created = await window.buddy.submit(cleaned, { selectedChildId: childId });
+        if (epoch !== requestEpochRef.current) return;
+        if (resumeMic) voiceFollowUpRef.current.submitted(created.id);
         setSelected(created.id);
         setMarked(false);
         setView('now');
         setShowActivity(false);
         setPrompt('');
       } catch (error) {
-        if (resumeVoice) voiceFollowUpRef.current.cancel();
+        if (epoch !== requestEpochRef.current) return;
+        voiceFollowUpRef.current.cancel();
+        if (resumeMic && micEnabledRef.current) void startListeningRef.current?.(false, true);
         setPrompt(cleaned);
-        setActionError(errorMessage(error, 'Friday could not start that task.'));
+        setActionError(
+          error instanceof Error && /Unknown session|background child/.test(error.message)
+            ? 'That task is no longer available. Choose another task.'
+            : 'Friday couldn’t start that request. Please try again.',
+        );
       } finally {
         submittingRef.current = false;
         setSubmitting(false);
       }
     },
-    [stopListening],
+    [stopCapture, updateListening],
   );
 
   const beginSegment = useCallback(
-    (stream: MediaStream, analyser: AnalyserNode, generation: number) => {
+    (stream: MediaStream, capture: PcmCapture, generation: number) => {
       if (generation !== generationRef.current || !stream.active) return;
-      const chunks: Blob[] = [];
-      const supported = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].find((type) =>
-        MediaRecorder.isTypeSupported(type),
-      );
-      const recorder = new MediaRecorder(stream, supported ? { mimeType: supported } : undefined);
-      recorderRef.current = recorder;
-      let hasSpeech = false;
-      let silenceStarted = 0;
-      const startedAt = performance.now();
-      const samples = new Uint8Array(analyser.fftSize);
-      recorder.ondataavailable = (event) => {
-        if (event.data.size) chunks.push(event.data);
+      let spokenChildId = selectedChildRef.current;
+      let waitingSince = performance.now();
+      const currentWakeWord = () => persistedSettingsRef.current?.wakeWord || wakeWord;
+      const failed = () => {
+        if (generation !== generationRef.current) return;
+        stopCapture();
+        micEnabledRef.current = false;
+        setMicEnabled(false);
+        setActionError('I couldn’t hear that. Please tap the microphone to try again.');
+        updateListening('error');
       };
-      recorder.onstop = async () => {
-        if (generation !== generationRef.current || !stream.active) return;
-        if (!hasSpeech && !directVoiceRef.current) {
-          beginSegmentRef.current?.(stream, analyser, generation);
-          return;
-        }
-        updateListening('transcribing');
-        try {
-          const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-          const audio = await blob.arrayBuffer();
-          let result: TranscriptResult;
-          try {
-            result = await window.buddy.transcribe(audio, blob.type);
-          } catch {
-            if (generation !== generationRef.current || !stream.active) return;
-            result = await window.buddy.transcribe(audio, blob.type);
-          }
+      const transcription = new ProgressiveTranscription({
+        direct: directVoiceRef.current,
+        decode: (request) => window.buddy.transcribePcm(request),
+        speechStart: () => {
+          spokenChildId = selectedChildRef.current;
+        },
+        endpoint: () => {
+          if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
+            updateListening('transcribing');
+        },
+        endpointRevoked: () => {
+          if (generation !== generationRef.current || !micEnabledRef.current || typingRef.current) return;
+          updateListening(
+            interruptOnlyRef.current
+              ? 'paused'
+              : conversationOpenRef.current || directVoiceRef.current
+                ? 'armed'
+                : 'listening',
+          );
+        },
+        error: (_error, requireRestart) => {
           if (generation !== generationRef.current) return;
-          if (result.text) setHeard(result.text);
-          const command = directVoiceRef.current || conversationOpenRef.current ? result.text : result.command;
-          if (command) {
+          if (requireRestart) {
+            // Ambient sound is not an engaged request. The capped controller is
+            // already closed, so drop its hypotheses and start a fresh segment
+            // on the existing capture graph. Never reactivate disabled audio.
+            if (interruptOnlyRef.current || (!conversationOpenRef.current && !directVoiceRef.current)) {
+              if (micEnabledRef.current && stream.active) beginSegmentRef.current?.(stream, capture, generation);
+              return;
+            }
+            failed();
+            setActionError('That request was too long. Tap the microphone and try a shorter request.');
+            return;
+          }
+          if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
+            setActionError('I couldn’t hear that. Please try again.');
+          if (directVoiceRef.current) {
             stopListening();
-            await runPrompt(command, true);
+            return;
+          }
+          updateListening(interruptOnlyRef.current ? 'paused' : conversationOpenRef.current ? 'armed' : 'listening');
+          beginSegmentRef.current?.(stream, capture, generation);
+        },
+        final: (text) => {
+          if (generation !== generationRef.current) return;
+          waitingSince = performance.now();
+          if (detectStopCommand(text, currentWakeWord())) {
+            stopFridayRef.current?.();
+            return;
+          }
+          // During work, speech playback, and text editing, only an addressed stop
+          // is actionable. Ambient speech and Friday's own reply cannot submit work.
+          if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
+          const wake = detectWakeCommand(text, currentWakeWord(), false).result;
+          const wasEngaged = conversationOpenRef.current || directVoiceRef.current;
+          if (text && (wasEngaged || wake.wakeDetected)) setHeard(text);
+          if (wake.wakeDetected) {
+            selectChild();
+            conversationOpenRef.current = true;
+          }
+          const command = wake.wakeDetected ? wake.command : wasEngaged ? text : undefined;
+          if (command) {
+            void runPrompt(command, true, { selectedChildId: wake.wakeDetected ? undefined : spokenChildId });
             return;
           }
           if (directVoiceRef.current) {
             stopListening();
             return;
           }
-          if (result.wakeDetected) conversationOpenRef.current = true;
-          updateListening(conversationOpenRef.current ? 'armed' : 'listening');
-          beginSegmentRef.current?.(stream, analyser, generation);
-        } catch (error) {
-          setActionError(errorMessage(error, 'Local speech transcription failed.'));
-          if (generation === generationRef.current && stream.active) {
-            updateListening('listening');
-            beginSegmentRef.current?.(stream, analyser, generation);
-          } else {
-            updateListening('error');
-          }
-        }
-      };
-      recorder.start(250);
-      if (directVoiceRef.current && !pttHeldRef.current) {
-        recorder.stop();
-        return;
-      }
-      const monitor = () => {
-        if (generation !== generationRef.current || recorder.state !== 'recording') return;
-        analyser.getByteTimeDomainData(samples);
+          updateListening(interruptOnlyRef.current ? 'paused' : conversationOpenRef.current ? 'armed' : 'listening');
+        },
+      });
+      transcriptionRef.current = transcription;
+      capture.start((frame) => {
+        if (generation !== generationRef.current) return;
         let sum = 0;
-        for (const value of samples) {
-          const normalized = (value - 128) / 128;
-          sum += normalized * normalized;
-        }
-        const rms = Math.sqrt(sum / samples.length);
-        setVoiceLevel(Math.min(1, rms * 9));
+        for (const value of frame) sum += (value / 32768) ** 2;
+        setVoiceLevel(Math.min(1, Math.sqrt(sum / frame.length) * 9));
+        transcription.push(frame);
+        if (transcription.hasSpeech || directVoiceRef.current || interruptOnlyRef.current || stoppingRef.current)
+          return;
         const now = performance.now();
-        if (rms > 0.025) {
-          hasSpeech = true;
-          silenceStarted = 0;
-        } else if (hasSpeech) {
-          if (!silenceStarted) silenceStarted = now;
-          if (!directVoiceRef.current && now - silenceStarted > 850) {
-            recorder.stop();
-            return;
-          }
-        } else if (!directVoiceRef.current && now - startedAt > 10_000) {
+        if (typingRef.current) waitingSince = now;
+        if (
+          (conversationOpenRef.current || selectedChildRef.current) &&
+          !typingRef.current &&
+          now - waitingSince > 10_000
+        ) {
+          waitingSince = now;
           conversationOpenRef.current = false;
+          selectChild();
+          setHeard('');
           updateListening('listening');
-          recorder.stop();
-          return;
         }
-        if (now - startedAt > 25_000) {
-          recorder.stop();
-          return;
-        }
-        animationRef.current = requestAnimationFrame(monitor);
-      };
-      animationRef.current = requestAnimationFrame(monitor);
+      }, failed);
+      if (directVoiceRef.current && !pttHeldRef.current) capture.flush(() => transcription.finish());
     },
-    [runPrompt, stopListening, updateListening],
+    [runPrompt, stopListening, stopCapture, updateListening, selectChild, wakeWord],
   );
 
   useEffect(() => {
@@ -861,19 +974,29 @@ export default function App() {
 
   const startListening = useCallback(
     async (direct = false, engaged = false) => {
-      conversationOpenRef.current = engaged || direct;
+      micEnabledRef.current = true;
+      setMicEnabled(true);
+      voiceFollowUpRef.current.cancel();
+      followUpPendingRef.current = false;
+      stopCapture(false);
+      // Reset host wake-only state even when this activation keeps the live stream.
+      window.buddy.listening('paused');
+      listeningRef.current = 'paused';
+      interruptOnlyRef.current = typingRef.current;
+      conversationOpenRef.current = !typingRef.current && (engaged || direct);
       directVoiceRef.current = direct;
       setDirectVoice(direct);
       void window.buddy.silence();
       setSpeaking(false);
-      if (streamRef.current?.active) {
-        updateListening(engaged ? 'armed' : 'listening');
-        return;
-      }
       setActionError(undefined);
       setHeard('');
-      const generation = generationRef.current + 1;
-      generationRef.current = generation;
+      const generation = generationRef.current;
+      if (streamRef.current?.active && captureRef.current) {
+        updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
+        beginSegmentRef.current?.(streamRef.current, captureRef.current, generation);
+        return;
+      }
+      updateListening('starting');
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true, channelCount: 1 },
@@ -882,40 +1005,67 @@ export default function App() {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-        const context = new AudioContext();
-        await context.resume();
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 1024;
-        analyser.smoothingTimeConstant = 0.72;
-        context.createMediaStreamSource(stream).connect(analyser);
+        let capture: PcmCapture;
+        try {
+          capture = await PcmCapture.open(stream);
+        } catch (error) {
+          stream.getTracks().forEach((track) => track.stop());
+          throw error;
+        }
+        if (generation !== generationRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          capture.close();
+          return;
+        }
         streamRef.current = stream;
-        audioContextRef.current = context;
+        captureRef.current = capture;
         stream.getAudioTracks().forEach((track) => {
           track.addEventListener(
             'ended',
             () => {
-              if (generation !== generationRef.current) return;
-              generationRef.current += 1;
-              recorderRef.current = undefined;
-              streamRef.current = undefined;
-              void context.close();
-              audioContextRef.current = undefined;
+              if (streamRef.current !== stream) return;
+              stopCapture();
               setVoiceLevel(0);
-              setActionError('The microphone disconnected. Start listening to reconnect it.');
+              micEnabledRef.current = false;
+              setMicEnabled(false);
+              setActionError('The microphone disconnected. Tap the microphone to try again.');
               updateListening('error');
             },
             { once: true },
           );
         });
-        updateListening(engaged || direct ? 'armed' : 'listening');
-        beginSegmentRef.current?.(stream, analyser, generation);
+        updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
+        beginSegmentRef.current?.(stream, capture, generation);
       } catch (error) {
-        setActionError(errorMessage(error, 'Allow microphone access to talk to Friday.'));
+        if (generation !== generationRef.current) return;
+        micEnabledRef.current = false;
+        setMicEnabled(false);
+        setActionError(
+          error instanceof DOMException && error.name === 'NotAllowedError'
+            ? 'Allow microphone access to talk to Friday.'
+            : 'The microphone isn’t available. Please try again.',
+        );
         updateListening('error');
       }
     },
-    [updateListening],
+    [updateListening, stopCapture],
   );
+
+  useEffect(() => {
+    startListeningRef.current = startListening;
+  }, [startListening]);
+
+  useEffect(() => {
+    typingTransitionRef.current = (value) => {
+      if (value) {
+        interruptOnlyRef.current = true;
+        conversationOpenRef.current = false;
+        updateListening(micEnabledRef.current ? 'paused' : 'idle');
+      } else if (micEnabledRef.current && !activeTask && !speaking && !submittingRef.current && !stoppingRef.current) {
+        void startListening(false, false);
+      }
+    };
+  }, [stopCapture, updateListening, startListening, activeTask, speaking]);
 
   useEffect(() => {
     let disposed = false;
@@ -927,6 +1077,7 @@ export default function App() {
         setSettings(config);
         setFriday(runtime);
         setSelected(history.find((item) => item.role !== 'child')?.id);
+        if (!micEnabledRef.current) void startListening(false, true);
       })
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
@@ -935,6 +1086,7 @@ export default function App() {
         [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
       );
       if (next.role !== 'child') {
+        setForegroundTaskId(next.id);
         setSelected((current) => current || next.id);
         if (voiceFollowUpRef.current.taskChanged(next)) followUpPendingRef.current = true;
       }
@@ -942,13 +1094,10 @@ export default function App() {
     const removeState = window.buddy.onFridayState((runtime) => {
       setFriday(runtime);
       setSpeaking(runtime.presentation.speaking);
-      if (!runtime.presentation.speaking && followUpPendingRef.current) {
-        followUpPendingRef.current = false;
-        void startListening(false, true);
-      }
     });
     const removeListen = window.buddy.onListen(() => {
       setView('now');
+      selectChild();
       void startListening(false, true);
     });
     const removeStopListen = window.buddy.onStopListening(stopListening);
@@ -960,7 +1109,64 @@ export default function App() {
       removeStopListen();
       stopListening();
     };
-  }, [startListening, stopListening]);
+  }, [startListening, stopListening, selectChild]);
+
+  const stopFriday = useCallback(() => {
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    requestEpochRef.current++;
+    replayGenerationRef.current++;
+    setReplayPending(false);
+    voiceFollowUpRef.current.cancel();
+    followUpPendingRef.current = false;
+    conversationOpenRef.current = false;
+    interruptOnlyRef.current = true;
+    typingRef.current = false;
+    setTyping(false);
+    selectChild();
+    setHeard('');
+    setActionError(undefined);
+    setSpeaking(false);
+    setGuiding(false);
+    // Invalidate any older recognition result before cancelling desktop actions.
+    stopCapture(false);
+    void window.buddy
+      .stop()
+      .catch(() => setActionError('Friday couldn’t stop. Please try again.'))
+      .finally(() => {
+        stoppingRef.current = false;
+        if (micEnabledRef.current) void startListening(false, false);
+        else updateListening('idle');
+      });
+  }, [selectChild, startListening, stopCapture, updateListening]);
+  useEffect(() => {
+    stopFridayRef.current = stopFriday;
+  }, [stopFriday]);
+
+  useEffect(() => {
+    // A reply can start independently of a renderer submission. Keep the same
+    // capture graph running to hear "Friday stop" throughout work and playback.
+    if (activeTask || speaking || submitting || replayPending) {
+      interruptOnlyRef.current = true;
+      if (micEnabledRef.current && listenState !== 'starting') updateListening('paused');
+    } else if (interruptOnlyRef.current && micEnabledRef.current && !typing && !stoppingRef.current) {
+      const engaged = followUpPendingRef.current ? followUpEngagedRef.current : conversationOpenRef.current;
+      followUpPendingRef.current = false;
+      void startListening(false, engaged);
+    }
+  }, [activeTask, speaking, submitting, replayPending, typing, listenState, startListening, updateListening]);
+
+  useEffect(() => {
+    let disposed = false;
+    const remove = window.buddy.onGuidance(setGuiding);
+    void window.buddy.guidance().then((value) => {
+      if (!disposed) setGuiding(value);
+    });
+    return () => {
+      disposed = true;
+      remove();
+    };
+  }, []);
 
   useEffect(() => window.buddy.onExpanded(setExpanded), []);
 
@@ -1073,18 +1279,19 @@ export default function App() {
   async function speakResponse() {
     if (speaking) {
       await window.buddy.silence();
-      setSpeaking(false);
       return;
     }
-    if (!task?.response) return;
-    stopListening();
-    setSpeaking(true);
+    if (!task?.speechText || activeTask || settings?.autoSpeak === false) return;
+    const replay = ++replayGenerationRef.current;
+    setReplayPending(true);
+    interruptOnlyRef.current = true;
+    updateListening(micEnabledRef.current ? 'paused' : 'idle');
     try {
-      await window.buddy.speak(task.response);
+      await window.buddy.speak(task.id);
     } catch (error) {
-      setActionError(errorMessage(error, 'Could not read aloud.'));
+      if (replay === replayGenerationRef.current) setActionError(errorMessage(error, 'Could not read aloud.'));
     } finally {
-      setSpeaking(false);
+      if (replay === replayGenerationRef.current) setReplayPending(false);
     }
   }
 
@@ -1137,7 +1344,7 @@ export default function App() {
 
   const listeningActive = listenState !== 'idle' && listenState !== 'error';
   const presence = listeningActive
-    ? { label: listenState === 'transcribing' ? 'Transcribing' : 'Mic live', tone: 'voice' }
+    ? { label: listenState === 'transcribing' ? 'One moment…' : 'Mic on', tone: 'voice' }
     : activeTask?.status === 'awaiting_approval'
       ? { label: 'Waiting on you', tone: 'approval' }
       : activeTask
@@ -1235,7 +1442,7 @@ export default function App() {
           }}
           onPointerUp={() => {
             pttHeldRef.current = false;
-            if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+            captureRef.current?.flush(() => transcriptionRef.current?.finish());
           }}
           onPointerCancel={() => {
             pttHeldRef.current = false;
@@ -1253,7 +1460,7 @@ export default function App() {
             if (event.key === ' ' || event.key === 'Enter') {
               event.preventDefault();
               pttHeldRef.current = false;
-              if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+              captureRef.current?.flush(() => transcriptionRef.current?.finish());
             }
           }}
         >
@@ -1284,32 +1491,69 @@ export default function App() {
     return (
       <FridayPresence
         state={friday}
-        task={activeTask || tasks.find((item) => item.conversationId === friday?.parentId)}
+        task={
+          activeTask ||
+          tasks.find(
+            (item) =>
+              item.role !== 'child' &&
+              item.conversationId === friday?.parentId &&
+              (item.id === foregroundTaskId || item.id === friday?.presentation.taskId),
+          )
+        }
         tasks={tasks}
         listening={listenState}
         speaking={speaking}
+        guiding={guiding}
         level={voiceLevel}
         heard={heard}
         error={actionError}
+        selectedChildId={selectedChildId}
+        typing={typing}
+        onTypingChange={changeTyping}
+        micEnabled={micEnabled}
+        wakeWord={wakeWord}
+        onClearContext={() => selectChild()}
+        onContinue={() => {
+          typingRef.current = false;
+          setTyping(false);
+          void startListening(false, true);
+        }}
+        onMicOn={() => {
+          void startListening(false, false);
+        }}
+        onMicOff={disableMicrophone}
+        onSelectTask={(id) => {
+          typingRef.current = false;
+          setTyping(false);
+          selectChild(id);
+          void startListening(false, true);
+        }}
         onTalk={() => {
+          typingRef.current = false;
+          setTyping(false);
+          selectChild();
           void startListening(false, true);
         }}
         onSubmit={(value) => {
           void runPrompt(value);
         }}
-        onStop={() => {
-          stopListening();
-          void window.buddy.stopForeground().catch((error) => setActionError(String(error)));
+        onStop={stopFriday}
+        onDismiss={() => {
+          selectChild();
+          if (micEnabledRef.current) void startListening(false, false);
+          else stopListening();
         }}
-        onDismiss={stopListening}
         onDetails={() => {
+          changeTyping(false);
           void window.buddy.setExpanded(true);
         }}
         onStopChild={(id) => {
-          void window.buddy.stopChild(id).catch((error) => setActionError(String(error)));
+          void window.buddy
+            .stopChild(id)
+            .catch(() => setActionError('That task couldn’t be stopped. Please try again.'));
         }}
         onApprove={(id, approved) => {
-          void window.buddy.approve(id, approved).catch((error) => setActionError(String(error)));
+          void window.buddy.approve(id, approved).catch(() => setActionError('That approval is no longer available.'));
         }}
       />
     );
@@ -1398,6 +1642,13 @@ export default function App() {
               onApprove={(approved) => void resolveApproval(approved)}
               approvalPending={approvalPending}
               speaking={speaking}
+              replayDisabledReason={
+                activeTask
+                  ? 'Wait for this reply to finish'
+                  : settings?.autoSpeak === false
+                    ? 'Spoken replies are off'
+                    : undefined
+              }
               onSpeak={() => void speakResponse()}
             />
           ) : (

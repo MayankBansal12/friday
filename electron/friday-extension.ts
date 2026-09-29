@@ -1,4 +1,5 @@
 import { annotationTextLimits } from './desktop-protocol.js';
+import { speechWritingGuidance } from './speech-policy.js';
 
 type ToolEvent = { toolName: string; input: Record<string, unknown> };
 type ToolResult = {
@@ -136,8 +137,43 @@ export default function fridayExtension(pi: ExtensionAPI) {
     return;
   }
   runtimeTool(
+    'session_actions',
+    `Use for every ordinary background start, update, stop or resumption with the user’s input answer, including a single task. Submit all requested actions together with one appropriate parent-authored short success confirmation. If a spoken answer was already accepted in this request, omit confirmation and show actual action results on screen. Individual session_start/update/stop tools are reserved for targeted recovery after partial or uncertain batch effects. ${speechWritingGuidance} The host validates before effects and speaks only after ALL actions succeed; no separate speak is needed. Say started/updated/stopped, never imply the deliverable is finished. One effectful call per request; do not split or call in parallel. Read results: partial effects are not rolled back, so never retry the whole batch. Approval remains required for consequential work. Rejected speech allows one rewrite shared with speak. If recoveryExhausted is true, no actions ran for that rejected call: submit the still-requested actions without confirmation, then show actual results on screen. Do not repeat earlier effects.`,
+    {
+      actions: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 3,
+        items: {
+          anyOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: { kind: { const: 'start', type: 'string' }, title: text(100), prompt: text(8000) },
+              required: ['kind', 'title', 'prompt'],
+            },
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: { kind: { const: 'update', type: 'string' }, id: text(128), prompt: text(8000) },
+              required: ['kind', 'id', 'prompt'],
+            },
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: { kind: { const: 'stop', type: 'string' }, id: text(128) },
+              required: ['kind', 'id'],
+            },
+          ],
+        },
+      },
+      confirmation: text(2000),
+    },
+    ['actions'],
+  );
+  runtimeTool(
     'session_start',
-    'Start independent background work. Returns immediately with a child session ID. Include a clear outcome and all necessary context. Never delegate live screen guidance.',
+    'Recovery only: start specific remaining background work after inspecting partial or uncertain session_actions effects and current state. For ordinary starts, use session_actions with a short confirmation, even for one task. Never repeat a start that already succeeded. Returns a child session ID; include a clear outcome and all necessary context. Never delegate live screen guidance.',
     { title: text(100), prompt: text(8000) },
     ['title', 'prompt'],
   );
@@ -161,20 +197,20 @@ export default function fridayExtension(pi: ExtensionAPI) {
   );
   runtimeTool(
     'session_update',
-    'Give a child new instructions or resume it with an answer. If running, interrupts its current work and continues in the same saved session.',
+    'Recovery only: update one task after inspecting partial or uncertain session_actions effects and current state. For ordinary new instructions or resumption with an input answer, use a session_actions update with a short confirmation. If running, interrupts its current work and continues in the same saved session.',
     { id: text(128), prompt: text(8000) },
     ['id', 'prompt'],
   );
   runtimeTool(
     'session_stop',
-    'Stop one background child. Other work continues. Its history remains readable.',
+    'Recovery only: stop one task after inspecting partial or uncertain session_actions effects and current state. For an ordinary stop request, use a session_actions stop with a short confirmation. Other work continues; history remains readable.',
     { id: text(128) },
     ['id'],
   );
   runtimeTool(
     'speak',
-    'Speak one short useful reply with Friday’s local voice and show its text. Starts playback without waiting; new speech replaces current playback. Respect mute preferences. Use once per reply.',
-    { text: text(800) },
+    `Speak one parent-authored reply. ${speechWritingGuidance} Returns accepted:false with the reason when nothing plays. One rewrite is shared with attached confirmations. If recoveryExhausted is true, use show_text or final text only; do not keep retrying. Use show_text for details. Starts immediately; replacement cancels prior audio. Respect mute. Use once per reply.`,
+    { text: text(2000) },
     ['text'],
   );
   runtimeTool(

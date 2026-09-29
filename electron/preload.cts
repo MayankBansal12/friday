@@ -1,3 +1,4 @@
+import type { PcmRequest, PcmResult } from './pcm-transcription.js';
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopStatus } from './desktop-status.js';
 import type {
@@ -5,6 +6,7 @@ import type {
   FridayState,
   ListeningState,
   SurfaceLayout,
+  RequestContext,
   TaskRecord,
   TranscriptResult,
 } from './types.js';
@@ -26,18 +28,25 @@ function invoke<T>(channel: string, timeoutMs: number, ...args: unknown[]): Prom
 }
 
 contextBridge.exposeInMainWorld('buddy', {
+  guidance: (): Promise<boolean> => invoke('desktop:guidance', 10_000),
+  onGuidance: (callback: (guiding: boolean) => void) => {
+    const handler = (_: unknown, guiding: boolean) => callback(guiding);
+    ipcRenderer.on('desktop:guidance', handler);
+    return () => ipcRenderer.removeListener('desktop:guidance', handler);
+  },
   fridayState: (): Promise<FridayState> => invoke('friday:state', 10_000),
   stopChild: (id: string) => invoke('sessions:stop', 10_000, id),
   stopForeground: (): Promise<void> => invoke('foreground:stop', 15_000),
-  setSurface: (layout: SurfaceLayout, height?: number): Promise<void> =>
-    invoke('window:surface', 10_000, layout, height),
+  setSurface: (layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void> =>
+    invoke('window:surface', 10_000, layout, height, contentWidth),
   onFridayState: (callback: (state: FridayState) => void) => {
     const handler = (_: unknown, state: FridayState) => callback(state);
     ipcRenderer.on('friday:state', handler);
     return () => ipcRenderer.removeListener('friday:state', handler);
   },
   listTasks: (): Promise<TaskRecord[]> => invoke('tasks:list', 10_000),
-  submit: (prompt: string): Promise<TaskRecord> => invoke('tasks:submit', 15_000, prompt),
+  submit: (prompt: string, context?: RequestContext): Promise<TaskRecord> =>
+    invoke('tasks:submit', 15_000, prompt, context),
   newConversation: (): Promise<string> => invoke('conversation:new', 10_000),
   desktopStatus: (): Promise<DesktopStatus> => invoke('desktop:status', 30_000),
   mark: (): Promise<void> => invoke('desktop:mark', 30_000),
@@ -49,11 +58,12 @@ contextBridge.exposeInMainWorld('buddy', {
     return () => ipcRenderer.removeListener('desktop:marked', handler);
   },
   approve: (id: string, approved: boolean): Promise<void> => invoke('tasks:approve', 15_000, id, approved),
+  transcribePcm: (request: PcmRequest): Promise<PcmResult> => invoke('voice:pcm', 130_000, request),
   transcribe: (audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> =>
     invoke('voice:transcribe', 160_000, audio, mimeType),
   getSettings: (): Promise<BuddySettings> => invoke('settings:get', 10_000),
   updateSettings: (value: Partial<BuddySettings>): Promise<BuddySettings> => invoke('settings:update', 15_000, value),
-  speak: (text: string): Promise<void> => invoke('voice:speak', 180_000, text),
+  speak: (taskId: string): Promise<void> => invoke('voice:speak', 180_000, taskId),
   silence: (): Promise<void> => invoke('voice:silence', 10_000),
   setExpanded: (value: boolean): Promise<void> => invoke('window:expand', 10_000, value),
   onExpanded: (callback: (expanded: boolean) => void) => {

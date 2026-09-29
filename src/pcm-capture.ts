@@ -1,0 +1,75 @@
+/** Owns the browser audio graph. The output is silent and never monitors the mic. */
+export class PcmCapture {
+  private token = 0;
+  private source: MediaStreamAudioSourceNode;
+  private node: AudioWorkletNode;
+  private onFrame?: (frame: Int16Array) => void;
+  private onError?: () => void;
+  private closed = false;
+  private onFlushed?: () => void;
+  private constructor(
+    private context: AudioContext,
+    stream: MediaStream,
+  ) {
+    this.source = context.createMediaStreamSource(stream);
+    this.node = new AudioWorkletNode(context, 'friday-pcm', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    this.source.connect(this.node);
+    this.node.connect(context.destination);
+    this.node.port.onmessage = ({ data }) => {
+      if (this.closed || data.token !== this.token) return;
+      if (data.type === 'frame' && data.audio instanceof ArrayBuffer && data.audio.byteLength === 640) {
+        this.node.port.postMessage({ type: 'ack', token: this.token });
+        this.onFrame?.(new Int16Array(data.audio));
+      } else if (data.type === 'flushed') {
+        const done = this.onFlushed;
+        this.onFlushed = undefined;
+        done?.();
+      } else {
+        this.onError?.();
+      }
+    };
+    this.node.onprocessorerror = () => this.onError?.();
+  }
+  static async open(stream: MediaStream) {
+    if (!stream.active) throw new Error('The microphone disconnected.');
+    const context = new AudioContext();
+    try {
+      await context.audioWorklet.addModule(new URL('pcm-worklet.js', document.baseURI).href);
+      await context.resume();
+      if (!stream.active) throw new Error('The microphone disconnected.');
+      return new PcmCapture(context, stream);
+    } catch (error) {
+      await context.close();
+      throw error;
+    }
+  }
+  start(onFrame: (frame: Int16Array) => void, onError: () => void) {
+    this.onFrame = onFrame;
+    this.onError = onError;
+    this.node.port.postMessage({ type: 'start', token: ++this.token });
+  }
+  flush(done: () => void) {
+    this.onFlushed = done;
+    this.node.port.postMessage({ type: 'flush', token: this.token });
+  }
+  pause() {
+    this.node.port.postMessage({ type: 'pause', token: this.token });
+    this.token++;
+    this.onFlushed = undefined;
+    this.onFrame = undefined;
+    this.onError = undefined;
+  }
+  close() {
+    if (this.closed) return;
+    this.pause();
+    this.closed = true;
+    this.node.port.close();
+    this.node.disconnect();
+    this.source.disconnect();
+    void this.context.close();
+  }
+}
