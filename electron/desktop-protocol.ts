@@ -1,6 +1,6 @@
 // Deliberately dependency-free: the same compiled validators run inside GNOME Shell.
 /** Bumped whenever the app and the installed GNOME extension stop being interchangeable. */
-export const protocolVersion = 7;
+export const protocolVersion = 8;
 export interface Display {
   id: string;
   x: number;
@@ -28,6 +28,8 @@ export const annotationTextLimits = {
   rectangle: 40,
   highlight: 40,
   underline: 40,
+  strike: 40,
+  cross: 60,
   arrow: 60,
   bracket: 60,
   step: 80,
@@ -136,7 +138,7 @@ export function drawing(value: unknown, observation?: Observation): Drawing {
         item.toX = finite(a.toX, 0, o.width - 1);
         item.toY = finite(a.toY, 0, o.height - 1);
       }
-    } else if (['ellipse', 'rectangle', 'highlight', 'underline', 'bracket'].includes(item.kind)) {
+    } else if (['ellipse', 'rectangle', 'highlight', 'underline', 'strike', 'cross', 'bracket'].includes(item.kind)) {
       item.width = finite(a.width, 1, o.width - item.x);
       item.height = finite(a.height, 1, o.height - item.y);
     } else if (item.kind === 'step') {

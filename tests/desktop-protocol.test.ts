@@ -124,6 +124,10 @@ describe('desktop coordinate and freshness contract', () => {
     ])
       expect(() => drawing({ ...ids, items: [bad] }, o)).toThrow();
     expect(() => drawing({ ...ids, items: [item, item] }, o)).toThrow('Duplicate');
+    const strike = { id: 'line', kind: 'strike', x: 100, y: 200, width: 200, height: 24 };
+    const cross = { id: 'gone', kind: 'cross', x: 100, y: 200, width: 120, height: 40 };
+    expect(drawing({ ...ids, items: [strike, cross] }, o).items).toEqual([strike, cross]);
+    expect(() => drawing({ ...ids, items: [{ ...strike, width: undefined }] }, o)).toThrow();
   });
   it('supports wordless marks, numbered steps, and formatted notes', () => {
     const items = [

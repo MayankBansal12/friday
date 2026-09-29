@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopStatus } from './desktop-status.js';
 import type {
   BuddySettings,
+  LiveKitSession,
   FridayState,
   ListeningState,
   SurfaceLayout,
@@ -71,6 +72,33 @@ contextBridge.exposeInMainWorld('buddy', {
   updateSettings: (value: Partial<BuddySettings>): Promise<BuddySettings> => invoke('settings:update', 15_000, value),
   speak: (taskId: string): Promise<void> => invoke('voice:speak', 180_000, taskId),
   silence: (): Promise<void> => invoke('voice:silence', 10_000),
+  interrupt: (): Promise<void> => invoke('voice:interrupt', 10_000),
+  livekit: {
+    /** Undefined when LiveKit is not configured; rejects while the room is unreachable. */
+    session: (): Promise<LiveKitSession | undefined> => invoke('livekit:session', 20_000),
+    listener: (ready: boolean) => ipcRenderer.send('livekit:listener', ready),
+    observed: (id: number) => ipcRenderer.send('livekit:observed', id),
+    onExpect: (callback: (id: number) => void) => {
+      const handler = (_: unknown, id: number) => callback(id);
+      ipcRenderer.on('livekit:expect', handler);
+      return () => ipcRenderer.removeListener('livekit:expect', handler);
+    },
+    onCancelled: (callback: () => void) => {
+      const handler = () => callback();
+      ipcRenderer.on('livekit:cancelled', handler);
+      return () => ipcRenderer.removeListener('livekit:cancelled', handler);
+    },
+    onMicrophone: (callback: (frame: ArrayBuffer) => void) => {
+      const handler = (_: unknown, frame: ArrayBuffer) => callback(frame);
+      ipcRenderer.on('livekit:microphone', handler);
+      return () => ipcRenderer.removeListener('livekit:microphone', handler);
+    },
+    onMicrophoneReady: (callback: (sid: string) => void) => {
+      const handler = (_: unknown, sid: string) => callback(sid);
+      ipcRenderer.on('livekit:microphone-ready', handler);
+      return () => ipcRenderer.removeListener('livekit:microphone-ready', handler);
+    },
+  },
   setExpanded: (value: boolean): Promise<void> => invoke('window:expand', 10_000, value),
   onExpanded: (callback: (expanded: boolean) => void) => {
     const handler = (_: unknown, expanded: boolean) => callback(expanded);

@@ -7,6 +7,13 @@ import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
+import {
+  listenerIdentity,
+  liveKitConfigFromEnvironment,
+  LiveKitVoice,
+  liveKitToken,
+  voiceIdentity,
+} from '../livekit.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { TaskStore } from '../store.js';
@@ -18,7 +25,14 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../types.js';
-import { validAudio, validId, validListeningState, validPrompt, validSettings } from '../validation.js';
+import {
+  validAudio,
+  validId,
+  validListeningState,
+  validPrompt,
+  validRequestContext,
+  validSettings,
+} from '../validation.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 loadEnvironment({ path: join(process.cwd(), '.env'), quiet: true });
@@ -37,6 +51,10 @@ let service: AgentService;
 let speech: SpeechService;
 let bridge: DesktopBridge;
 const speaker = createSpeakerFromEnvironment();
+// Read once after dotenv; this removes the LiveKit key and secret from inherited environments.
+const liveKitSetup = liveKitConfigFromEnvironment();
+if (liveKitSetup.error) console.warn(`LiveKit is off: ${liveKitSetup.error}`);
+let liveKit: LiveKitVoice | undefined;
 let native: GnomeClient;
 let surface: SurfaceLayout = 'quiet';
 let surfaceHeight: number | undefined;
@@ -134,6 +152,7 @@ function setExpanded(value: boolean) {
 function stopListening() {
   service?.silence();
   speaker.stop();
+  liveKit?.reset();
   window?.webContents.send('voice:stop');
   speech?.reset();
 }
@@ -191,6 +210,9 @@ function createWindow(openSilently: boolean) {
     return { action: 'deny' };
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  // A reloaded or crashed renderer is no longer listening; never route voice to it.
+  window.webContents.on('did-start-loading', () => liveKit?.listener(false));
+  window.webContents.on('render-process-gone', () => liveKit?.listener(false));
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
@@ -301,6 +323,17 @@ if (hasSingleInstanceLock)
       },
     );
     await bridge.start();
+    if (liveKitSetup.config)
+      liveKit = new LiveKitVoice(liveKitSetup.config, {
+        expect: (id) => window?.webContents.send('livekit:expect', id ?? 0),
+        cancelled: () => window?.webContents.send('livekit:cancelled'),
+        // Rumik PCM goes to LiveKit only while a renderer is subscribed; otherwise pw-cat plays it.
+        routable: (ready) => {
+          speaker.sink = ready ? liveKit?.sink : undefined;
+        },
+        microphone: (frame) => window?.webContents.send('livekit:microphone', frame.buffer),
+        microphoneReady: (sid) => window?.webContents.send('livekit:microphone-ready', sid),
+      });
     const runtimeDirectory = join(app.getPath('userData'), 'runtime');
     const extensionPath = await stageRuntimeExtension(join(root, 'dist-electron'), runtimeDirectory);
     service = new AgentService(
@@ -308,7 +341,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
-      { speak: (text) => speaker.speak(text), silence: () => speaker.stop() },
+      { voice: speaker },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -370,20 +403,17 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       service.silence();
       speaker.stop();
+      liveKit?.reset();
       bridge.stop();
       const task = service.list().find((item) => item.role !== 'child' && activeStatuses.has(item.status));
       if (task) await service.cancel(task.id);
     });
     ipcMain.handle('tasks:submit', (event, prompt: unknown, context: unknown) => {
       fromWindow(event);
-      speaker.stop();
-      let selectedChildId: string | undefined;
-      if (context !== undefined) {
-        if (!context || typeof context !== 'object' || Array.isArray(context)) throw new Error('Invalid task context');
-        const id = (context as { selectedChildId?: unknown }).selectedChildId;
-        if (id !== undefined) selectedChildId = validId(id);
-      }
-      return service.submit(validPrompt(prompt), { selectedChildId });
+      // Validate before touching output: an invalid submission must not silence the current reply.
+      const text = validPrompt(prompt);
+      const request = validRequestContext(context);
+      return service.submit(text, request);
     });
     ipcMain.handle('tasks:approve', (event, id: unknown, approved: unknown) => {
       fromWindow(event);
@@ -421,6 +451,7 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       bridge.stop();
       speaker.stop();
+      liveKit?.reset();
       await service.stop();
     });
     ipcMain.handle('voice:speak', (event, taskId: unknown) => {
@@ -431,6 +462,37 @@ if (hasSingleInstanceLock)
     ipcMain.handle('voice:silence', (event) => {
       fromWindow(event);
       service.silence();
+    });
+    // Barge-in: the user is speaking over Friday. Stops audio and unrevealed presentation only.
+    ipcMain.handle('voice:interrupt', (event) => {
+      fromWindow(event);
+      service.interrupt();
+    });
+    ipcMain.handle('livekit:session', async (event) => {
+      fromWindow(event);
+      if (!liveKit) return undefined;
+      await liveKit.connect();
+      return {
+        url: liveKit.config.url,
+        token: await liveKitToken(liveKit.config, listenerIdentity),
+        voice: voiceIdentity,
+      };
+    });
+    ipcMain.on('livekit:listener', (event, ready: unknown) => {
+      try {
+        fromWindow(event);
+        if (typeof ready === 'boolean') liveKit?.listener(ready);
+      } catch {
+        /* Ignore forged one-way renderer messages. */
+      }
+    });
+    ipcMain.on('livekit:observed', (event, id: unknown) => {
+      try {
+        fromWindow(event);
+        if (Number.isSafeInteger(id) && (id as number) > 0) liveKit?.observed(id as number);
+      } catch {
+        /* Ignore forged one-way renderer messages. */
+      }
     });
     ipcMain.handle('voice:pcm', (event, request: unknown) => {
       fromWindow(event);
@@ -504,6 +566,7 @@ app.on('before-quit', (event) => {
   quitting = true;
   stopListening();
   speaker.dispose();
+  void liveKit?.close();
   speech?.close();
   void (async () => {
     bridge?.stop();

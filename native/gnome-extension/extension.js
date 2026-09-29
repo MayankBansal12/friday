@@ -4,7 +4,7 @@ import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
-import { paintAnnotations } from './drawing.js';
+import { classifyMark, paintAnnotations, strokeDuration } from './drawing.js';
 import { ComputerControl } from './control.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -21,6 +21,7 @@ export default class FridayDesktop extends Extension {
     this._scene = 0;
     this._items = new Map();
     this._timers = new Map();
+    this._anims = new Map();
     this._signals = [];
     this._compositingHeld = false;
     this._paintSerial = 0;
@@ -342,6 +343,7 @@ export default class FridayDesktop extends Extension {
       }
       this._expires = Date.now() + 30000;
       this._animatePointer();
+      this._animateDraw(d.items.map((item) => item.id));
       // Re-read the stage dimensions: this actor can be created during login.
       this._area.set_size(global.screen_width, global.screen_height);
       this._area.show();
@@ -370,6 +372,28 @@ export default class FridayDesktop extends Extension {
       this._area?.queue_repaint();
       if (!this._alive || !this._items.size || Date.now() - this._pulseStarted > 3000) {
         this._pulseTimer = 0;
+        return GLib.SOURCE_REMOVE;
+      }
+      return GLib.SOURCE_CONTINUE;
+    });
+  }
+
+  // New annotations reveal progressively (Rough Notation style) instead of popping in;
+  // once every reveal finishes, one final repaint draws the settled, crisp artwork.
+  _animateDraw(ids) {
+    const now = Date.now();
+    ids.forEach((id, i) => {
+      const item = this._items.get(id);
+      if (item) this._anims.set(id, { born: now + i * 140, duration: strokeDuration(item) });
+    });
+    this._area.queue_repaint();
+    if (this._drawTimer) return;
+    this._drawTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 33, () => {
+      const tick = Date.now();
+      for (const [id, anim] of this._anims) if (tick - anim.born >= anim.duration) this._anims.delete(id);
+      this._area?.queue_repaint();
+      if (!this._alive || !this._area || !this._anims.size) {
+        this._drawTimer = 0;
         return GLib.SOURCE_REMOVE;
       }
       return GLib.SOURCE_CONTINUE;
@@ -564,14 +588,23 @@ export default class FridayDesktop extends Extension {
   _clear(ids) {
     if (ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')))
       throw new Error('Invalid annotation IDs');
-    if (ids) for (const id of ids) this._items.delete(id);
-    else this._items?.clear();
+    if (ids)
+      for (const id of ids) {
+        this._items.delete(id);
+        this._anims?.delete(id);
+      }
+    else {
+      this._items?.clear();
+      this._anims?.clear();
+    }
     this._area?.queue_repaint();
     if (!this._items?.size) {
       if (!this._mark) this._area?.hide();
       this._expires = 0;
       if (this._pulseTimer) GLib.source_remove(this._pulseTimer);
       this._pulseTimer = 0;
+      if (this._drawTimer) GLib.source_remove(this._drawTimer);
+      this._drawTimer = 0;
       if (!this._lease) this._disarmEscape();
     }
   }
@@ -646,17 +679,26 @@ export default class FridayDesktop extends Extension {
           createdAt: Date.now(),
           display: this._display(),
         };
-        this._items.set('user-mark', {
-          id: 'user-mark',
-          kind: 'path',
-          x: point.x,
-          y: point.y,
-          points: this._mark.points,
-          color: '#ffcf70',
-        });
+        // A stroke that reads as a rough-notation gesture becomes that annotation;
+        // anything else stays freehand ink. Freehand keeps its attention gold.
+        const gesture = classifyMark(this._mark.points);
+        this._items.set(
+          'user-mark',
+          gesture
+            ? { id: 'user-mark', ...gesture }
+            : {
+                id: 'user-mark',
+                kind: 'path',
+                x: point.x,
+                y: point.y,
+                points: this._mark.points,
+                color: '#ffcf70',
+              },
+        );
         this._endMark();
         this._ignorePointerUntil = Date.now() + 200;
         this._expires = Date.now() + 30000;
+        if (gesture) this._animateDraw(['user-mark']);
       }
       this._area.queue_repaint();
       return Clutter.EVENT_STOP;
@@ -664,6 +706,17 @@ export default class FridayDesktop extends Extension {
     return [Clutter.EventType.KEY_PRESS, Clutter.EventType.KEY_RELEASE, Clutter.EventType.SCROLL].includes(type)
       ? Clutter.EVENT_STOP
       : Clutter.EVENT_PROPAGATE;
+  }
+
+  // Eased 0..1 reveal per animating annotation; annotations without one render fully drawn.
+  _drawProgress() {
+    if (!this._anims?.size) return undefined;
+    const progress = new Map();
+    for (const [id, anim] of this._anims) {
+      const t = Math.max(0, Math.min(1, (Date.now() - anim.born) / anim.duration));
+      progress.set(id, t * (2 - t)); // ease-out so strokes settle instead of stopping dead
+    }
+    return progress;
   }
 
   _paint() {
@@ -674,7 +727,12 @@ export default class FridayDesktop extends Extension {
       if (this._mark) {
         cr.setSourceRGBA(0.05, 0.08, 0.12, 0.15);
         cr.paint();
-        items.push({ kind: 'label', x: 650, y: 65, text: 'Draw around something · release to finish · Esc to stop' });
+        items.push({
+          kind: 'label',
+          x: 650,
+          y: 65,
+          text: 'Circle, underline, scrub to highlight, X to cross out · release to finish · Esc to stop',
+        });
         if (this._mark.points.length > 1) items.push({ kind: 'path', points: this._mark.points });
       }
       paintAnnotations(
@@ -683,6 +741,7 @@ export default class FridayDesktop extends Extension {
         global.screen_width,
         global.screen_height,
         this._pulseTimer ? ((Date.now() - this._pulseStarted) % 1000) / 1000 : undefined,
+        this._drawProgress(),
       );
       this._paintSerial++;
     } catch (error) {

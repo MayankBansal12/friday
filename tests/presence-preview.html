@@ -256,6 +256,18 @@
         getSettings: async () => ({ wakeWord: 'Friday' }),
         desktopStatus: async () => ({ ready: true }),
         silence: noop,
+        interrupt: async () => {
+          fixture.calls.push(['interrupt']);
+        },
+        livekit: {
+          session: async () => undefined,
+          listener: noop,
+          observed: noop,
+          onExpect: () => noop,
+          onCancelled: () => noop,
+          onMicrophone: () => noop,
+          onMicrophoneReady: () => noop,
+        },
         listening(s) {
           fixture.listening = s;
         },

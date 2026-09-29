@@ -6,6 +6,7 @@ function setup(direct = false) {
   let time = 0;
   const jobs: { request: PcmRequest; resolve: (r: PcmResult) => void }[] = [];
   const final: string[] = [],
+    partials: string[] = [],
     traces: SpeechTrace[] = [],
     errors: unknown[] = [];
   let starts = 0,
@@ -16,6 +17,7 @@ function setup(direct = false) {
     decode: (request) => new Promise((resolve) => jobs.push({ request, resolve })),
     final: (text) => final.push(text),
     speechStart: () => starts++,
+    partial: (text) => partials.push(text),
     endpoint: () => {},
     endpointRevoked: () => revocations++,
     error: (e) => errors.push(e),
@@ -32,9 +34,32 @@ function setup(direct = false) {
     j.resolve({ ...j.request, text, inferenceMs });
     await Promise.resolve();
   };
-  return { stt, jobs, final, traces, errors, feed, complete, starts: () => starts, revocations: () => revocations };
+  return {
+    stt,
+    jobs,
+    final,
+    partials,
+    traces,
+    errors,
+    feed,
+    complete,
+    starts: () => starts,
+    revocations: () => revocations,
+  };
 }
 describe('progressive batch coverage', () => {
+  it('reports revisable interim text only while speech continues', async () => {
+    const s = setup();
+    s.feed(1200);
+    await s.complete(0, 'Wait');
+    expect(s.partials).toEqual(['Wait']);
+    expect(s.final).toEqual([]);
+    s.feed(860, false);
+    await s.complete(1, 'Wait, not that one.');
+    expect(s.final).toEqual(['Wait, not that one.']);
+    // Results after the endpoint are finals, not interim text.
+    expect(s.partials).toEqual(['Wait']);
+  });
   it('reuses a complete silence-window result without decoding at the endpoint', async () => {
     const s = setup();
     s.feed(1200);

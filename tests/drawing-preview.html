@@ -1,0 +1,259 @@
+<!doctype html>
+<!-- Demo of the GNOME overlay's Rough-Notation-style reveal: the same stroke sampling,
+     partial-polyline drawing, stagger and ease-out used in drawing.js / extension.js. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Drawing reveal demo</title>
+    <style>
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        background: #2a2d33;
+        font-family: 'Noto Sans', sans-serif;
+      }
+      main {
+        display: grid;
+        gap: 10px;
+        justify-items: center;
+      }
+      canvas {
+        background: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="720" height="420"%3E%3Crect width="720" height="420" fill="%23eef1f6"/%3E%3Crect x="60" y="70" width="240" height="46" rx="8" fill="%23fff"/%3E%3Crect x="60" y="150" width="240" height="46" rx="8" fill="%23fff"/%3E%3Crect x="60" y="230" width="240" height="46" rx="8" fill="%23fff"/%3E%3Crect x="380" y="110" width="220" height="140" rx="8" fill="%23fff"/%3E%3C/svg%3E');
+        border-radius: 10px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+      }
+      button {
+        font: inherit;
+        padding: 6px 18px;
+        border-radius: 8px;
+        border: 1px solid #1d1f1b;
+        background: #1d1f1b;
+        color: #fbfaf4;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <canvas id="stage" width="1440" height="840" style="width: 720px; height: 420px"></canvas>
+      <button id="replay">Replay</button>
+    </main>
+    <script type="module">
+      // ---- the same sketch math as native/gnome-extension/drawing.js ----
+      const clamp = (n, low, high) => Math.max(low, Math.min(n, high));
+      const INK = '#1d1f1b';
+      const RED = '#e5484d';
+      const BLUE = '#4169e1';
+      const PAPER = '#fbfaf4';
+      const S = 2; // the canvas is 2x for crispness
+
+      function pen() {
+        const strokes = [];
+        return {
+          strokes,
+          moveTo(x, y) {
+            strokes.push([[x, y]]);
+          },
+          lineTo(x, y) {
+            strokes[strokes.length - 1]?.push([x, y]);
+          },
+          curveTo(x1, y1, x2, y2, x3, y3) {
+            const last = strokes[strokes.length - 1];
+            const [x0, y0] = last[last.length - 1];
+            for (let i = 1; i <= 16; i++) {
+              const t = i / 16;
+              const u = 1 - t;
+              last.push([
+                u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+                u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3,
+              ]);
+            }
+          },
+        };
+      }
+
+      const length = (pts) => pts.slice(1).reduce((n, p, i) => n + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0);
+
+      function partialPoints(pts, take) {
+        const out = [pts[0]];
+        let used = 0;
+        for (let i = 1; i < pts.length; i++) {
+          const [x, y] = pts[i - 1];
+          const seg = Math.hypot(pts[i][0] - x, pts[i][1] - y);
+          if (used + seg <= take) {
+            out.push(pts[i]);
+            used += seg;
+            continue;
+          }
+          const r = seg ? (take - used) / seg : 0;
+          out.push([x + (pts[i][0] - x) * r, y + (pts[i][1] - y) * r]);
+          break;
+        }
+        return out;
+      }
+
+      function sketchLine(p, x, y, toX, toY) {
+        const dx = toX - x;
+        const dy = toY - y;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len;
+        const ny = dx / len;
+        const amount = Math.min(1, len / 45);
+        for (const pass of [0, 1]) {
+          const bend = (pass ? 5 : -2.5) * amount;
+          p.moveTo(x + nx * pass * amount, y + ny * pass * amount);
+          p.curveTo(
+            x + dx / 3 + nx * bend,
+            y + dy / 3 + ny * bend,
+            x + (dx * 2) / 3 + nx * bend * (pass ? 0.7 : 1.2),
+            y + (dy * 2) / 3 + ny * bend * (pass ? 0.7 : 1.2),
+            toX,
+            toY,
+          );
+        }
+      }
+
+      function sketchEllipse(p, x, y, width, height) {
+        const amount = Math.min(1, width / 28, height / 28);
+        const k = 0.5523;
+        for (const pass of [0, 1]) {
+          const cx = x + width / 2 + (pass ? 0.8 : -0.4) * amount;
+          const cy = y + height / 2 + (pass ? -0.8 : 0.5) * amount;
+          const rx = width / 2 + (pass ? 2.2 : -0.4) * amount;
+          const ry = height / 2 + (pass ? 2 : -0.3) * amount;
+          const wobble = (pass ? -2.8 : 1.6) * amount;
+          p.moveTo(cx + rx, cy);
+          p.curveTo(cx + rx, cy + ry * k + wobble, cx + rx * k, cy + ry, cx, cy + ry);
+          p.curveTo(cx - rx * k, cy + ry + wobble, cx - rx, cy + ry * k, cx - rx, cy);
+          p.curveTo(cx - rx, cy - ry * k, cx - rx * k + wobble, cy - ry, cx, cy - ry);
+          p.curveTo(cx + rx * k, cy - ry + wobble, cx + rx, cy - ry * k, cx + rx, cy + amount);
+        }
+      }
+
+      function paintStrokes(ctx, strokes, ink, reveal) {
+        let budget = reveal >= 1 ? Infinity : reveal * strokes.reduce((n, s) => n + length(s), 0);
+        let drawn = false;
+        for (const pts of strokes) {
+          if (budget < 0.5) break;
+          const len = length(pts);
+          const part = budget >= len ? pts : partialPoints(pts, budget);
+          budget -= len;
+          ctx.beginPath();
+          part.forEach(([x, y], i) => (i ? ctx.lineTo(x * S, y * S) : ctx.moveTo(x * S, y * S)));
+          // faint halo pass, then the ink pass (the extension does this via strokePreserve)
+          ctx.strokeStyle = INK;
+          ctx.globalAlpha = 0.18;
+          ctx.lineWidth = 3.25 * S;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = ink;
+          ctx.lineWidth = 1.8 * S;
+          ctx.stroke();
+          drawn = true;
+        }
+        return drawn;
+      }
+
+      const strokeDuration = (a) =>
+        Math.round(
+          clamp(
+            a.kind === 'underline' || a.kind === 'strike'
+              ? a.width
+              : a.kind === 'ellipse'
+                ? (Math.PI * (a.width + a.height)) / 2
+                : a.kind === 'rectangle'
+                  ? 2 * (a.width + a.height)
+                  : a.kind === 'cross'
+                    ? 2 * Math.hypot(a.width, a.height) + 24
+                    : a.kind === 'arrow'
+                      ? Math.hypot(a.toX - a.x, a.toY - a.y) + 32
+                      : 200,
+            240,
+            900,
+          ) * 0.8,
+        );
+
+      // ---- fixtures mirroring an agent's desktop_draw call ----
+      const items = [
+        { id: 'underline', kind: 'underline', x: 92, y: 66, width: 210, height: 40, text: 'Network settings' },
+        { id: 'strike', kind: 'strike', x: 92, y: 150, width: 210, height: 46, text: 'Old build' },
+        { id: 'cross', kind: 'cross', x: 92, y: 234, width: 210, height: 46, text: 'Deprecated' },
+        { id: 'circle', kind: 'ellipse', x: 380, y: 116, width: 220, height: 130 },
+        { id: 'arrow', kind: 'arrow', x: 300, y: 340, toX: 470, toY: 220, text: 'Open this panel' },
+      ];
+      const born0 = { at: performance.now() };
+      const delay = (i) => i * 140;
+
+      const ctx = document.getElementById('stage').getContext('2d');
+
+      function frame(now) {
+        ctx.clearRect(0, 0, 1440, 840);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const finished = [];
+        items.forEach((a, i) => {
+          const raw = clamp((now - born0.at - delay(i)) / strokeDuration(a), 0, 1);
+          const t = raw * (2 - raw); // ease-out settle
+          if (raw >= 1) finished.push(a.id);
+          const ink = ['underline', 'strike', 'cross'].includes(a.kind) ? RED : BLUE;
+          const p = pen();
+          if (a.kind === 'underline') {
+            sketchLine(p, a.x, a.y + a.height, a.x + a.width, a.y + a.height);
+            paintStrokes(ctx, p.strokes, ink, t);
+          } else if (a.kind === 'strike') {
+            sketchLine(p, a.x - 4, a.y + a.height / 2, a.x + a.width + 4, a.y + a.height / 2);
+            paintStrokes(ctx, p.strokes, ink, t);
+          } else if (a.kind === 'cross') {
+            sketchLine(p, a.x - 4, a.y - 4, a.x + a.width + 4, a.y + a.height + 4);
+            sketchLine(p, a.x + a.width + 4, a.y - 4, a.x - 4, a.y + a.height + 4);
+            paintStrokes(ctx, p.strokes, ink, t);
+          } else if (a.kind === 'ellipse') {
+            sketchEllipse(p, a.x, a.y, a.width, a.height);
+            paintStrokes(ctx, p.strokes, ink, t);
+          } else if (a.kind === 'arrow') {
+            sketchLine(p, a.x, a.y, a.toX, a.toY);
+            const angle = Math.atan2(a.toY - a.y, a.toX - a.x);
+            const head = Math.min(16, Math.hypot(a.toX - a.x, a.toY - a.y) / 3);
+            for (const delta of [-0.5, 0.5])
+              sketchLine(
+                p,
+                a.toX,
+                a.toY,
+                a.toX - head * Math.cos(angle + delta),
+                a.toY - head * Math.sin(angle + delta),
+              );
+            paintStrokes(ctx, p.strokes, ink, t);
+          }
+          if (a.text) {
+            ctx.font = `600 15px 'Noto Sans', sans-serif`;
+            const w = ctx.measureText(a.text).width + 24;
+            const x = a.kind === 'arrow' ? a.x : a.x;
+            const y = a.kind === 'arrow' ? a.y + 16 : a.y - 44;
+            ctx.globalAlpha = clamp(t * 1.6 - 0.6, 0, 1);
+            ctx.fillStyle = ink;
+            ctx.fillRect(x + 3, y + 3, w, 34);
+            ctx.fillStyle = PAPER;
+            ctx.fillRect(x, y, w, 34);
+            ctx.strokeStyle = INK;
+            ctx.globalAlpha *= 0.85;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, y + 0.5, w - 1, 33);
+            ctx.globalAlpha = clamp(t * 1.6 - 0.6, 0, 1);
+            ctx.fillStyle = INK;
+            ctx.fillText(a.text, x + 12, y + 22);
+            ctx.globalAlpha = 1;
+          }
+        });
+        if (finished.length < items.length) requestAnimationFrame(frame);
+      }
+
+      document.getElementById('replay').onclick = () => {
+        born0.at = performance.now();
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

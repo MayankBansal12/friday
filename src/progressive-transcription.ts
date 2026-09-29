@@ -14,6 +14,8 @@ interface Options {
   decode(request: PcmRequest): Promise<PcmResult>;
   final(text: string): void;
   speechStart(): void;
+  /** Revisable interim text while speech continues (batch re-decode, never committed). */
+  partial?(text: string): void;
   endpoint(): void;
   endpointRevoked?(): void;
   error(error: unknown, requireRestart?: boolean): void;
@@ -155,6 +157,7 @@ export class ProgressiveTranscription {
         this.record('inference-end', request.coverage);
         if (result.coverage >= this.speechEnd + 3840 || this.sealed) this.record('final-ready', result.coverage);
         this.active = false;
+        if (!this.ended && result.text.trim()) this.options.partial?.(result.text);
         this.deliver();
         this.drain();
       },

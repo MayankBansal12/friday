@@ -9,6 +9,7 @@ import { AgentService } from '../electron/agent-service.js';
 import { DesktopError } from '../electron/desktop-status.js';
 import { TaskStore } from '../electron/store.js';
 import type { BuddySettings } from '../electron/types.js';
+import { FakeVoice } from './fake-voice.js';
 
 const dirs: string[] = [];
 const services: AgentService[] = [];
@@ -88,23 +89,23 @@ afterEach(async () => {
 
 describe('AgentService lifecycle', () => {
   it('Stop cancels queued submissions and running children, clears presentation, and permits a fresh request', async () => {
-    const silence = vi.fn();
-    const { service, children, tool } = await fixture({ silence });
+    const voice = new FakeVoice();
+    const { service, children, tool } = await fixture({ voice });
     await service.submit('Guide me');
-    await tool(0, '/tools/show_text', { text: 'Look here.' });
+    await tool(0, '/tools/interact', { actions: [{ tool: 'show_text_tool', args: { text: 'Look here.' } }] });
     await service.startChild('Research', 'Find the answer');
     const queued = service.submit('A queued request');
     const rejection = expect(queued).rejects.toThrow('Request stopped');
     await service.stop();
     await rejection;
     expect(service.list().every((task) => task.status === 'cancelled')).toBe(true);
-    expect(service.state().presentation).toEqual({ text: '', expanded: false, speaking: false });
+    expect(service.state().presentation).toEqual({ text: '', expanded: false, speaking: false, echo: [] });
     expect(children).toHaveLength(2);
     expect(children.every((child) => child.signals.includes('SIGTERM'))).toBe(true);
     expect((await tool(0, '/tools/session_start', { title: 'Late', prompt: 'Must not run' })).status).toBe(401);
     expect((await service.submit('A fresh voice request')).status).toBe('thinking');
     expect(children).toHaveLength(3);
-    expect(silence).toHaveBeenCalled();
+    expect(voice.stops).toBeGreaterThan(0);
   });
   it('reports desktop interruptions as failures rather than blaming the user', async () => {
     const { service } = await fixture();
@@ -135,7 +136,8 @@ describe('AgentService lifecycle', () => {
     expect(second.conversationId).toBe(first.conversationId);
     expect(children).toHaveLength(1);
     const args = invocations[0][1] as string[];
-    expect(args[args.indexOf('--tools') + 1]).toContain('desktop_draw');
+    expect(args[args.indexOf('--tools') + 1]).toContain('interact');
+    expect(args[args.indexOf('--tools') + 1]).not.toMatch(/desktop_draw|\bspeak\b|show_text|set_presentation/);
     const newId = await service.newConversation();
     expect((await service.submit('New topic')).conversationId).toBe(newId);
     expect(newId).not.toBe(first.conversationId);
@@ -352,81 +354,74 @@ describe('fresh desktop readiness', () => {
 });
 
 describe('parent and child runtime boundary', () => {
-  it('keeps the final spoken answer after non-blocking computer progress', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, children } = await fixture({ speak });
-    const task = await service.submit('Click the button');
+  it('speaks progress on the progress lane but never auto-speaks the final reply', async () => {
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, children } = await fixture({ voice });
+    const task = await service.submit('Click the button', { source: 'voice' });
     service.controlProgress(task.id, 'Clicking', 'Opening it now.');
+    expect(voice.started).toEqual(['Opening it now.']);
     children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Opened and verified.' }] });
     children[0].rpc({ type: 'agent_settled' });
     await settle();
-    expect(speak).toHaveBeenCalledWith('Opening it now.');
-    expect(speak).toHaveBeenCalledWith('Opened and verified.');
-  });
-  it('keeps progress out of reply presentation and Read aloud when the final reply stays silent', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, children } = await fixture({ speak });
-    const task = await service.submit('Click the button');
-    const presentation = { ...service.state().presentation };
-    service.controlProgress(task.id, 'Opening the app', 'Opening it now.');
-    expect(service.state().presentation).toEqual(presentation);
-    expect(service.list()[0].speechText).toBeUndefined();
-    expect(service.list()[0].spoken).toBeFalsy();
-    const long = Array(80).fill('detail').join(' ') + '.';
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: long }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(speak).toHaveBeenCalledExactlyOnceWith('Opening it now.');
+    expect(voice.started).toEqual(['Opening it now.']);
+    expect(service.list()[0]).toMatchObject({ status: 'completed', response: 'Opened and verified.' });
+    // Shown silently because no interact reached the user.
+    expect(service.state().presentation).toMatchObject({ text: 'Opened and verified.', expanded: true });
+    expect(service.list()[0].steps.some((s) => s.title === 'Final reply shown without speech')).toBe(true);
     expect(() => service.readAloud(task.id)).toThrow('on screen');
   });
-  it.each(['invalid', 'muted', 'silenced'])('drops %s progress speech without changing reply state', async (mode) => {
-    const speak = vi.fn(async () => {});
-    const { service } = await fixture({ speak });
-    const task = await service.submit('Click the button');
-    if (mode === 'muted') await service.updateSettings({ autoSpeak: false });
-    if (mode === 'silenced') service.silence();
+  it('keeps progress out of reply presentation and Read aloud', async () => {
+    const voice = new FakeVoice();
+    const { service } = await fixture({ voice });
+    const task = await service.submit('Click the button', { source: 'voice' });
     const presentation = { ...service.state().presentation };
-    service.controlProgress(
-      task.id,
-      'Opening the app',
-      mode === 'invalid' ? Array(80).fill('detail').join(' ') : 'Opening it now.',
-    );
-    await settle();
-    expect(speak).not.toHaveBeenCalled();
-    expect(service.state().presentation).toEqual(presentation);
-    expect(service.list()[0].speechIssue).toBeUndefined();
+    service.controlProgress(task.id, 'Opening the app', 'Opening it now.');
+    expect(service.state().presentation).toMatchObject({ text: presentation.text, expanded: presentation.expanded });
     expect(service.list()[0].speechText).toBeUndefined();
+    expect(service.list()[0].spoken).toBeFalsy();
   });
+  it.each(['invalid', 'muted', 'silenced', 'typed'])(
+    'drops %s progress speech without changing reply state',
+    async (mode) => {
+      const voice = new FakeVoice();
+      const { service } = await fixture({ voice });
+      const task = await service.submit('Click the button', { source: mode === 'typed' ? 'typed' : 'voice' });
+      if (mode === 'muted') await service.updateSettings({ autoSpeak: false });
+      if (mode === 'silenced') service.silence();
+      service.controlProgress(
+        task.id,
+        'Opening the app',
+        mode === 'invalid' ? Array(80).fill('detail').join(' ') : 'Opening it now.',
+      );
+      await settle();
+      expect(voice.utterances).toHaveLength(0);
+      expect(service.list()[0].speechIssue).toBeUndefined();
+      expect(service.list()[0].speechText).toBeUndefined();
+    },
+  );
   it('drops progress while an answer is playing and while previous progress is playing', async () => {
-    let finish!: () => void;
-    const speak = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    const silence = vi.fn();
-    const { service, tool } = await fixture({ speak, silence });
-    const task = await service.submit('Click the button');
-    await tool(0, '/tools/speak', { text: 'I can open the app.' });
-    const silenceCalls = silence.mock.calls.length;
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, tool } = await fixture({ voice, interactSyncWaitMs: 20 });
+    const task = await service.submit('Click the button', { source: 'voice' });
+    await tool(0, '/tools/interact', { actions: [{ tool: 'speak_tool', args: { text: 'I can open the app.' } }] });
     service.controlProgress(task.id, 'Working', 'Opening it now.');
-    expect(speak).toHaveBeenCalledTimes(1);
-    finish();
+    expect(voice.started).toEqual(['I can open the app.']);
+    voice.last!.finish();
     await settle();
     service.controlProgress(task.id, 'Working', 'Opening it now.');
     service.controlProgress(task.id, 'Still working', 'Checking the app.');
-    expect(speak).toHaveBeenCalledTimes(2);
-    expect(silence).toHaveBeenCalledTimes(silenceCalls);
+    expect(voice.started).toEqual(['I can open the app.', 'Opening it now.']);
+    expect(voice.last!.state()).toBe('playing');
     expect(service.list()[0].speechText).toBe('I can open the app.');
-    finish();
-    await settle();
   });
   it('rejects child UI, screen access and delegation even with a valid token', async () => {
     const { service, tool } = await fixture();
     await service.submit('Delegate');
     await service.startChild('Lookup', 'Research');
     for (const path of [
+      '/tools/interact',
       '/tools/speak',
       '/tools/show_text',
       '/tools/session_start',
@@ -445,14 +440,14 @@ describe('parent and child runtime boundary', () => {
   });
 
   it('stores quiet child results and resumes the same saved session', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, children, tool, invocations } = await fixture({ speak });
+    const voice = new FakeVoice();
+    const { service, children, tool, invocations } = await fixture({ voice });
     await service.submit('Delegate');
     const child = await service.startChild('Lookup', 'Find answer');
     children[1].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'The answer is 42.' }] });
     children[1].rpc({ type: 'agent_settled' });
     await settle();
-    expect(speak).not.toHaveBeenCalled();
+    expect(voice.utterances).toHaveLength(0);
     expect(service.state().presentation.text).toBe('');
     expect((await tool(0, '/tools/session_read', { id: child.id })).data.session).toMatchObject({
       status: 'completed',
@@ -481,27 +476,26 @@ describe('parent and child runtime boundary', () => {
     await expect(service.updateChild(child.id, 'Resume')).rejects.toThrow('limit');
   });
 
-  it('speaks once, preserves detailed text, and revokes tools between turns', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, children, tool } = await fixture({ speak });
-    await service.submit('Answer');
-    await tool(0, '/tools/show_text', { text: 'Long detailed instructions', expanded: true });
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Brief answer.' }] });
+  it('keeps interact text over the final reply and revokes tools between turns', async () => {
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, children, tool } = await fixture({ voice });
+    await service.submit('Answer', { source: 'voice' });
+    await tool(0, '/tools/interact', {
+      actions: [
+        { tool: 'speak_tool', args: { text: 'Brief answer.' } },
+        { tool: 'show_text_tool', args: { text: 'Long detailed instructions' } },
+      ],
+    });
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Do not show or speak this.' }] });
     children[0].rpc({ type: 'agent_settled' });
     await settle();
-    expect(speak).toHaveBeenCalledExactlyOnceWith('Brief answer.');
+    expect(voice.started).toEqual(['Brief answer.']);
     expect(service.state().presentation.text).toBe('Long detailed instructions');
-    expect((await tool(0, '/tools/speak', { text: 'Late speech' })).status).toBe(401);
-    await service.submit('Next');
-    await tool(0, '/tools/show_text', { text: 'Keep these instructions visible', expanded: true });
-    await tool(0, '/tools/speak', { text: 'Early answer.' });
-    expect(service.state().presentation.text).toBe('Keep these instructions visible');
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Do not speak twice.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(speak).toHaveBeenCalledTimes(2);
+    expect(
+      (await tool(0, '/tools/interact', { actions: [{ tool: 'speak_tool', args: { text: 'Late.' } }] })).status,
+    ).toBe(401);
   });
-
   it('restores the parent identity and marks unfinished children interrupted on restart', async () => {
     const { service, dir } = await fixture();
     const parentId = service.state().parentId;
@@ -547,264 +541,59 @@ describe('Selected background task context', () => {
   });
 });
 
-describe('concise parent speech', () => {
-  it('rejects over-budget speech with recovery, then accepts an intact rewrite without a duplicate final', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak });
-    await service.submit('Explain deletion');
-    const long = Array(25).fill('detail').join(' ') + '. Only delete after approval.';
-    const rejected = await tool(0, '/tools/speak', { text: long });
-    expect(rejected.data).toMatchObject({ accepted: false, started: false });
-    expect(rejected.data.recovery).toContain('approval');
-    expect(speak).not.toHaveBeenCalled();
-    const short = 'Review the deletion details on screen. Use the approval controls only if you want to proceed.';
-    expect((await tool(0, '/tools/speak', { text: short })).data.accepted).toBe(true);
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: long }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(speak).toHaveBeenCalledExactlyOnceWith(short);
-    expect(service.state().presentation.text).toBe(long);
-    expect(service.list()[0]).toMatchObject({ response: long, speechText: short });
-  });
-
-  it('keeps an over-budget final intact and silent, and cannot replay child or arbitrary text', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, children } = await fixture({ speak });
-    const task = await service.submit('Details');
-    const long = 'Do not act yet. ' + Array(80).fill('detail').join(' ') + '. Approval is required.';
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: long }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(speak).not.toHaveBeenCalled();
-    expect(service.state().presentation).toMatchObject({ text: long, expanded: true, speaking: false });
-    expect(service.list()[0].speechIssue).toContain('on screen');
-    expect(() => service.readAloud(task.id)).toThrow('on screen');
-    expect(() => service.readAloud('Say arbitrary text.')).toThrow('on screen');
-  });
-
-  it('honors autoSpeak off for tools, final fallback and replay', async () => {
-    const speak = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak });
-    await service.updateSettings({ autoSpeak: false });
-    const task = await service.submit('Hello');
-    expect((await tool(0, '/tools/speak', { text: 'Hello there.' })).data).toMatchObject({
-      accepted: true,
-      started: false,
-    });
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Details are here.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    await service.readAloud(task.id);
-    expect(speak).not.toHaveBeenCalled();
-    await service.submit('Another');
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'A short answer.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(speak).not.toHaveBeenCalled();
-  });
-
-  it('isolates replaced playback, keeps two children running, and suppresses speech after Stop', async () => {
-    const ends: Array<() => void> = [];
-    const speak = vi.fn(() => new Promise<void>((resolve) => ends.push(resolve)));
-    const silence = vi.fn();
-    const { service, tool, children } = await fixture({ speak, silence });
-    await service.submit('Work');
-    const a = await service.startChild('One', 'Research one');
-    const b = await service.startChild('Two', 'Research two');
-    await tool(0, '/tools/speak', { text: 'I am checking.' });
-    await tool(0, '/tools/speak', { text: 'The first result is ready.' });
-    ends[0]();
-    await settle();
-    expect(service.state().presentation.speaking).toBe(true);
-    expect(silence).toHaveBeenCalled();
-    children[1].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Child details.' }] });
-    children[1].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(service.state().presentation.speaking).toBe(true);
-    expect(service.state().sessions.find((s) => s.id === a.id)?.status).toBe('completed');
-    expect(service.state().sessions.find((s) => s.id === b.id)?.status).toBe('running');
-    expect(speak).toHaveBeenCalledTimes(2);
-    service.silence();
-    await tool(0, '/tools/speak', { text: 'A late reply.' });
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Another late reply.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    ends[1]();
-    await settle();
-    expect(speak).toHaveBeenCalledTimes(2);
-    expect(service.state().presentation.speaking).toBe(false);
-    await service.submit('New request');
-    await tool(0, '/tools/speak', { text: 'New answer.' });
-    expect(speak).toHaveBeenCalledTimes(3);
-    ends[2]();
-  });
-
-  it('a new request cancels old audio and stale completion cannot finish the new reply', async () => {
-    const ends: Array<() => void> = [];
-    const speak = vi.fn(() => new Promise<void>((resolve) => ends.push(resolve)));
-    const silence = vi.fn();
-    const { service, tool } = await fixture({ speak, silence });
-    const old = await service.submit('First');
-    await tool(0, '/tools/speak', { text: 'First answer.' });
-    await service.submit('Second');
-    await tool(1, '/tools/speak', { text: 'Second answer.' });
-    ends[0]();
-    await settle();
-    expect(service.list().find((t) => t.id === old.id)?.status).toBe('cancelled');
-    expect(service.state().presentation.speaking).toBe(true);
-    expect((await tool(0, '/tools/speak', { text: 'Stale answer.' })).status).toBe(401);
-    ends[1]();
-    await settle();
-    expect(service.state().presentation.speaking).toBe(false);
-  });
-});
-
-it('retains a speak-only caption and does not count Stop as an answer', async () => {
-  const speak = vi.fn(async () => {});
-  const { service, tool, children } = await fixture({ speak });
-  await service.submit('Guide me');
-  await tool(0, '/tools/speak', { text: 'Open Settings.' });
-  children[0].rpc({ type: 'agent_settled' });
-  await settle();
-  expect(service.state().presentation.text).toBe('Open Settings.');
-  expect(speak).toHaveBeenCalledExactlyOnceWith('Open Settings.');
-  await service.submit('Another request');
-  service.silence();
-  children[0].rpc({ type: 'agent_settled' });
-  await settle();
-  expect(service.list()[0]).toMatchObject({ status: 'failed' });
-});
-
-it('turning autoSpeak off stops playback and a stale completion cannot restart it', async () => {
-  let finish!: () => void;
-  const speak = vi.fn(
-    () =>
-      new Promise<void>((resolve) => {
-        finish = resolve;
-      }),
-  );
-  const silence = vi.fn();
-  const { service, tool, children } = await fixture({ speak, silence });
-  await service.submit('Answer');
-  await tool(0, '/tools/speak', { text: 'Here is the answer.' });
-  silence.mockClear();
-  await service.updateSettings({ autoSpeak: false });
-  expect(silence).toHaveBeenCalledOnce();
-  expect(service.state().presentation.speaking).toBe(false);
-  finish();
-  children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Here are more details.' }] });
-  children[0].rpc({ type: 'agent_settled' });
-  await settle();
-  expect(speak).toHaveBeenCalledOnce();
-  expect(service.state().presentation.speaking).toBe(false);
-});
-
-it('keeps a short symbolic final visible with an accurate neutral notice', async () => {
-  const speak = vi.fn(async () => {});
-  const { service, children } = await fixture({ speak });
-  await service.submit('What does it cost?');
-  children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'It costs $12.' }] });
-  children[0].rpc({ type: 'agent_settled' });
-  await settle();
-  expect(speak).not.toHaveBeenCalled();
-  expect(service.list()[0]).toMatchObject({ response: 'It costs $12.', speechIssue: 'Reply shown on screen.' });
-  expect(service.state().presentation).toMatchObject({ text: 'It costs $12.', expanded: true });
-});
-
-describe('attached action confirmations', () => {
+describe('session actions without attached speech', () => {
   const start = (title: string) => ({ kind: 'start', title, prompt: 'Wait, then calculate.' });
-  it('speaks once after both starts without another model event and does not wait for playback', async () => {
-    let finish!: () => void;
-    const sink = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    const { service, tool, children } = await fixture({ speak: sink });
-    const task = await service.submit('Start two calculations');
-    sink.mockImplementationOnce(() => {
-      expect(service.state().sessions.filter((s) => s.role === 'child' && s.status === 'running')).toHaveLength(2);
-      return new Promise<void>((resolve) => {
-        finish = resolve;
-      });
+  it('runs a batch once and leaves confirmation to interact', async () => {
+    const voice = new FakeVoice();
+    const { service, tool } = await fixture({ voice });
+    await service.submit('Start two calculations', { source: 'voice' });
+    const result = await tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] });
+    expect(result.data).toMatchObject({ ok: true, effects: 'applied' });
+    expect(result.data.speech).toBeUndefined();
+    expect(voice.utterances).toHaveLength(0);
+    expect(service.state().sessions.filter((s) => s.role === 'child' && s.status === 'running')).toHaveLength(2);
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Again')] })).data.effects).toBe('none');
+    const confirm = await tool(0, '/tools/interact', {
+      actions: [{ tool: 'speak_tool', args: { text: 'Both calculations have started.' } }],
     });
-    const result = await tool(0, '/tools/session_actions', {
-      actions: [start('Orchid'), start('Flint')],
-      confirmation: 'Both calculations have started.',
-    });
-    expect(result.data).toMatchObject({ ok: true, effects: 'applied', speech: { accepted: true, started: true } });
-    expect(sink).toHaveBeenCalledTimes(1);
-    expect(service.state().presentation.speaking).toBe(true);
-    expect(service.list().find((t) => t.id === task.id)).toMatchObject({
-      speechText: 'Both calculations have started.',
-      spoken: true,
-    });
-    expect((await tool(0, '/tools/speak', { text: 'Both calculations have started.' })).data).toMatchObject({
-      accepted: false,
-      handled: true,
-    });
-    children[0].rpc({
-      type: 'agent_end',
-      messages: [{ role: 'assistant', content: 'Both calculations have started.' }],
-    });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).toHaveBeenCalledTimes(1);
-    finish();
-    await settle();
-    sink.mockResolvedValue(undefined);
-    await service.readAloud(task.id);
-    expect(sink).toHaveBeenCalledTimes(2);
+    expect(confirm.data.status).toBe('in_progress');
+    expect(voice.started).toEqual(['Both calculations have started.']);
   });
   it.each([
-    { actions: [start('Valid')], confirmation: '**Invalid**' },
-    { actions: [start('Valid'), { kind: 'stop', id: 'missing' }], confirmation: 'Both tasks have stopped.' },
+    { actions: [start('Valid')], confirmation: 'Started.' },
+    { actions: [start('Valid'), { kind: 'stop', id: 'missing' }] },
     { actions: [start('Valid'), { kind: 'update', id: 4, prompt: 'Go' }] },
     { actions: [start('Valid'), { kind: 'erase' }] },
     { actions: [start('Valid')], extra: true },
     { actions: [start('Valid'), { ...start('Bad'), surprise: true }] },
     { actions: [] },
   ])('prevalidates all input with no effects: %j', async (data) => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
+    const { service, tool } = await fixture();
     await service.submit('Start work');
     const result = await tool(0, '/tools/session_actions', data);
-    expect(result.data).toMatchObject({ ok: false, effects: 'none', results: [], speech: { accepted: false } });
+    expect(result.data).toMatchObject({ ok: false, effects: 'none', results: [] });
     expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    expect(sink).not.toHaveBeenCalled();
-    expect(
-      (
-        await tool(0, '/tools/session_actions', {
-          actions: [start('Corrected')],
-          confirmation: 'The calculation has started.',
-        })
-      ).data.ok,
-    ).toBe(true);
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Corrected')] })).data.ok).toBe(true);
   });
-  it('reports partial effects and permits a truthful failure reply, but rejects whole-operation retry', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
+  it('reports partial effects and rejects whole-operation retry', async () => {
+    const { service, tool } = await fixture();
     await service.submit('Start two');
     const original = service.startChild.bind(service);
     vi.spyOn(service, 'startChild')
       .mockImplementationOnce(original)
       .mockRejectedValueOnce(new Error('Synthetic failure'));
-    const data = { actions: [start('Orchid'), start('Flint')], confirmation: 'Both calculations have started.' };
+    const data = { actions: [start('Orchid'), start('Flint')] };
     const result = await tool(0, '/tools/session_actions', data);
-    expect(result.data).toMatchObject({ ok: false, effects: 'possible', speech: { accepted: false } });
+    expect(result.data).toMatchObject({ ok: false, effects: 'possible' });
     expect(result.data.results.map((r: { ok: boolean }) => r.ok)).toEqual([true, false]);
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
-    expect(sink).not.toHaveBeenCalled();
     expect((await tool(0, '/tools/session_actions', data)).data.effects).toBe('none');
-    expect((await tool(0, '/tools/speak', { text: 'Only Orchid started. Flint could not start.' })).data.accepted).toBe(
-      true,
-    );
+    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
   });
-  it.each(['cancel', 'replace', 'silence', 'shutdown', 'approval'] as const)(
-    'suppresses confirmation when %s occurs during awaited effects',
+  it.each(['cancel', 'replace', 'silence', 'approval'] as const)(
+    'reports the truth when %s occurs during awaited effects',
     async (mode) => {
-      const sink = vi.fn(async () => {});
-      const { service, tool, children } = await fixture({ speak: sink });
+      const voice = new FakeVoice();
+      const { service, tool, children } = await fixture({ voice });
       const task = await service.submit('Start work');
       let release!: () => void;
       let entered!: () => void;
@@ -820,41 +609,51 @@ describe('attached action confirmations', () => {
         });
         return child;
       });
-      const pending = tool(0, '/tools/session_actions', {
-        actions: [start('Orchid'), start('Flint')],
-        confirmation: 'Both calculations have started.',
-      });
+      const pending = tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] });
       await ready;
       if (mode === 'cancel') await service.cancel(task.id);
       if (mode === 'replace') await service.submit('New question');
       if (mode === 'silence') service.silence();
-      if (mode === 'shutdown') {
-        void pending.catch(() => {});
-        await service.shutdown();
-      }
       if (mode === 'approval') {
-        children[0].rpc({
-          type: 'extension_ui_request',
-          method: 'confirm',
-          id: 'approval',
-          title: 'Approve',
-          message: 'Proceed?',
-        });
+        children[0].rpc({ type: 'extension_ui_request', method: 'confirm', id: 'a', title: 'Approve', message: 'Go?' });
         await settle();
       }
       release();
-      const result = await pending.catch((error) => {
-        if (mode !== 'shutdown') throw error;
-        return undefined;
-      });
-      if (result) expect(result.data.speech.accepted).toBe(false);
-      expect(sink).not.toHaveBeenCalled();
-      expect(service.list().find((t) => t.id === task.id)?.speechText).toBeUndefined();
+      const result = await pending;
+      if (mode === 'silence') expect(result.data.ok).toBe(true);
+      else expect(result.data).toMatchObject({ ok: false, effects: 'possible' });
+      expect(voice.utterances).toHaveLength(0);
     },
   );
-  it('does not race parallel confirmations or speak while the batch is pending', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
+  it('reports shutdown during awaited effects without speaking', async () => {
+    const voice = new FakeVoice();
+    const { service, tool } = await fixture({ voice });
+    await service.submit('Start work');
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((r) => {
+      entered = r;
+    });
+    const original = service.startChild.bind(service);
+    vi.spyOn(service, 'startChild').mockImplementationOnce(async (...args) => {
+      const child = await original(...args);
+      entered();
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      return child;
+    });
+    const pending = tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] });
+    void pending.catch(() => {});
+    await ready;
+    await service.shutdown();
+    release();
+    const result = await pending.catch(() => undefined);
+    if (result) expect(result.data.ok).toBe(false);
+    expect(voice.utterances).toHaveLength(0);
+  });
+  it('rejects a parallel batch while another is pending', async () => {
+    const { service, tool } = await fixture();
     await service.submit('Start work');
     let release!: () => void;
     let entered!: () => void;
@@ -870,67 +669,44 @@ describe('attached action confirmations', () => {
       });
       return result;
     });
-    const first = tool(0, '/tools/session_actions', {
-      actions: [start('Orchid')],
-      confirmation: 'Orchid has started.',
-    });
+    const first = tool(0, '/tools/session_actions', { actions: [start('Orchid')] });
     await ready;
-    expect(
-      (await tool(0, '/tools/session_actions', { actions: [start('Flint')], confirmation: 'Flint has started.' })).data
-        .effects,
-    ).toBe('none');
-    expect((await tool(0, '/tools/speak', { text: 'Both calculations have started.' })).data.accepted).toBe(false);
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Flint')] })).data.effects).toBe('none');
     release();
-    await first;
-    expect(sink).toHaveBeenCalledExactlyOnceWith('Orchid has started.');
+    expect((await first).data.ok).toBe(true);
+    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
   });
-  it('keeps muted confirmations for replay and isolates update/stop from the other child', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    await service.updateSettings({ autoSpeak: false });
-    const first = await service.submit('Start two');
-    const batch = await tool(0, '/tools/session_actions', {
-      actions: [start('Orchid'), start('Flint')],
-      confirmation: 'Both calculations have started.',
-    });
-    expect(batch.data.speech).toMatchObject({ accepted: true, started: false });
+  it('isolates targeted update and stop from the other child, and children cannot act', async () => {
+    const { service, tool, children } = await fixture();
+    await service.submit('Start two');
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] })).data.ok).toBe(
+      true,
+    );
+    const finish = async () => {
+      children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Done.' }] });
+      children[0].rpc({ type: 'agent_settled' });
+      await settle();
+    };
     const [a, b] = service.state().sessions.filter((s) => s.role === 'child');
     expect((await tool(1, '/tools/session_actions', { actions: [start('Forbidden')] })).status).toBe(400);
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    await service.readAloud(first.id);
-    expect(sink).not.toHaveBeenCalled();
-    await service.updateSettings({ autoSpeak: true });
-    await service.readAloud(first.id);
-    expect(sink).toHaveBeenCalledTimes(1);
+    await finish();
     await service.submit('Update Orchid');
-    expect(
-      (
-        await tool(0, '/tools/session_actions', {
-          actions: [{ kind: 'update', id: a.id, prompt: 'New numbers' }],
-          confirmation: 'Orchid now uses your new numbers.',
-        })
-      ).data.ok,
-    ).toBe(true);
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
+    const update = await tool(0, '/tools/session_actions', {
+      actions: [{ kind: 'update', id: a.id, prompt: 'New numbers' }],
+    });
+    expect(update.data).toMatchObject({ ok: true });
+    await finish();
     await service.submit('Stop Orchid');
-    expect(
-      (
-        await tool(0, '/tools/session_actions', {
-          actions: [{ kind: 'stop', id: a.id }],
-          confirmation: 'Orchid has stopped.',
-        })
-      ).data.ok,
-    ).toBe(true);
+    expect((await tool(0, '/tools/session_actions', { actions: [{ kind: 'stop', id: a.id }] })).data).toMatchObject({
+      ok: true,
+    });
     expect(service.state().sessions.find((s) => s.id === b.id)).toMatchObject({
       status: 'running',
       latestTaskId: b.latestTaskId,
     });
   });
-  it('withholds aggregate speech if an earlier child failed while a later action was pending', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
+  it('reports failure if an earlier child failed while a later action was pending', async () => {
+    const { service, tool, children } = await fixture();
     await service.submit('Start two');
     const original = service.startChild.bind(service);
     vi.spyOn(service, 'startChild')
@@ -940,51 +716,12 @@ describe('attached action confirmations', () => {
         await settle();
         return original(...args);
       });
-    const result = await tool(0, '/tools/session_actions', {
-      actions: [start('Orchid'), start('Flint')],
-      confirmation: 'Both calculations have started.',
-    });
-    expect(result.data.ok).toBe(false);
-    expect(sink).not.toHaveBeenCalled();
-  });
-  it('prevalidates capacity and refuses parent IDs before effects', async () => {
-    const { service, tool } = await fixture({ maxChildren: 1 });
-    const parent = await service.submit('Start work');
-    for (const actions of [[start('A'), start('B')], [{ kind: 'stop', id: parent.conversationId }]]) {
-      expect((await tool(0, '/tools/session_actions', { actions })).data.effects).toBe('none');
-      expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    }
-  });
-  it('withholds confirmation when child approval is pending and preserves the approval controls', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    await service.submit('Start work');
-    const original = service.startChild.bind(service);
-    vi.spyOn(service, 'startChild').mockImplementationOnce(async (...args) => {
-      const child = await original(...args);
-      children[1].rpc({
-        type: 'extension_ui_request',
-        method: 'confirm',
-        id: 'permission',
-        title: 'Approve',
-        message: 'Allow work?',
-      });
-      await settle();
-      return child;
-    });
-    const result = await tool(0, '/tools/session_actions', {
-      actions: [start('Orchid')],
-      confirmation: 'Orchid has started.',
-    });
-    expect(result.data).toMatchObject({ ok: false, speech: { accepted: false } });
-    const child = service.list().find((t) => t.role === 'child')!;
-    expect(child.status).toBe('awaiting_approval');
-    await service.resolveApproval(child.approval!.id, false);
-    expect(sink).not.toHaveBeenCalled();
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] })).data.ok).toBe(
+      false,
+    );
   });
   it('rejects a replaced child identity after awaiting an action', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
+    const { service, tool } = await fixture();
     await service.submit('Start work');
     const original = service.startChild.bind(service);
     vi.spyOn(service, 'startChild')
@@ -994,41 +731,40 @@ describe('attached action confirmations', () => {
         await service.updateChild(a.id, 'Replacement request');
         return original(...args);
       });
-    expect(
-      (
-        await tool(0, '/tools/session_actions', {
-          actions: [start('Orchid'), start('Flint')],
-          confirmation: 'Both calculations have started.',
-        })
-      ).data.ok,
-    ).toBe(false);
-    expect(sink).not.toHaveBeenCalled();
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Orchid'), start('Flint')] })).data.ok).toBe(
+      false,
+    );
   });
-  it('keeps asynchronous output failures visible without retrying accepted speech', async () => {
-    const sink = vi.fn(async () => {
-      throw new Error('Synthetic output failure');
+  it('prevalidates capacity and refuses parent IDs before effects', async () => {
+    const { service, tool } = await fixture({ maxChildren: 1 });
+    const parent = await service.submit('Start work');
+    for (const actions of [[start('A'), start('B')], [{ kind: 'stop', id: parent.conversationId }]]) {
+      expect((await tool(0, '/tools/session_actions', { actions })).data.effects).toBe('none');
+      expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
+    }
+  });
+  it('reports failure when child approval is pending and preserves the approval controls', async () => {
+    const { service, tool, children } = await fixture();
+    await service.submit('Start work');
+    const original = service.startChild.bind(service);
+    vi.spyOn(service, 'startChild').mockImplementationOnce(async (...args) => {
+      const child = await original(...args);
+      children[1].rpc({
+        type: 'extension_ui_request',
+        method: 'confirm',
+        id: 'p',
+        title: 'Approve',
+        message: 'Allow?',
+      });
+      await settle();
+      return child;
     });
-    const { service, tool, children } = await fixture({ speak: sink });
-    const task = await service.submit('Start work');
-    expect(
-      (await tool(0, '/tools/session_actions', { actions: [start('Orchid')], confirmation: 'Orchid has started.' }))
-        .data.speech.accepted,
-    ).toBe(true);
-    await settle();
-    expect(
-      service
-        .list()
-        .find((t) => t.id === task.id)
-        ?.steps.some((s) => s.title === 'Speech unavailable; reply shown as text'),
-    ).toBe(true);
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Orchid has started.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).toHaveBeenCalledTimes(1);
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Orchid')] })).data.ok).toBe(false);
+    const child = service.list().find((t) => t.role === 'child')!;
+    expect(child.status).toBe('awaiting_approval');
   });
   it('checks the returned action identity rather than adopting a replacement during the await', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
+    const { service, tool } = await fixture();
     await service.submit('Start work');
     const original = service.startChild.bind(service);
     vi.spyOn(service, 'startChild').mockImplementationOnce(async (...args) => {
@@ -1036,193 +772,330 @@ describe('attached action confirmations', () => {
       await service.updateChild(accepted.id, 'A different request');
       return accepted;
     });
-    expect(
-      (await tool(0, '/tools/session_actions', { actions: [start('Orchid')], confirmation: 'Orchid has started.' }))
-        .data.ok,
-    ).toBe(false);
-    expect(sink).not.toHaveBeenCalled();
+    expect((await tool(0, '/tools/session_actions', { actions: [start('Orchid')] })).data.ok).toBe(false);
+  });
+  it('preserves approval and Stop checks before any effects', async () => {
+    const { service, tool, children } = await fixture();
+    const task = await service.submit('Start work');
+    children[0].rpc({ type: 'extension_ui_request', method: 'confirm', id: 'a', title: 'Approve', message: 'Go?' });
+    await settle();
+    expect((await tool(0, '/tools/session_actions', { actions: [start('A')] })).data.effects).toBe('none');
+    await service.cancel(task.id);
+    expect((await tool(0, '/tools/session_actions', { actions: [start('A')] })).status).toBe(401);
+    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
   });
 });
 
-describe('shared bounded speech recovery', () => {
-  const actions = [{ kind: 'start', title: 'Willow', prompt: 'Wait, then calculate.' }];
-  const invalid = '**Too much markup**';
-  it('rejects before effects, then runs and speaks a valid attached rewrite once', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    await service.submit('Start Willow');
-    const first = await tool(0, '/tools/session_actions', { actions, confirmation: invalid });
-    expect(first.data).toMatchObject({
-      effects: 'none',
-      results: [],
-      speech: { accepted: false, recoveryExhausted: false, rewritesRemaining: 1 },
-    });
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    const rewrite = await tool(0, '/tools/session_actions', { actions, confirmation: 'Willow has started.' });
-    expect(rewrite.data).toMatchObject({ ok: true, speech: { accepted: true } });
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Willow has started.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).toHaveBeenCalledExactlyOnceWith('Willow has started.');
+describe('interact through the parent runtime', () => {
+  const say = (text: string) => ({ tool: 'speak_tool', args: { text } });
+  const show = (text: string) => ({ tool: 'show_text_tool', args: { text } });
+  const circle = { kind: 'circle', x: 100, y: 100, width: 80, height: 40 };
+  const observation = () => ({
+    id: 'obs-1',
+    display: { id: 'display-1', x: 0, y: 0, width: 1000, height: 800, scale: 1 },
+    width: 1000,
+    height: 800,
+    capturedAt: Date.now(),
+    focus: 'window',
+    scene: 1,
   });
-  it('requires explicit action-only resubmission after exhaustion and keeps final text silent', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    const task = await service.submit('Start Willow');
-    for (let i = 0; i < 2; i++) {
-      const result = await tool(0, '/tools/session_actions', { actions, confirmation: invalid });
-      expect(result.data).toMatchObject({
-        effects: 'none',
-        results: [],
-        speech: { accepted: false, recoveryExhausted: i === 1 },
-      });
-    }
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    expect(
-      (await tool(0, '/tools/session_actions', { actions, confirmation: 'Willow has started.' })).data,
-    ).toMatchObject({ effects: 'none', results: [], speech: { recoveryExhausted: true } });
-    expect((await tool(0, '/tools/session_actions', { actions: [{ kind: 'stop', id: 'missing' }] })).data.effects).toBe(
-      'none',
-    );
-    expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
-    expect((await tool(0, '/tools/session_actions', { actions })).data.effects).toBe('none');
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
-    expect((await tool(0, '/tools/speak', { text: 'Willow has started.' })).data.recoveryExhausted).toBe(true);
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Willow has started.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).not.toHaveBeenCalled();
-    expect(service.state().presentation).toMatchObject({ text: 'Willow has started.', expanded: true });
-    expect(service.list().find((t) => t.id === task.id)).toMatchObject({
-      status: 'completed',
-      response: 'Willow has started.',
-      speechIssue: 'Reply shown on screen.',
-    });
-    expect(service.list().find((t) => t.id === task.id)?.speechText).toBeUndefined();
-  });
-  it.each([true, false])('shares exhaustion across tool paths (attached first: %s)', async (attachedFirst) => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
-    await service.submit('Start Willow');
-    const attached = () => tool(0, '/tools/session_actions', { actions, confirmation: invalid });
-    const explicit = () => tool(0, '/tools/speak', { text: invalid });
-    const first = await (attachedFirst ? attached() : explicit());
-    const second = await (attachedFirst ? explicit() : attached());
-    expect((first.data.speech ?? first.data).rewritesRemaining).toBe(1);
-    expect((second.data.speech ?? second.data).recoveryExhausted).toBe(true);
-    expect((await tool(0, '/tools/speak', { text: 'Ready.' })).data.accepted).toBe(false);
-    expect(
-      (await tool(0, '/tools/session_actions', { actions, confirmation: 'Willow has started.' })).data.effects,
-    ).toBe('none');
-    expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
-    expect(sink).not.toHaveBeenCalled();
-  });
-  it('lets a valid explicit rewrite follow a rejected attached utterance', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
-    await service.submit('Start Willow');
-    await tool(0, '/tools/session_actions', { actions, confirmation: invalid });
-    expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
-    expect((await tool(0, '/tools/speak', { text: 'Willow has started.' })).data.accepted).toBe(true);
-    expect(sink).toHaveBeenCalledExactlyOnceWith('Willow has started.');
-  });
-  it('does not reset recovery on silence or mute and rejects stale calls after Stop', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
-    const old = await service.submit('Start Willow');
-    await tool(0, '/tools/session_actions', { actions, confirmation: invalid });
-    service.silence();
+  async function screen(options: { observed?: boolean; drawError?: string } = {}) {
+    const voice = new FakeVoice();
+    const drawings: unknown[] = [];
+    const log: string[] = [];
+    const current = options.observed === false ? undefined : observation();
+    voice.instant = true;
+    const f = await fixture({ voice, interactSyncWaitMs: 1000 }, {
+      latestObservation: () => current,
+      presentDrawing: async (_runId: string, drawing: { items: Array<{ id: string }> }) => {
+        log.push('draw');
+        if (options.drawError) throw new Error(options.drawError);
+        drawings.push(drawing);
+        return { ids: drawing.items.map((item) => item.id) };
+      },
+    } as never);
+    /** Calls a runtime tool as the current parent worker (a replaced busy turn gets a new worker). */
+    const ask = (path: string, data = {}) => {
+      const index = f.invocations.findLastIndex(
+        (args) => (args[2] as { env: Record<string, string> }).env.LINUX_BUDDY_ROLE === 'parent',
+      );
+      return f.tool(index, path, data);
+    };
+    return { ...f, voice, drawings, log, ask };
+  }
+  it('speaks voice requests and shows typed requests as text unless the user opted in', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('What time is it?', { source: 'voice' });
+    const spoken = await ask('/tools/interact', { actions: [say('It is noon.')] });
+    expect(spoken.data.actions[0].status).toBe('scheduled');
+    expect(voice.started).toEqual(['It is noon.']);
+    await service.submit('And tomorrow?', { source: 'typed' });
+    const typed = await ask('/tools/interact', { actions: [say('Tomorrow is Friday.')] });
+    expect(typed.data.actions[0]).toMatchObject({ status: 'suppressed', reason: expect.stringContaining('Typed') });
+    expect(service.state().presentation).toMatchObject({ text: 'Tomorrow is Friday.', expanded: true });
+    expect(voice.utterances).toHaveLength(1);
+    await service.updateSettings({ speakTypedReplies: true });
+    await service.submit('And after?', { source: 'typed' });
+    await ask('/tools/interact', { actions: [say('Then Saturday.')] });
+    expect(voice.started).toEqual(['It is noon.', 'Then Saturday.']);
     await service.updateSettings({ autoSpeak: false });
-    await service.updateSettings({ autoSpeak: true });
-    expect((await tool(0, '/tools/speak', { text: invalid })).data.recoveryExhausted).toBe(true);
-    await service.cancel(old.id);
-    expect((await tool(0, '/tools/speak', { text: invalid })).status).toBe(401);
-    await service.submit('A new request');
-    expect((await tool(0, '/tools/session_actions', { actions, confirmation: invalid })).status).toBe(401);
-    expect((await tool(1, '/tools/speak', { text: invalid })).data).toMatchObject({
-      recoveryExhausted: false,
-      rewritesRemaining: 1,
-    });
-    expect(
-      (await tool(1, '/tools/session_actions', { actions, confirmation: 'Willow has started.' })).data.speech.accepted,
-    ).toBe(true);
-    expect(sink).toHaveBeenCalledExactlyOnceWith('Willow has started.');
+    await service.submit('Muted?', { source: 'voice' });
+    const muted = await ask('/tools/interact', { actions: [say('Spoken replies are off.')] });
+    expect(muted.data.actions[0].status).toBe('suppressed');
+    expect(voice.started).toHaveLength(2);
   });
-  it('resets on a warm next turn and preserves previously validated manual replay', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    const old = await service.submit('Say ready');
-    await tool(0, '/tools/speak', { text: 'Ready.' });
-    await tool(0, '/tools/speak', { text: invalid });
-    await tool(0, '/tools/speak', { text: invalid });
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Visible final detail.' }] });
+  it('validates the whole batch before any effect', async () => {
+    const { service, ask, voice, log } = await screen({ observed: false });
+    await service.submit('Show me', { source: 'voice' });
+    const before = structuredClone(service.state().presentation);
+    const result = await ask('/tools/interact', {
+      actions: [say('Look here.'), show('Details'), { tool: 'draw_tool', args: { items: [circle] } }],
+    });
+    expect(result.status).toBe(200);
+    expect(result.data).toMatchObject({ status: 'rejected', effects: 'none' });
+    expect(result.data.errors[0]).toMatchObject({ code: 'observe_required', path: 'actions[2].args.items' });
+    expect(voice.utterances).toHaveLength(0);
+    expect(log).toEqual([]);
+    expect(service.state().presentation.text).toBe(before.text);
+    expect(service.list()[0].interactions ?? []).toHaveLength(0);
+  });
+  it('binds the latest observation, assigns annotation IDs and reveals together at speech start', async () => {
+    const { service, ask, voice, drawings, log } = await screen();
+    voice.instant = false;
+    await service.submit('Where is save?', { source: 'voice' });
+    const pending = ask('/tools/interact', {
+      actions: [say('Click Save here.'), { tool: 'draw_tool', args: { items: [circle] } }],
+      timing: 'together',
+    });
+    await vi.waitFor(() => expect(voice.utterances).toHaveLength(1));
+    expect(log).toEqual([]);
+    voice.last!.arrive();
+    const result = await pending;
+    expect(drawings[0]).toMatchObject({ observationId: 'obs-1', displayId: 'display-1' });
+    expect(result.data.actions.find((a: { tool: string }) => a.tool === 'draw_tool')).toMatchObject({
+      status: 'completed',
+      ids: [expect.stringMatching(/^friday-ix-/)],
+    });
+    expect(result.data.actions.find((a: { tool: string }) => a.tool === 'speak_tool').status).toBe('scheduled');
+    expect(service.list()[0].timings.firstDrawingMs).toBeGreaterThanOrEqual(0);
+  });
+  it('returns a duplicate for an exact retry and never repeats audio', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('Hello', { source: 'voice' });
+    const call = { actions: [say('Hello there.'), show('Hi')] };
+    const first = await ask('/tools/interact', call);
+    const again = await ask('/tools/interact', call);
+    expect(again.data).toMatchObject({ status: 'duplicate', effects: 'none', duplicateOf: first.data.interactionId });
+    const reworded = await ask('/tools/interact', { actions: [say('Hello there.'), show('Different text')] });
+    expect(reworded.data).toMatchObject({ status: 'rejected', errors: [{ code: 'duplicate_speech' }] });
+    expect(voice.utterances).toHaveLength(1);
+    expect(service.list()[0].interactions).toHaveLength(1);
+  });
+  it('rejects new speech while this request is still speaking, but allows visuals', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('Explain', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('First part.')] });
+    const busy = await ask('/tools/interact', { actions: [say('Second part.')] });
+    expect(busy.data).toMatchObject({ status: 'rejected', errors: [{ code: 'busy' }] });
+    expect(voice.last!.text).toBe('First part.');
+    expect(voice.last!.state()).toBe('playing');
+    const visual = await ask('/tools/interact', { actions: [show('Extra detail')] });
+    expect(visual.data.status).toBe('completed');
+    voice.last!.finish();
+    await settle();
+    expect((await ask('/tools/interact', { actions: [say('Second part.')] })).data.status).toBe('in_progress');
+  });
+  it('rejects a second group while an earlier one of the same request is still revealing', async () => {
+    const { service, ask, voice } = await screen();
+    voice.instant = false;
+    await service.submit('Explain', { source: 'voice' });
+    const first = ask('/tools/interact', { actions: [say('Look.'), show('One')], timing: 'together' });
+    await vi.waitFor(() => expect(voice.utterances).toHaveLength(1));
+    const second = await ask('/tools/interact', { actions: [show('Two')] });
+    expect(second.data).toMatchObject({ status: 'rejected', errors: [{ code: 'busy' }] });
+    voice.last!.arrive();
+    expect((await first).data.status).toBe('in_progress');
+  });
+  it('allows one speech rewrite, then requires text, without any effect from the rejected batches', async () => {
+    const { service, ask, voice, log } = await screen();
+    await service.submit('Explain', { source: 'voice' });
+    const before = structuredClone(service.state().presentation);
+    const mixed = (text: string) => ({
+      actions: [say(text), show('Detail'), { tool: 'draw_tool', args: { items: [circle] } }],
+      timing: 'together',
+    });
+    const bad = await ask('/tools/interact', mixed('**Markup**'));
+    expect(bad.data).toMatchObject({ status: 'rejected', effects: 'none', errors: [{ code: 'speech_policy' }] });
+    expect(bad.data.errors[0].retry).toContain('Rewrite');
+    const worse = await ask('/tools/interact', mixed('`code`'));
+    expect(worse.data).toMatchObject({ status: 'rejected', effects: 'none' });
+    expect(worse.data.errors[0].retry).toContain('used up');
+    const after = await ask('/tools/interact', mixed('Now valid.'));
+    expect(after.data.errors[0]).toMatchObject({ code: 'speech_exhausted' });
+    expect(service.state().presentation).toEqual(before);
+    expect(log).toEqual([]);
+    expect(voice.utterances).toHaveLength(0);
+    expect(service.list()[0].interactions ?? []).toHaveLength(0);
+    expect((await ask('/tools/interact', { actions: [show('Now valid.')] })).data.status).toBe('completed');
+    expect(service.state().presentation).toMatchObject({ text: 'Now valid.', expanded: true });
+    expect(service.list()[0].speechIssue).toBe('Spoken reply unavailable for this request.');
+  });
+  it('keeps speaking after the turn settles, and a new request interrupts it in the same conversation', async () => {
+    const { service, ask, voice, children } = await screen();
+    const first = await service.submit('Tell me a story', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('Once upon a time.')] });
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Once upon a time.' }] });
     children[0].rpc({ type: 'agent_settled' });
     await settle();
-    await service.readAloud(old.id);
-    expect(sink).toHaveBeenCalledTimes(2);
-    await service.submit('Start Willow');
-    expect(
-      (await tool(0, '/tools/session_actions', { actions, confirmation: 'Willow has started.' })).data.speech.accepted,
-    ).toBe(true);
-    expect(sink).toHaveBeenCalledTimes(3);
+    expect(voice.last!.state()).toBe('playing');
+    expect(service.state().presentation.speaking).toBe(true);
+    const second = await service.submit('Actually, stop and tell me the time', { source: 'voice' });
+    expect(second.conversationId).toBe(first.conversationId);
+    expect(voice.utterances[0].state()).toBe('cancelled');
+    await settle();
+    const record = service.list().find((t) => t.id === first.id)!.interactions![0];
+    expect(record.actions[0]).toMatchObject({
+      status: 'interrupted',
+      playback: { interrupted: true, heardWords: 'unknown' },
+    });
+    const prompt = JSON.parse(children[0].stdin.read().toString().trim().split('\n').at(-1)!).message as string;
+    expect(prompt).toContain('"source":"voice"');
+    expect(prompt).toContain('"interrupted":true');
+    expect(prompt).toContain('"heardWords":"unknown"');
   });
-  it('serializes concurrent rejections in the shared budget without reserving actions', async () => {
-    const { service, tool } = await fixture();
-    await service.submit('Start Willow');
-    const results = await Promise.all([
-      tool(0, '/tools/session_actions', { actions, confirmation: invalid }),
-      tool(0, '/tools/speak', { text: invalid }),
+  it('replaces an unfinished busy turn when a voice correction arrives', async () => {
+    const { service, children } = await screen();
+    const first = await service.submit('Open the settings', { source: 'voice' });
+    const second = await service.submit('No, the other settings', { source: 'voice' });
+    expect(service.list().find((t) => t.id === first.id)?.status).toBe('cancelled');
+    expect(second.status).toBe('thinking');
+    expect(children).toHaveLength(2);
+    const prompt = JSON.parse(children[1].stdin.read().toString().trim().split('\n').at(-1)!).message as string;
+    expect(prompt).toContain('Replaced by this request');
+  });
+  it('barge-in stops audio and keeps the old turn silent until a new request, without touching children', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('Explain', { source: 'voice' });
+    await service.startChild('Research', 'Look it up');
+    await ask('/tools/interact', { actions: [say('Here is a long answer.')] });
+    service.interrupt();
+    expect(voice.last!.state()).toBe('cancelled');
+    expect(service.state().presentation.speaking).toBe(false);
+    const late = await ask('/tools/interact', { actions: [say('And another thing.')] });
+    expect(late.data.actions[0]).toMatchObject({ status: 'suppressed', reason: expect.stringContaining('stopped') });
+    service.controlProgress(service.list()[0].id, 'Working', 'Still going.');
+    expect(voice.started).toEqual(['Here is a long answer.']);
+    expect(service.state().sessions.find((s) => s.role === 'child')?.status).toBe('running');
+    await service.submit('What I meant was this', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('Got it.')] });
+    expect(voice.started).toEqual(['Here is a long answer.', 'Got it.']);
+  });
+  it('barge-in during a together wait cancels the unrevealed group with no effects', async () => {
+    const { service, ask, voice, log } = await screen();
+    voice.instant = false;
+    await service.submit('Show me', { source: 'voice' });
+    const pending = ask('/tools/interact', {
+      actions: [say('Right here.'), { tool: 'draw_tool', args: { items: [circle] } }],
+      timing: 'together',
+    });
+    await vi.waitFor(() => expect(voice.utterances).toHaveLength(1));
+    service.interrupt();
+    const result = await pending;
+    expect(result.data).toMatchObject({ status: 'cancelled', effects: 'none' });
+    expect(log).toEqual([]);
+    expect(voice.started).toEqual([]);
+  });
+  it('a drawing failure suppresses paired speech with actionable guidance', async () => {
+    const { service, ask, voice } = await screen({ drawError: 'Observe again: a newer screenshot replaced this one' });
+    voice.instant = false;
+    await service.submit('Show me', { source: 'voice' });
+    const pending = ask('/tools/interact', {
+      actions: [say('Right here.'), { tool: 'draw_tool', args: { items: [circle] } }],
+      timing: 'together',
+    });
+    await vi.waitFor(() => expect(voice.utterances).toHaveLength(1));
+    voice.last!.arrive();
+    const result = await pending;
+    expect(result.data.actions).toMatchObject([
+      { tool: 'speak_tool', status: 'suppressed' },
+      { tool: 'draw_tool', status: 'failed' },
     ]);
-    expect(results.map((r) => (r.data.speech ?? r.data).rewritesRemaining).sort()).toEqual([0, 1]);
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
+    expect(result.data.guidance).toContain('Observe again');
+    expect(voice.started).toEqual([]);
+  });
+  it('validates a new submission before interrupting current speech', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('Explain', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('Still talking.')] });
+    const stops = voice.stops;
+    await expect(service.submit('   ', { source: 'voice' })).rejects.toThrow();
+    await expect(service.submit('Hi', { source: 'shout' as never })).rejects.toThrow('source');
+    await expect(service.submit('Hi', { selectedChildId: 'missing' })).rejects.toThrow('Unknown session');
+    expect(voice.last!.state()).toBe('playing');
+    expect(voice.stops).toBe(stops);
+  });
+  it('replays only validated reply speech through the shared channel', async () => {
+    const { service, ask, voice, children } = await screen();
+    const task = await service.submit('Explain', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('Short answer.')] });
+    voice.last!.finish();
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Short answer.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    const replay = service.readAloud(task.id);
+    expect(voice.started).toEqual(['Short answer.', 'Short answer.']);
+    voice.last!.finish();
+    await replay;
+  });
+  it('publishes current speech for renderer echo suppression', async () => {
+    const { service, ask, voice } = await screen();
+    await service.submit('Explain', { source: 'voice' });
+    await ask('/tools/interact', { actions: [say('Click the blue button.')] });
+    expect(service.state().presentation.echo).toEqual([{ text: 'Click the blue button.' }]);
+    const before = Date.now();
+    voice.last!.finish();
+    await settle();
+    const [ended] = service.state().presentation.echo!;
+    expect(ended.text).toBe('Click the blue button.');
+    expect(ended.endedAt).toBeGreaterThanOrEqual(before);
+    expect(ended.endedAt).toBeLessThanOrEqual(Date.now());
   });
 });
 
-describe('mixed spoken answer and action', () => {
+describe('mixed spoken answer and action-only work', () => {
   const actions = [{ kind: 'start', title: 'Disk report', prompt: 'Report disk usage.' }];
-  it.each([false, true])('executes an action-only batch once after an accepted answer (muted: %s)', async (muted) => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    await service.updateSettings({ autoSpeak: !muted });
-    await service.submit('What time zone am I in, and start a disk report');
-    expect((await tool(0, '/tools/speak', { text: 'You are in India Standard Time.' })).data).toMatchObject({
-      accepted: true,
-      started: !muted,
-    });
-    expect((await tool(0, '/tools/session_actions', { actions })).data).toMatchObject({
-      ok: true,
-      effects: 'applied',
-      speech: { accepted: false },
-    });
-    expect((await tool(0, '/tools/session_actions', { actions })).data).toMatchObject({ ok: false, effects: 'none' });
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'The disk report has started.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).toHaveBeenCalledTimes(muted ? 0 : 1);
-    expect(service.state().presentation.text).toBe('The disk report has started.');
-  });
-  it('rejects another confirmation and malformed actions without reserving effects, then recovers action-only', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool } = await fixture({ speak: sink });
-    await service.submit('Answer and start work');
-    await tool(0, '/tools/speak', { text: 'Your answer is four.' });
-    const rejected = await tool(0, '/tools/session_actions', { actions, confirmation: 'The disk report has started.' });
-    expect(rejected.data).toMatchObject({ ok: false, effects: 'none', results: [], speech: { accepted: false } });
-    expect(rejected.data.recovery).toContain('without confirmation');
-    expect(
-      (await tool(0, '/tools/session_actions', { actions: [...actions, { kind: 'stop', id: 'missing' }] })).data
-        .effects,
-    ).toBe('none');
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
-    expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
-    expect(sink).toHaveBeenCalledExactlyOnceWith('Your answer is four.');
-  });
+  const say = (text: string) => ({ actions: [{ tool: 'speak_tool', args: { text } }] });
+  it.each([false, true])(
+    'runs actions once after an interact answer and never speaks the final (muted: %s)',
+    async (muted) => {
+      const voice = new FakeVoice();
+      voice.instant = true;
+      const { service, tool, children } = await fixture({ voice, interactSyncWaitMs: 1000 });
+      await service.updateSettings({ autoSpeak: !muted });
+      await service.submit('What time zone am I in, and start a disk report', { source: 'voice' });
+      const answer = await tool(0, '/tools/interact', say('You are in India Standard Time.'));
+      expect(answer.data.actions[0].status).toBe(muted ? 'suppressed' : 'scheduled');
+      expect((await tool(0, '/tools/session_actions', { actions })).data).toMatchObject({
+        ok: true,
+        effects: 'applied',
+      });
+      expect((await tool(0, '/tools/session_actions', { actions })).data).toMatchObject({ ok: false, effects: 'none' });
+      expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
+      children[0].rpc({
+        type: 'agent_end',
+        messages: [{ role: 'assistant', content: 'The disk report has started.' }],
+      });
+      children[0].rpc({ type: 'agent_settled' });
+      await settle();
+      expect(voice.started).toEqual(muted ? [] : ['You are in India Standard Time.']);
+    },
+  );
   it('retains non-repeat protection after partial action-only effects', async () => {
-    const { service, tool } = await fixture({ speak: async () => {} });
-    await service.submit('Answer and start two reports');
-    await tool(0, '/tools/speak', { text: 'Your answer is four.' });
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, tool } = await fixture({ voice, interactSyncWaitMs: 1000 });
+    await service.submit('Answer and start two reports', { source: 'voice' });
+    await tool(0, '/tools/interact', say('Your answer is four.'));
     const original = service.startChild.bind(service);
     vi.spyOn(service, 'startChild')
       .mockImplementationOnce(original)
@@ -1236,37 +1109,31 @@ describe('mixed spoken answer and action', () => {
     expect((await tool(0, '/tools/session_actions', batch)).data.effects).toBe('none');
     expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(1);
   });
-  it('preserves approval and Stop checks before any action-only effects', async () => {
-    const { service, tool, children } = await fixture({ speak: async () => {} });
-    const task = await service.submit('Answer and start work');
-    await tool(0, '/tools/speak', { text: 'Your answer is four.' });
-    children[0].rpc({
-      type: 'extension_ui_request',
-      method: 'confirm',
-      id: 'approval',
-      title: 'Approve',
-      message: 'Proceed?',
-    });
+  it('preserves approval and Stop checks before action-only effects after an answer', async () => {
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, tool, children } = await fixture({ voice, interactSyncWaitMs: 1000 });
+    const task = await service.submit('Answer and start work', { source: 'voice' });
+    await tool(0, '/tools/interact', say('Your answer is four.'));
+    children[0].rpc({ type: 'extension_ui_request', method: 'confirm', id: 'a', title: 'Approve', message: 'Go?' });
     await settle();
     expect((await tool(0, '/tools/session_actions', { actions })).data.effects).toBe('none');
     expect(service.list().find((t) => t.id === task.id)?.status).toBe('awaiting_approval');
-    expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
     await service.cancel(task.id);
     expect((await tool(0, '/tools/session_actions', { actions })).status).toBe(401);
     expect(service.state().sessions.filter((s) => s.role === 'child')).toHaveLength(0);
   });
-  it('does not reset exhausted speech recovery when an answer preceded action-only work', async () => {
-    const sink = vi.fn(async () => {});
-    const { service, tool, children } = await fixture({ speak: sink });
-    await service.submit('Answer and start work');
-    await tool(0, '/tools/speak', { text: 'Your answer is four.' });
-    await tool(0, '/tools/speak', { text: '**invalid**' });
-    expect((await tool(0, '/tools/speak', { text: '**invalid**' })).data.recoveryExhausted).toBe(true);
+  it('does not reset exhausted speech recovery when actions follow', async () => {
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const { service, tool } = await fixture({ voice, interactSyncWaitMs: 1000 });
+    await service.submit('Answer and start work', { source: 'voice' });
+    await tool(0, '/tools/interact', say('**invalid**'));
+    await tool(0, '/tools/interact', say('**invalid**'));
     expect((await tool(0, '/tools/session_actions', { actions })).data.ok).toBe(true);
-    expect((await tool(0, '/tools/speak', { text: 'The report has started.' })).data.recoveryExhausted).toBe(true);
-    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'The report has started.' }] });
-    children[0].rpc({ type: 'agent_settled' });
-    await settle();
-    expect(sink).toHaveBeenCalledTimes(1);
+    expect((await tool(0, '/tools/interact', say('The report has started.'))).data.errors[0].code).toBe(
+      'speech_exhausted',
+    );
+    expect(voice.utterances).toHaveLength(0);
   });
 });

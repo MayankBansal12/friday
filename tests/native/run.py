@@ -61,6 +61,13 @@ def driver(op, **kwargs):
     return invoke('org.gnome.Shell', '/dev/Friday/Test', 'dev.Friday.Test', {'op': op, **kwargs})
 def capture(name):
     (stage / name).write_bytes(base64.b64decode(driver('capture')['data']))
+def settle_drawing():
+    # A rendered ack means the first paint, before progressive strokes finish.
+    deadline = time.monotonic() + 3
+    while driver('overlayState')['drawingAnimations']:
+        assert time.monotonic() < deadline, 'Drawing animation did not finish'
+        time.sleep(.05)
+    time.sleep(.05)
 def observe():
     # Match the app's lease renewal during this increasingly long native suite.
     command('heartbeat')
@@ -99,6 +106,7 @@ try:
     assert command('status')['presentation']['compositingHeld'], 'Drawing did not inhibit fullscreen bypass'
     time.sleep(.4)
     fullscreen_state = driver('overlayState')
+    settle_drawing()
     capture('00-fullscreen-overlay.png')
     print('Fullscreen overlay:', fullscreen_state, flush=True)
     assert fullscreen_state['fullscreen'] and fullscreen_state['drawingMapped'], fullscreen_state
@@ -124,7 +132,7 @@ try:
     obs = observe(); capture('01-observe.png')
     driver('move', x=1050, y=580); time.sleep(.1)
     command('draw', **obs, items=[{'id': 'target', 'kind': 'ellipse', 'x': 560, 'y': 380, 'width': 800, 'height': 110}, {'id': 'pointer', 'kind': 'arrow', 'x': 400, 'y': 400, 'toX': 560, 'toY': 430, 'text': 'Open the demo'}])
-    time.sleep(.3); capture('02-annotated.png')
+    time.sleep(1.2); capture('02-annotated.png')
     driver('move', x=1100, y=600); time.sleep(.1)
     assert command('status')['annotations'] == 2, 'Pointer motion erased guidance'
     assert driver('pick', x=960, y=430)['friday'] is False, 'Drawing intercepted input'
@@ -144,6 +152,7 @@ try:
         {'id': 'note', 'kind': 'note', 'x': 80, 'y': 650, 'title': 'Almost connected', 'text': 'Choose your network and enter its password. The connection icon will change when you are online. You can keep using the app while this guide is on screen.'},
         {'id': 'edge', 'kind': 'note', 'x': 1919, 'y': 1079, 'title': 'At the screen edge', 'text': 'This note stays inside the display and wraps automatically.'},
     ])
+    settle_drawing()
     capture('03-guidance.png')
     from PIL import ImageChops
     before = Image.open(stage / '03-guidance-before.png').convert('RGB')

@@ -137,6 +137,7 @@ export default class Driver extends Extension {
         result = {
           presentation: friday?._presentation(),
           drawingMapped: friday?._area.is_mapped(),
+          drawingAnimations: friday?._anims?.size ?? 0,
           fullscreen: global.display.focus_window?.is_fullscreen(),
         };
       }

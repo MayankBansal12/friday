@@ -76,13 +76,18 @@ try {
   await waitFor("fixture.listening==='armed'");
   await say('What time is it?');
   await waitFor("fixture.calls.some(c=>c[0]==='submit')");
-  assert.equal(await evaluate('fixture.listening'), 'paused');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
   await evaluate('fixture.runtime.presentation.speaking=true;fixture.emit()');
+  await say('Actually, open the browser settings.');
+  await waitFor("fixture.calls.filter(c=>c[0]==='submit').length===2");
+  assert.match(await evaluate("fixture.calls.filter(c=>c[0]==='submit').at(-1)[1]"), /browser settings/i);
+  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='submit').at(-1)[2].source"), 'voice');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
   await say('Friday stop');
   await waitFor("fixture.calls.some(c=>c[0]==='stop') && fixture.listening==='listening'");
   await say('Hey Friday');
   await waitFor("fixture.listening==='armed'");
-  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='submit').length"), 1);
+  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='submit').length"), 2);
   console.log(
     JSON.stringify({
       outcome: 'passed',

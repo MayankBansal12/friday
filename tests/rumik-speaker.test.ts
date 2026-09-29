@@ -4,6 +4,7 @@ import type WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RumikSpeaker, type RumikOptions } from '../electron/rumik-speaker.js';
 import { createSpeakerFromEnvironment, Speaker } from '../electron/speaker.js';
+import type { PcmSink } from '../electron/speech-output.js';
 
 const tick = async () => {
   for (let i = 0; i < 15; i++) await Promise.resolve();
@@ -490,5 +491,121 @@ describe('Rumik streaming boundary', () => {
     expect(createSpeakerFromEnvironment(env)).toBeInstanceOf(Speaker);
     expect(env).not.toHaveProperty('RUMIK_API_KEY');
     expect(createSpeakerFromEnvironment({ RUMIK_API_KEY: 'synthetic' })).toBeInstanceOf(RumikSpeaker);
+  });
+});
+
+describe('Rumik prepare/play split', () => {
+  type Behaviour = { open?: 'throw'; write?: 'throw' | 'block'; closeOnAbort?: boolean };
+  function testSink(behaviour: Behaviour = {}) {
+    const written: Buffer[] = [];
+    const calls = { open: 0, abort: 0, end: 0 };
+    let drain: (() => void) | undefined;
+    let close: ((ok: boolean) => void) | undefined;
+    const sink: PcmSink = {
+      kind: 'livekit',
+      open() {
+        calls.open++;
+        if (behaviour.open === 'throw') throw new Error('Room disconnected');
+        return {
+          evidence: 'transport',
+          write(pcm) {
+            if (behaviour.write === 'throw') throw new Error('Track unpublished');
+            written.push(pcm);
+            return behaviour.write !== 'block';
+          },
+          pending: () => 0,
+          end() {
+            calls.end++;
+          },
+          abort() {
+            calls.abort++;
+            if (behaviour.closeOnAbort) close?.(false);
+          },
+          onDrain: (callback) => (drain = callback),
+          onClose: (callback) => (close = callback),
+          onFailure() {},
+        };
+      },
+    };
+    return { sink, written, calls, drain: () => drain?.(), close: (ok = true) => close?.(ok) };
+  }
+  async function staged(behaviour: Behaviour = {}) {
+    const f = fixture();
+    const s = testSink(behaviour);
+    f.speaker.sink = s.sink;
+    const utterance = f.speaker.prepare('The sample is ready.');
+    await tick();
+    f.socket.emit('open');
+    f.audio(Buffer.alloc(4800, 1));
+    await utterance.ready;
+    return { f, s, utterance };
+  }
+  it('stages first playable PCM without playing, then plays it on start before synthesis ends', async () => {
+    const { f, s, utterance } = await staged();
+    expect(utterance.state()).toBe('ready');
+    expect(s.calls.open).toBe(0);
+    expect(utterance.metrics()).toMatchObject({ scheduledAudioMs: 0, evidence: 'none' });
+    expect(utterance.metrics().pcmArrivedMs).toBeGreaterThanOrEqual(0);
+    utterance.start();
+    await utterance.scheduled;
+    expect(s.calls.open).toBe(1);
+    expect(Buffer.concat(s.written).length).toBe(4800);
+    expect(utterance.metrics()).toMatchObject({ scheduledAudioMs: 100, evidence: 'transport' });
+    f.audio(Buffer.alloc(4800, 1));
+    f.done();
+    await tick();
+    expect(s.calls.end).toBe(1);
+    s.close(true);
+    await utterance.done;
+    expect(utterance.state()).toBe('completed');
+    expect(utterance.metrics().scheduledAudioMs).toBe(200);
+  });
+  it.each(['open', 'write'] as const)('settles as failed when the sink throws on %s at start', async (where) => {
+    const { s, utterance } = await staged(where === 'open' ? { open: 'throw' } : { write: 'throw' });
+    utterance.start();
+    await expect(utterance.done).rejects.toThrow('Voice output failed');
+    await expect(utterance.scheduled).rejects.toThrow('Voice output failed');
+    expect(utterance.state()).toBe('failed');
+    // Nothing was accepted by the sink, so nothing may be reported as scheduled.
+    expect(utterance.metrics().sinkScheduledMs).toBeUndefined();
+    expect(utterance.metrics().scheduledAudioMs).toBe(0);
+    expect(s.written).toHaveLength(0);
+  });
+  it('cancels a staged utterance before start without opening the sink', async () => {
+    const { s, utterance } = await staged();
+    utterance.cancel();
+    await utterance.done;
+    await expect(utterance.scheduled).rejects.toThrow('cancelled');
+    expect(utterance.state()).toBe('cancelled');
+    expect(s.calls.open).toBe(0);
+    utterance.start();
+    expect(s.calls.open).toBe(0);
+  });
+  it('cancels during a blocked drain without leaving a reap timer when the sink closes synchronously', async () => {
+    const { f, s, utterance } = await staged({ write: 'block', closeOnAbort: true });
+    utterance.start();
+    await utterance.scheduled;
+    expect(f.socket.pause).toHaveBeenCalled();
+    f.audio(Buffer.alloc(4800, 1));
+    vi.useFakeTimers();
+    utterance.cancel();
+    expect(s.calls.abort).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+    await utterance.done;
+    expect(utterance.state()).toBe('cancelled');
+    s.drain();
+    expect(s.written).toHaveLength(1);
+  });
+  it('bounds a sink that never closes after cancellation during a blocked drain', async () => {
+    const { s, utterance } = await staged({ write: 'block' });
+    utterance.start();
+    await utterance.scheduled;
+    vi.useFakeTimers();
+    utterance.cancel();
+    expect(s.calls.abort).toBe(1);
+    vi.advanceTimersByTime(1500);
+    vi.useRealTimers();
+    await expect(utterance.done).rejects.toThrow('did not stop');
   });
 });

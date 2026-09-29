@@ -1,5 +1,14 @@
+/** A source of 20 ms, 16 kHz mono PCM16 frames for the segmenter. */
+export interface FrameCapture {
+  start(onFrame: (frame: Int16Array) => void, onError: () => void): void;
+  /** Deliver audio captured so far, then call `done`. */
+  flush(done: () => void): void;
+  pause(): void;
+  close(): void;
+}
+
 /** Owns the browser audio graph. The output is silent and never monitors the mic. */
-export class PcmCapture {
+export class PcmCapture implements FrameCapture {
   private token = 0;
   private source: MediaStreamAudioSourceNode;
   private node: AudioWorkletNode;

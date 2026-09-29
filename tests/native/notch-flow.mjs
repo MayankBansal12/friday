@@ -13,7 +13,9 @@ async function evaluate(expression) {
 }
 async function open(state) {
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 500 });
-  await call('Page.navigate', { url: `http://127.0.0.1:5174/tests/presence-preview.html?state=${state}` });
+  await call('Page.navigate', {
+    url: `${process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5174'}/tests/presence-preview.html?state=${state}`,
+  });
   await pause(1000);
 }
 async function speech(text) {
@@ -82,30 +84,35 @@ try {
   await speech('Hey Friday');
   await check('armed', 'bar');
   await shot('03-wake');
+  // A voice request keeps the conversation engaged while Friday works and speaks.
   await speech('Open my calendar');
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   assert.equal(await evaluate('fixture.capture.state'), 'recording');
-  await speech('Hey Friday, this should not run during another request');
-  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='submit').length"), 1);
+  // An addressed correction during work replaces the unfinished request.
+  await speech('Hey Friday, open my mail instead');
+  assert.deepEqual(await evaluate("fixture.calls.filter(c=>c[0]==='submit').map(c=>[c[1],c[2].source])"), [
+    ['Open my calendar', 'voice'],
+    ['open my mail instead', 'voice'],
+  ]);
   await complete(true);
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   await shot('04-speaking');
   await speech('Friday stop');
   await check('listening', 'quiet');
   assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='stop').length"), 1);
   await shot('05-voice-stop');
   await speech('Hey Friday, draw a circle');
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   await evaluate('fixture.guiding=true;fixture.emit()');
   await pause();
   assert.match(await evaluate("document.querySelector('[role=status]').textContent"), /Guiding you/);
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   await shot('06-guiding-collapsed');
   await hover();
-  await check('paused', 'panel');
+  await check('armed', 'panel');
   await shot('07-guiding-hover');
   await leave();
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   await click('[aria-label="Stop Friday"]');
   await check('listening', 'quiet');
   assert.equal(await evaluate('fixture.guiding'), false);
@@ -115,7 +122,7 @@ try {
   await pause();
   await check('listening', 'quiet');
   await speech('Hey Friday, what time is it?');
-  await check('paused', 'bar');
+  await check('armed', 'bar');
   await complete();
   await check('armed', 'bar');
   await evaluate('fixture.clock+=11000');

@@ -95,9 +95,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => {
     if (
       role === 'child' &&
-      (event.toolName.startsWith('desktop_') ||
-        event.toolName.startsWith('session_') ||
-        ['speak', 'show_text', 'set_presentation'].includes(event.toolName))
+      (event.toolName.startsWith('desktop_') || event.toolName.startsWith('session_') || event.toolName === 'interact')
     )
       return {
         block: true,
@@ -138,7 +136,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
   }
   runtimeTool(
     'session_actions',
-    `Use for every ordinary background start, update, stop or resumption with the user’s input answer, including a single task. Submit all requested actions together with one appropriate parent-authored short success confirmation. If a spoken answer was already accepted in this request, omit confirmation and show actual action results on screen. Individual session_start/update/stop tools are reserved for targeted recovery after partial or uncertain batch effects. ${speechWritingGuidance} The host validates before effects and speaks only after ALL actions succeed; no separate speak is needed. Say started/updated/stopped, never imply the deliverable is finished. One effectful call per request; do not split or call in parallel. Read results: partial effects are not rolled back, so never retry the whole batch. Approval remains required for consequential work. Rejected speech allows one rewrite shared with speak. If recoveryExhausted is true, no actions ran for that rejected call: submit the still-requested actions without confirmation, then show actual results on screen. Do not repeat earlier effects.`,
+    'Use for every ordinary background start, update, stop or resumption with the user’s input answer, including a single task. Submit all requested actions together; the host validates all of them before any effect. After it returns, confirm the ACTUAL results to the user with interact (say started/updated/stopped, never that the deliverable is finished). One effectful call per request; do not split or call in parallel. Partial effects are not rolled back, so never retry the whole batch. Approval remains required for consequential work.',
     {
       actions: {
         type: 'array',
@@ -167,13 +165,12 @@ export default function fridayExtension(pi: ExtensionAPI) {
           ],
         },
       },
-      confirmation: text(2000),
     },
     ['actions'],
   );
   runtimeTool(
     'session_start',
-    'Recovery only: start specific remaining background work after inspecting partial or uncertain session_actions effects and current state. For ordinary starts, use session_actions with a short confirmation, even for one task. Never repeat a start that already succeeded. Returns a child session ID; include a clear outcome and all necessary context. Never delegate live screen guidance.',
+    'Recovery only: start specific remaining background work after inspecting partial or uncertain session_actions effects and current state. For ordinary starts, use session_actions, even for one task. Never repeat a start that already succeeded. Returns a child session ID; include a clear outcome and all necessary context. Never delegate live screen guidance.',
     { title: text(100), prompt: text(8000) },
     ['title', 'prompt'],
   );
@@ -197,40 +194,117 @@ export default function fridayExtension(pi: ExtensionAPI) {
   );
   runtimeTool(
     'session_update',
-    'Recovery only: update one task after inspecting partial or uncertain session_actions effects and current state. For ordinary new instructions or resumption with an input answer, use a session_actions update with a short confirmation. If running, interrupts its current work and continues in the same saved session.',
+    'Recovery only: update one task after inspecting partial or uncertain session_actions effects and current state. For ordinary new instructions or resumption with an input answer, use a session_actions update. If running, interrupts its current work and continues in the same saved session.',
     { id: text(128), prompt: text(8000) },
     ['id', 'prompt'],
   );
   runtimeTool(
     'session_stop',
-    'Recovery only: stop one task after inspecting partial or uncertain session_actions effects and current state. For an ordinary stop request, use a session_actions stop with a short confirmation. Other work continues; history remains readable.',
+    'Recovery only: stop one task after inspecting partial or uncertain session_actions effects and current state. For an ordinary stop request, use a session_actions stop. Other work continues; history remains readable.',
     { id: text(128) },
     ['id'],
   );
-  runtimeTool(
-    'speak',
-    `Speak one parent-authored reply. ${speechWritingGuidance} Returns accepted:false with the reason when nothing plays. One rewrite is shared with attached confirmations. If recoveryExhausted is true, use show_text or final text only; do not keep retrying. Use show_text for details. Starts immediately; replacement cancels prior audio. Respect mute. Use once per reply.`,
-    { text: text(2000) },
-    ['text'],
-  );
-  runtimeTool(
-    'show_text',
-    'Show useful plain-text details in the expandable top bar. Use for commands, results, or explanations the user needs to keep reading.',
-    { text: text(6000), expanded: { type: 'boolean' } },
-    ['text'],
-  );
-  runtimeTool(
-    'set_presentation',
-    'Request an expanded or compact companion. Friday controls actual size and placement; users can always dismiss it.',
-    { expanded: { type: 'boolean' } },
-    ['expanded'],
-  );
+  const drawItem = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      kind: { type: 'string', enum: Object.keys(annotationTextLimits) },
+      x: {
+        type: 'number',
+        description:
+          'Target left edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
+      },
+      y: {
+        type: 'number',
+        description:
+          'Target top edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
+      },
+      width: {
+        type: 'number',
+        description:
+          'Full bounding-box width in screenshot pixels; for an ellipse this is its horizontal diameter, not radius.',
+      },
+      height: {
+        type: 'number',
+        description:
+          'Full bounding-box height in screenshot pixels; for an ellipse this is its vertical diameter, not radius.',
+      },
+      toX: { type: 'number', description: 'Arrow tip X in screenshot pixels.' },
+      toY: { type: 'number', description: 'Arrow tip Y in screenshot pixels.' },
+      text: {
+        type: 'string',
+        maxLength: 160,
+        description: `Optional plain text; omit when the visual is enough. Character limits by kind: ${JSON.stringify(annotationTextLimits)}. No Markdown.`,
+      },
+      title: { type: 'string', maxLength: 40, description: 'Optional short heading for a note only.' },
+      step: { type: 'integer', minimum: 1, maximum: 9, description: 'Required for a numbered step.' },
+      color: {
+        type: 'string',
+        pattern: '^#[0-9a-fA-F]{6}$',
+        description: 'Hex RGB, for example #5b72f2; omit for the default style',
+      },
+      points: {
+        type: 'array',
+        maxItems: 512,
+        items: {
+          type: 'object',
+          properties: { x: { type: 'number' }, y: { type: 'number' } },
+          required: ['x', 'y'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['kind', 'x', 'y'],
+  };
+  const action = (tool: string, args: Record<string, unknown>, required: string[]) => ({
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      tool: { type: 'string', const: tool },
+      args: { type: 'object', additionalProperties: false, properties: args, required },
+    },
+    required: ['tool', 'args'],
+  });
+  pi.registerTool({
+    name: 'interact',
+    label: 'Reply to the user',
+    description: `The only way to reply to the user: speak, draw on the screen and/or show text, in one call. actions holds at most one of each tool; any subset is valid (drawing alone, text alone, speech alone).
+- speak_tool {text}: a short spoken reply. ${speechWritingGuidance}
+- show_text_tool {text}: plain text in the top bar for details, commands or results to keep reading.
+- draw_tool {items}: annotations on the LATEST desktop_observe screenshot, in its pixel coordinates. Call desktop_observe first; the host binds that observation. Never pass observation, display or annotation IDs; the host assigns IDs and returns them (use them with desktop_clear). Prefer 1–3 marks with no text. Circle/ellipse, rectangle, highlight, underline, strike and cross use the target TOP-LEFT x/y and full width/height, never a center or radius. Strike draws through the vertical middle of that box; cross draws an X across it. For a control, use its full outer visible bounds. Arrow x/y is the tip unless toX/toY are supplied (then x/y is the tail). Step uses x/y as the numbered marker center and step=1–9. Note needs text or a title. Annotations expire after 30 seconds or when the scene changes.
+timing: "parallel" (default) starts everything immediately. "together" reveals the drawing and text at the moment speech starts; use it when words refer to the drawing. If voice is slow the visuals are released anyway and speech follows.
+The whole call is validated first: status "rejected" means nothing ran; fix the listed paths and resend. Otherwise read each action's status: accepted/scheduled (speech still preparing or playing), completed, failed, cancelled, suppressed (not played, with reason; suppressed speech is shown as text), interrupted. Nothing is rolled back. Never resend an action that already happened; a duplicate call returns status "duplicate" and does nothing. Status "scheduled" or "completed" for speech means audio was sent, not that the user heard it.`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        actions: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          items: {
+            anyOf: [
+              action('speak_tool', { text: text(2000) }, ['text']),
+              action('show_text_tool', { text: text(6000) }, ['text']),
+              action('draw_tool', { items: { type: 'array', minItems: 1, maxItems: 64, items: drawItem } }, ['items']),
+            ],
+          },
+        },
+        timing: { type: 'string', enum: ['parallel', 'together'] },
+      },
+      required: ['actions'],
+    },
+    async execute(_id, params, signal) {
+      const result = await bridge('/tools/interact', params, signal);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  });
 
   pi.registerTool({
     name: 'desktop_control',
     label: 'Use the computer',
     description:
-      'Complete a bounded GUI task using the signed-in Codex computer operator. Runs inside this parent screen session, supports drawing and progress speech, and returns a verified outcome or a question. Prefer direct file/shell tools when suitable. Only use when the user asks you to act; use observe/draw for guidance. Never send consequential actions as pre-approved. The user can press Escape twice to stop. Physical input is blocked between action bursts, not during injection.',
+      'Complete a bounded GUI task using the signed-in Codex computer operator. Runs inside this parent screen session, supports drawing and progress speech, and returns a verified outcome or a question. Prefer direct file/shell tools when suitable. Only use when the user asks you to act; use desktop_observe and interact draw_tool for guidance. Never send consequential actions as pre-approved. The user can press Escape twice to stop. Physical input is blocked between action bursts, not during injection.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -246,7 +320,8 @@ export default function fridayExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'desktop_observe',
     label: 'Look at screen',
-    description: 'Capture the current desktop to see the visible applications before explaining or drawing on them.',
+    description:
+      'Capture the current desktop to see the visible applications before explaining or drawing on them. interact draw_tool always uses the latest capture.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_id, _params, signal) {
       const result = await bridge('/screenshot', undefined, signal);
@@ -255,7 +330,7 @@ export default function fridayExtension(pi: ExtensionAPI) {
         content: [
           {
             type: 'text',
-            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ observationId: result.id, displayId: (result.display as { id: string }).id, windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
+            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
           },
           { type: 'image', data: String(result.data), mimeType: String(result.mimeType || 'image/png') },
         ],
@@ -264,83 +339,6 @@ export default function fridayExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: 'desktop_draw',
-    label: 'Annotate the screen',
-    description:
-      'Guide visually with circle, arrow, highlight, step, or note; rectangle, underline, bracket, ellipse, label, and path are also supported. Prefer 1–3 marks with no text. Add short plain text only when needed; Buddy styles and wraps it beside the target. Use screenshot pixels and the latest observation/display IDs. Circle/ellipse, rectangle, highlight, underline, and bracket use the target TOP-LEFT x/y and full width/height, never a center or radius. For a button or control, use its full outer visible bounds including padded clickable space, never only the text or icon bounds. Arrow x/y is the target tip unless toX/toY are supplied (then x/y is the tail). Step uses x/y for the numbered marker center and step=1–9. Note uses x/y for card placement and needs text or a title. Reuse an item ID to update it with replace=false. Annotations expire after 30 seconds or when the scene changes. No mouse input is injected.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        observationId: { type: 'string' },
-        displayId: { type: 'string' },
-        replace: { type: 'boolean' },
-        items: {
-          type: 'array',
-          maxItems: 64,
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              id: { type: 'string' },
-              kind: { type: 'string', enum: Object.keys(annotationTextLimits) },
-              x: {
-                type: 'number',
-                description:
-                  'Target left edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
-              },
-              y: {
-                type: 'number',
-                description:
-                  'Target top edge; arrow tip (or tail with toX/toY), step center, or note origin. Screenshot pixels.',
-              },
-              width: {
-                type: 'number',
-                description:
-                  'Full bounding-box width in screenshot pixels; for an ellipse this is its horizontal diameter, not radius.',
-              },
-              height: {
-                type: 'number',
-                description:
-                  'Full bounding-box height in screenshot pixels; for an ellipse this is its vertical diameter, not radius.',
-              },
-              toX: { type: 'number', description: 'Arrow tip X in screenshot pixels.' },
-              toY: { type: 'number', description: 'Arrow tip Y in screenshot pixels.' },
-              text: {
-                type: 'string',
-                maxLength: 160,
-                description: `Optional plain text; omit when the visual is enough. Character limits by kind: ${JSON.stringify(annotationTextLimits)}. No Markdown.`,
-              },
-              title: { type: 'string', maxLength: 40, description: 'Optional short heading for a note only.' },
-              step: { type: 'integer', minimum: 1, maximum: 9, description: 'Required for a numbered step.' },
-              color: {
-                type: 'string',
-                pattern: '^#[0-9a-fA-F]{6}$',
-                description: 'Hex RGB, for example #5b72f2; omit for the default style',
-              },
-              points: {
-                type: 'array',
-                maxItems: 512,
-                items: {
-                  type: 'object',
-                  properties: { x: { type: 'number' }, y: { type: 'number' } },
-                  required: ['x', 'y'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['id', 'kind', 'x', 'y'],
-          },
-        },
-      },
-      required: ['observationId', 'displayId', 'items'],
-    },
-    async execute(_id, params, signal) {
-      const result = await bridge('/draw', params, signal);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
-    },
-  });
   pi.registerTool({
     name: 'desktop_clear',
     label: 'Clear annotations',
