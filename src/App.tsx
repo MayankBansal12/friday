@@ -52,6 +52,7 @@ import { NoiseFloor, ProgressiveTranscription } from './progressive-transcriptio
 import { VoiceFollowUp } from './voice-follow-up';
 import { detectStopCommand, detectWakeCommand } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
+import { FridayMascot } from './FridayMascot';
 import { isEcho, shouldBargeIn } from './echo-guard';
 import { continuation, ignoredFinal, type VoiceSubmission } from './voice-turns';
 
@@ -261,9 +262,7 @@ function TaskView({
         ) : task.status === 'failed' || task.status === 'cancelled' ? null : (
           <div className="working-state" aria-live="polite">
             <span className="working-signal" aria-hidden="true">
-              <i />
-              <i />
-              <i />
+              <FridayMascot mood={task.status === 'awaiting_approval' ? 'worried' : 'thinking'} />
             </span>
             <span>
               <strong>{task.status === 'awaiting_approval' ? 'Paused for your approval' : 'Working it through'}</strong>

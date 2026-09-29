@@ -23,6 +23,7 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
+import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
@@ -147,6 +148,7 @@ export function FridayPresence(props: Props) {
   const transitioning = useRef(false);
   const syncSurface = useRef<() => void>(() => {});
   const keyboardFocus = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   const busy = task && activeStatuses.has(task.status);
   const listeningToRequest = ['starting', 'armed', 'transcribing'].includes(listening);
   const children = (state?.sessions ?? []).filter((s) => s.role === 'child').sort((a, b) => b.updatedAt - a.updatedAt);
@@ -197,6 +199,12 @@ export function FridayPresence(props: Props) {
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
   const resting = !engaged && !expanded;
+  // The expanded panel's own scroll stays at the newest content instead of a mid-scroll position.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || !expanded) return;
+    content.scrollTop = content.scrollHeight;
+  }, [expanded, detail, conversation.length, approvals.length, props.heard, listeningToRequest]);
   const surface: SurfaceLayout = background
     ? hovered
       ? 'tasks'
@@ -395,13 +403,19 @@ export function FridayPresence(props: Props) {
     setDismissed(contentKey);
     props.onDismiss();
   }
-  const mark = (
-    <span className={`presence-mark ${busy ? 'working' : ''} ${speaking ? 'speaking' : ''}`} aria-hidden="true">
-      <i />
-      <i />
-      <i />
-    </span>
-  );
+  const mood: FridayMood =
+    approvals.length || props.error || task?.error || listening === 'error'
+      ? 'worried'
+      : speaking
+        ? 'speaking'
+        : busy || props.controlling || listening === 'transcribing'
+          ? 'thinking'
+          : listeningToRequest || typing
+            ? 'listening'
+            : !props.micEnabled
+              ? 'sleepy'
+              : 'idle';
+  const mark = <FridayMascot mood={mood} className="presence-mark" />;
   const taskList = (
     <section className="background-list" aria-label="Background tasks">
       <h2>
@@ -617,7 +631,7 @@ export function FridayPresence(props: Props) {
                   </div>
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
-                <div className="presence-content">
+                <div className="presence-content" ref={contentRef}>
                   {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
                   {conversation.length > 0 && (
                     <div className="presence-conversation" aria-label="Conversation transcript">

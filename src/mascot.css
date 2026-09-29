@@ -1,0 +1,78 @@
+.friday-mascot {
+  display: block;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.friday-mascot svg {
+  display: block;
+  overflow: visible;
+}
+.friday-mascot .mascot-disc,
+.friday-mascot .mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    fill 0.3s;
+}
+.friday-mascot .mascot-disc {
+  fill: #d9ff91;
+}
+.friday-mascot .mascot-eyes {
+  fill: #1d1f1b;
+  animation: mascot-blink 6s infinite;
+}
+
+.friday-mascot.mood-listening .mascot-eyes {
+  transform: scaleY(1.12);
+}
+.friday-mascot.mood-thinking .mascot-eyes {
+  animation:
+    mascot-blink 6s infinite,
+    mascot-scan 2.4s ease-in-out infinite;
+}
+.friday-mascot.mood-speaking .mascot-disc {
+  animation: mascot-pulse 0.9s ease-in-out infinite;
+}
+.friday-mascot.mood-sleepy .mascot-disc {
+  fill: #8f9c78;
+}
+.friday-mascot.mood-sleepy .mascot-eyes {
+  animation: none;
+  transform: translateY(1px) scaleY(0.2);
+}
+.friday-mascot.mood-worried .mascot-disc {
+  fill: #ffb09f;
+}
+
+@keyframes mascot-blink {
+  0%,
+  94%,
+  100% {
+    scale: 1 1;
+  }
+  96% {
+    scale: 1 0.1;
+  }
+}
+@keyframes mascot-scan {
+  0%,
+  100% {
+    translate: -1px 0;
+  }
+  50% {
+    translate: 1px 0;
+  }
+}
+@keyframes mascot-pulse {
+  50% {
+    scale: 0.94;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .friday-mascot * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
