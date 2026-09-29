@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DesktopBridge } from '../electron/desktop-bridge.js';
 import type { NativeDesktop } from '../electron/gnome-client.js';
-import { protocolVersion } from '../electron/desktop-protocol.js';
+import { drawing, protocolVersion } from '../electron/desktop-protocol.js';
 import type { ComputerRunner } from '../electron/computer-runner.js';
 import { DesktopError } from '../electron/desktop-status.js';
 
@@ -534,5 +534,75 @@ describe('one companion UI: screenshot isolation and guidance mode', () => {
     expect((await pending).status).toBe(400);
     expect(f.bridge.guiding).toBe(false);
     expect(f.guidance).toEqual([]);
+  });
+});
+
+describe('interact host drawing boundary', () => {
+  it('maps screenshot coordinates once and waits for rendered acknowledgment before revealing speech', async () => {
+    const f = await fixture(true);
+    expect(f.bridge.latestObservation('run-1')).toBeUndefined();
+    await f.request('/screenshot');
+    const observation = f.bridge.latestObservation('run-1');
+    expect(observation?.width).toBe(1440);
+    expect(f.bridge.latestObservation('other-run')).toBeUndefined();
+    const nativeDraw = f.holdNext('draw');
+    let revealed = false;
+    const result = f.bridge.presentDrawing('run-1', drawing(guide, observation)).then((value) => {
+      revealed = true;
+      return value;
+    });
+    await nativeDraw.sent;
+    expect(revealed).toBe(false);
+    expect(f.bridge.guiding).toBe(false);
+    expect(f.calls.at(-1)).toMatchObject({
+      op: 'draw',
+      runId: 'run-1',
+      items: [{ id: 'button', x: 10 * (1920 / 1440), y: 20 * (1080 / 810) }],
+    });
+    nativeDraw.resolve({ rendered: true, ids: ['button'] });
+    expect(await result).toEqual({ ids: ['button'] });
+    expect(f.bridge.guiding).toBe(true);
+  });
+
+  it('rejects a prepared drawing when a queued capture replaces its observation', async () => {
+    const f = await fixture();
+    await f.request('/screenshot');
+    const oldObservation = f.bridge.latestObservation('run-1')!;
+    const plan = drawing(guide, oldObservation);
+    const capture = f.holdNext('observe');
+    const nextScreenshot = f.request('/screenshot');
+    await capture.sent;
+    const pending = f.bridge.presentDrawing('run-1', plan);
+    const rejected = expect(pending).rejects.toThrow('newer screenshot');
+    capture.resolve({ ...oldObservation, id: 'new-observation', data: 'new-image' });
+    expect((await nextScreenshot).status).toBe(200);
+    await rejected;
+    expect(f.ops()).not.toContain('draw');
+  });
+
+  it('does not report a late native draw as delivered after the desktop lease is revoked', async () => {
+    const f = await fixture();
+    await f.request('/screenshot');
+    const plan = drawing(guide, f.bridge.latestObservation('run-1'));
+    const nativeDraw = f.holdNext('draw');
+    const pending = f.bridge.presentDrawing('run-1', plan);
+    const rejected = expect(pending).rejects.toThrow('stopped');
+    await nativeDraw.sent;
+    f.bridge.revokeRun('run-1');
+    expect(f.bridge.latestObservation('run-1')).toBeUndefined();
+    nativeDraw.resolve({ rendered: true, ids: ['button'] });
+    await rejected;
+    expect(f.bridge.guiding).toBe(false);
+    await expect(f.bridge.presentDrawing('run-1', plan)).rejects.toThrow('stopped');
+  });
+
+  it.each([undefined, false])('requires a rendered acknowledgment, received %s', async (rendered) => {
+    const f = await fixture();
+    await f.request('/screenshot');
+    f.setDrawReply({ ids: ['button'], rendered });
+    await expect(f.bridge.presentDrawing('run-1', drawing(guide, f.bridge.latestObservation('run-1')))).rejects.toThrow(
+      'did not confirm',
+    );
+    expect(f.bridge.guiding).toBe(false);
   });
 });

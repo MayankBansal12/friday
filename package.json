@@ -30,6 +30,9 @@
     "appId": "dev.linuxbuddy.app",
     "productName": "Linux Buddy",
     "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
     "publish": null,
     "files": [
       "dist/**/*",
@@ -60,8 +63,12 @@
     ]
   },
   "dependencies": {
+    "@livekit/rtc-node": "1.1.0",
     "dotenv": "^17.4.2",
+    "livekit-server-sdk": "2.19.1",
     "motion": "^13.4.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "ws": "^8.22.0"
   },
   "devDependencies": {
@@ -79,6 +86,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.11.0",
+    "livekit-client": "2.22.3",
     "lucide-react": "^1.31.0",
     "prettier": "^3.9.6",
     "react": "^19.2.8",

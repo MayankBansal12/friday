@@ -7,6 +7,15 @@ import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
+import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
+import { pwCatSink } from '../speech-output.js';
+import {
+  listenerIdentity,
+  liveKitConfigFromEnvironment,
+  LiveKitVoice,
+  liveKitToken,
+  voiceIdentity,
+} from '../livekit.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { TaskStore } from '../store.js';
@@ -18,7 +27,14 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../types.js';
-import { validAudio, validId, validListeningState, validPrompt, validSettings } from '../validation.js';
+import {
+  validAudio,
+  validId,
+  validListeningState,
+  validPrompt,
+  validRequestContext,
+  validSettings,
+} from '../validation.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 loadEnvironment({ path: join(process.cwd(), '.env'), quiet: true });
@@ -37,12 +53,28 @@ let service: AgentService;
 let speech: SpeechService;
 let bridge: DesktopBridge;
 const speaker = createSpeakerFromEnvironment();
+// Bundled clips (app.asar when packaged); they follow Friday's voice route, LiveKit or pw-cat.
+let acknowledgements: Acknowledgements | undefined;
+try {
+  acknowledgements = new Acknowledgements(
+    loadAcknowledgements(acknowledgementDirectory(root)),
+    () => speaker.sink ?? pwCatSink(),
+  );
+} catch (error) {
+  console.warn('Acknowledgement clips are unavailable:', error instanceof Error ? error.message : error);
+}
+// Read once after dotenv; this removes the LiveKit key and secret from inherited environments.
+const liveKitSetup = liveKitConfigFromEnvironment();
+if (liveKitSetup.error) console.warn(`LiveKit is off: ${liveKitSetup.error}`);
+let liveKit: LiveKitVoice | undefined;
 let native: GnomeClient;
 let surface: SurfaceLayout = 'quiet';
 let surfaceHeight: number | undefined;
 let surfaceWidth: number | undefined;
 let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
+let notchOffset: { x: number; y: number } | undefined;
+let notchPersistTimer: NodeJS.Timeout | undefined;
 
 function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const area = screen.getPrimaryDisplay().workArea;
@@ -71,6 +103,12 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
     : area.x + Math.round((area.width - width) / 2);
   // Keep the visible edge 5px below the desktop's system panel, outside its input region.
   const y = area.y + (notch ? 5 : 12);
+  if (notch && notchOffset) {
+    const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
+    const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
+    if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
+    return { x: nextX, y: nextY, width, height };
+  }
   return { x, y, width, height };
 }
 
@@ -110,7 +148,14 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   const placement = JSON.stringify({ layout, ...bounds });
   if (nativeWindowPlacement && (layoutChanged || boundsChanged || nativePlacement !== placement))
     void native
-      ?.command({ op: 'place_companion', pid: process.pid, layout, width: bounds.width, height: bounds.height })
+      ?.command({
+        op: 'place_companion',
+        pid: process.pid,
+        layout,
+        width: bounds.width,
+        height: bounds.height,
+        ...(surface === layout && notchOffset ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y } : {}),
+      })
       .then((result) => {
         if (result.placed) nativePlacement = placement;
       })
@@ -134,6 +179,7 @@ function setExpanded(value: boolean) {
 function stopListening() {
   service?.silence();
   speaker.stop();
+  liveKit?.reset();
   window?.webContents.send('voice:stop');
   speech?.reset();
 }
@@ -191,6 +237,9 @@ function createWindow(openSilently: boolean) {
     return { action: 'deny' };
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  // A reloaded or crashed renderer is no longer listening; never route voice to it.
+  window.webContents.on('did-start-loading', () => liveKit?.listener(false));
+  window.webContents.on('render-process-gone', () => liveKit?.listener(false));
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
@@ -301,6 +350,17 @@ if (hasSingleInstanceLock)
       },
     );
     await bridge.start();
+    if (liveKitSetup.config)
+      liveKit = new LiveKitVoice(liveKitSetup.config, {
+        expect: (id) => window?.webContents.send('livekit:expect', id ?? 0),
+        cancelled: () => window?.webContents.send('livekit:cancelled'),
+        // Rumik PCM goes to LiveKit only while a renderer is subscribed; otherwise pw-cat plays it.
+        routable: (ready) => {
+          speaker.sink = ready ? liveKit?.sink : undefined;
+        },
+        microphone: (frame) => window?.webContents.send('livekit:microphone', frame.buffer),
+        microphoneReady: (sid) => window?.webContents.send('livekit:microphone-ready', sid),
+      });
     const runtimeDirectory = join(app.getPath('userData'), 'runtime');
     const extensionPath = await stageRuntimeExtension(join(root, 'dist-electron'), runtimeDirectory);
     service = new AgentService(
@@ -308,7 +368,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
-      { speak: (text) => speaker.speak(text), silence: () => speaker.stop() },
+      { voice: speaker, acknowledgements },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -318,6 +378,7 @@ if (hasSingleInstanceLock)
     bridge.onControlProgress = (id, text, spoken) => service.controlProgress(id, text, spoken);
     await service.init();
     const persistedSettings = service.getSettings();
+    notchOffset = persistedSettings.notchOffset;
     speech.setWakeWord(persistedSettings.wakeWord);
     app.setLoginItemSettings({ openAtLogin: persistedSettings.launchAtLogin });
     createWindow(openedAtLogin);
@@ -370,20 +431,17 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       service.silence();
       speaker.stop();
+      liveKit?.reset();
       bridge.stop();
       const task = service.list().find((item) => item.role !== 'child' && activeStatuses.has(item.status));
       if (task) await service.cancel(task.id);
     });
     ipcMain.handle('tasks:submit', (event, prompt: unknown, context: unknown) => {
       fromWindow(event);
-      speaker.stop();
-      let selectedChildId: string | undefined;
-      if (context !== undefined) {
-        if (!context || typeof context !== 'object' || Array.isArray(context)) throw new Error('Invalid task context');
-        const id = (context as { selectedChildId?: unknown }).selectedChildId;
-        if (id !== undefined) selectedChildId = validId(id);
-      }
-      return service.submit(validPrompt(prompt), { selectedChildId });
+      // Validate before touching output: an invalid submission must not silence the current reply.
+      const text = validPrompt(prompt);
+      const request = validRequestContext(context);
+      return service.submit(text, request);
     });
     ipcMain.handle('tasks:approve', (event, id: unknown, approved: unknown) => {
       fromWindow(event);
@@ -421,6 +479,7 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       bridge.stop();
       speaker.stop();
+      liveKit?.reset();
       await service.stop();
     });
     ipcMain.handle('voice:speak', (event, taskId: unknown) => {
@@ -431,6 +490,37 @@ if (hasSingleInstanceLock)
     ipcMain.handle('voice:silence', (event) => {
       fromWindow(event);
       service.silence();
+    });
+    // Barge-in: the user is speaking over Friday. Stops audio and unrevealed presentation only.
+    ipcMain.handle('voice:interrupt', (event) => {
+      fromWindow(event);
+      service.interrupt();
+    });
+    ipcMain.handle('livekit:session', async (event) => {
+      fromWindow(event);
+      if (!liveKit) return undefined;
+      await liveKit.connect();
+      return {
+        url: liveKit.config.url,
+        token: await liveKitToken(liveKit.config, listenerIdentity),
+        voice: voiceIdentity,
+      };
+    });
+    ipcMain.on('livekit:listener', (event, ready: unknown) => {
+      try {
+        fromWindow(event);
+        if (typeof ready === 'boolean') liveKit?.listener(ready);
+      } catch {
+        /* Ignore forged one-way renderer messages. */
+      }
+    });
+    ipcMain.on('livekit:observed', (event, id: unknown) => {
+      try {
+        fromWindow(event);
+        if (Number.isSafeInteger(id) && (id as number) > 0) liveKit?.observed(id as number);
+      } catch {
+        /* Ignore forged one-way renderer messages. */
+      }
     });
     ipcMain.handle('voice:pcm', (event, request: unknown) => {
       fromWindow(event);
@@ -465,6 +555,29 @@ if (hasSingleInstanceLock)
       window?.setFocusable(true);
       window?.show();
       window?.focus();
+    });
+    ipcMain.handle('window:notch-offset', (event, value: unknown) => {
+      fromWindow(event);
+      if (value === undefined || value === null) {
+        if (notchOffset) {
+          notchOffset = undefined;
+          setSurface(surface, surfaceHeight, surfaceWidth);
+          void service.updateSettings({ notchOffset: undefined }).catch(() => {});
+        }
+        return;
+      }
+      if (!value || typeof value !== 'object') throw new Error('Invalid notch offset');
+      const offset = value as Record<string, unknown>;
+      if (typeof offset.x !== 'number' || typeof offset.y !== 'number') throw new Error('Invalid notch offset');
+      // Drags compose over the previous offset and re-place synchronously;
+      // persistence happens in the background.
+      notchOffset = { x: Math.round(offset.x), y: Math.round(offset.y) };
+      setSurface(surface, surfaceHeight, surfaceWidth);
+      if (notchPersistTimer) clearTimeout(notchPersistTimer);
+      notchPersistTimer = setTimeout(() => {
+        notchPersistTimer = undefined;
+        void service.updateSettings({ notchOffset }).catch(() => {});
+      }, 1000);
     });
     ipcMain.handle('window:hide', (event) => {
       fromWindow(event);
@@ -504,6 +617,7 @@ app.on('before-quit', (event) => {
   quitting = true;
   stopListening();
   speaker.dispose();
+  void liveKit?.close();
   speech?.close();
   void (async () => {
     bridge?.stop();
@@ -514,6 +628,7 @@ app.on('before-quit', (event) => {
 });
 app.on('will-quit', () => {
   if (placementTimer) clearTimeout(placementTimer);
+  if (notchPersistTimer) clearTimeout(notchPersistTimer);
   globalShortcut.unregisterAll();
   bridge?.close();
 });

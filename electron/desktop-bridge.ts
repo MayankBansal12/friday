@@ -7,6 +7,7 @@ import {
   nativeDrawing,
   protocolVersion,
   record,
+  type Drawing,
   type Observation,
 } from './desktop-protocol.js';
 import { CodexComputerRunner, type ComputerRunner, type ComputerFrame } from './computer-runner.js';
@@ -204,6 +205,41 @@ export class DesktopBridge {
       });
     this.operationChain = queued;
     return queued;
+  }
+  /** The latest observation of the active run, for host-bound interact drawings. */
+  latestObservation(runId: string): Observation | undefined {
+    const run = this.active;
+    if (!run || run.id !== runId || run.revoked) return undefined;
+    return run.observation;
+  }
+  /**
+   * Reveal a host-validated interact drawing. Revalidates the lease and observation at
+   * reveal time (after any speech wait), then requires GNOME's rendered acknowledgement.
+   */
+  presentDrawing(runId: string, value: Drawing): Promise<{ ids: string[] }> {
+    const run = this.active;
+    if (!run || run.id !== runId || run.revoked) return Promise.reject(new Error('Desktop permission was stopped'));
+    return this.enqueue(run, async () => {
+      if (!run.observation || run.observation.id !== value.observationId)
+        throw new Error('Observe again: a newer screenshot replaced the one this drawing used');
+      const d = drawing(value, run.observation);
+      let result: Record<string, unknown>;
+      try {
+        result = await this.native.command({
+          ...nativeDrawing(d, run.observation, run.nativeObservation!),
+          op: 'draw',
+          runId: run.id,
+        });
+      } catch (error) {
+        this.watchGuidance(0);
+        throw new Error(desktopErrorMessage(error), { cause: error });
+      }
+      this.assert(run);
+      if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
+      const ids = Array.isArray(result.ids) ? result.ids.filter((id): id is string => typeof id === 'string') : [];
+      this.setGuidance(ids.length > 0);
+      return { ids: ids.length ? ids : d.items.map((item) => item.id) };
+    });
   }
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const run = this.active;

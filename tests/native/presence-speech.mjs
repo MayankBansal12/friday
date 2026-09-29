@@ -13,7 +13,9 @@ async function evaluate(expression) {
   return r.result.value;
 }
 async function open(state) {
-  await call('Page.navigate', { url: `http://127.0.0.1:5174/tests/presence-preview.html?state=${state}` });
+  await call('Page.navigate', {
+    url: `${process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5174'}/tests/presence-preview.html?state=${state}`,
+  });
   await call('Page.bringToFront', {});
   for (let i = 0; i < 100; i++) {
     if (await evaluate("Boolean(window.fixture?.surface && document.querySelector('#root')?.textContent)")) break;
@@ -45,7 +47,8 @@ try {
   await evaluate("document.querySelector('.presence-heading').focus()");
   await pause();
   await speech({ text: 'What did you find?', wakeDetected: false });
-  assert.equal(await evaluate('fixture.listening'), 'paused');
+  // Engaged listening continues while Friday thinks and speaks, so the user can barge in.
+  assert.equal(await evaluate('fixture.listening'), 'armed');
   await evaluate(
     "fixture.runtime.presentation={taskId:'request',text:'I found three options.',expanded:true,speaking:true};fixture.emit()",
   );
@@ -53,12 +56,12 @@ try {
     "fixture.task({id:'request',role:'parent',status:'completed',response:'I found three options.',speechText:'I found three options.',prompt:'What did you find?',steps:[],createdAt:1,updatedAt:2});fixture.emit()",
   );
   await pause();
-  assert.equal(await evaluate('fixture.listening'), 'paused', 'terminal task must wait for audio drain');
+  assert.equal(await evaluate('fixture.listening'), 'armed', 'speech keeps the conversation open for barge-in');
   await evaluate(
     "fixture.runtime.sessions[1].status='completed';fixture.task({id:'child-result',role:'child',status:'completed',prompt:'child',steps:[],createdAt:1,updatedAt:2});fixture.emit()",
   );
   await pause();
-  assert.equal(await evaluate('fixture.listening'), 'paused', 'quiet child completion must not reopen capture');
+  assert.equal(await evaluate('fixture.listening'), 'armed', 'quiet child completion must not change capture');
   await screenshot('waiting-for-audio');
   await evaluate('fixture.runtime.presentation.speaking=false;fixture.emit()');
   await pause();
@@ -67,7 +70,7 @@ try {
   await speech({ text: 'Which is cheapest?', wakeDetected: false });
   assert.deepEqual(await evaluate("fixture.calls.filter(c=>c[0]==='submit').at(-1).slice(1)"), [
     'Which is cheapest?',
-    { selectedChildId: 'a' },
+    { selectedChildId: 'a', source: 'voice' },
   ]);
   await evaluate(
     "fixture.runtime.presentation.speaking=true;fixture.emit();fixture.task({id:'request',role:'parent',status:'completed',prompt:'Which is cheapest?',steps:[],createdAt:1,updatedAt:3});fixture.emit()",
@@ -114,9 +117,11 @@ try {
   await pause();
   assert.equal(await evaluate('document.querySelector(\'[aria-label="Read short reply"]\').disabled'), true);
   await evaluate('fixture.calls.length=0');
+  const intent = await evaluate('fixture.listening');
+  assert.equal(intent, 'armed', 'a busy turn keeps engaged listening');
   await click('[aria-label="Read short reply"]');
   assert.deepEqual(await evaluate('fixture.calls'), []);
-  assert.equal(await evaluate('fixture.listening'), 'paused');
+  assert.equal(await evaluate('fixture.listening'), intent);
   await screenshot('replay-disabled-during-turn');
   await evaluate(
     "fixture.task({id:'active',role:'parent',conversationId:'parent',status:'completed',response:'Done.',speechText:'Done.',prompt:'Compare',steps:[],createdAt:1,updatedAt:10});window.buddy.updateSettings=async(next)=>({wakeWord:'Friday',defaultCwd:'/tmp',model:'test',launchAtLogin:false,...next})",
@@ -146,7 +151,8 @@ try {
       fixture.replayDone=r;setTimeout(()=>{fixture.runtime.presentation.speaking=true;fixture.emit()},350)
     })};fixture.calls.length=0`);
   await click('[aria-label="Read short reply"]');
-  assert.equal(await evaluate('fixture.listening'), 'paused');
+  // Replay leaves wake-gated listening on: "Friday stop" and barge-in still work.
+  assert.equal(await evaluate('fixture.listening'), 'listening');
   assert.equal(await evaluate('fixture.capture.state'), 'recording');
   assert.equal(
     await evaluate("fixture.calls.some(c=>c[0]==='silence')"),
@@ -166,7 +172,7 @@ try {
   await pause();
   assert.equal(await evaluate('fixture.listening'), 'listening', 'stale replay completion cannot reopen engagement');
   console.log(
-    'PASS: audio drain, selected follow-up, quiet children, mic-off, task-ID/stale replay; active/muted replay has no side effects',
+    'PASS: engaged listening while busy/speaking, selected follow-up with voice source, quiet children, mic-off, task-ID/stale replay; active/muted replay has no side effects',
   );
 } finally {
   close();

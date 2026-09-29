@@ -12,7 +12,9 @@ async function evaluate(expression) {
   return r.result.value;
 }
 async function open(state) {
-  await call('Page.navigate', { url: `http://127.0.0.1:5174/tests/presence-preview.html?state=${state}` });
+  await call('Page.navigate', {
+    url: `${process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5174'}/tests/presence-preview.html?state=${state}`,
+  });
   await call('Page.bringToFront', {});
   for (let i = 0; i < 100; i++) {
     if (await evaluate("Boolean(window.fixture?.surface && document.querySelector('#root')?.textContent)")) break;
@@ -163,7 +165,7 @@ try {
   await pause();
   await evaluate("fixture.finish({text:'A general question',wakeDetected:false})");
   await pause();
-  assert.deepEqual(await evaluate("fixture.calls.find(c=>c[0]==='submit')[2]"), {});
+  assert.deepEqual(await evaluate("fixture.calls.find(c=>c[0]==='submit')[2]"), { source: 'voice' });
   // A new explicit greeting clears task-specific follow-up context.
   await select();
   await evaluate('fixture.level=1');
@@ -172,7 +174,11 @@ try {
   await pause();
   await evaluate("fixture.finish({text:'Hey Friday, what time is it?',wakeDetected:true,command:'what time is it?'})");
   await pause();
-  assert.deepEqual(await evaluate("fixture.calls.find(c=>c[0]==='submit')"), ['submit', 'what time is it?', {}]);
+  assert.deepEqual(await evaluate("fixture.calls.find(c=>c[0]==='submit')"), [
+    'submit',
+    'what time is it?',
+    { source: 'voice' },
+  ]);
   await open('updates');
   await evaluate("document.querySelector('.friday-orb').focus()");
   await pause();

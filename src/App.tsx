@@ -46,11 +46,21 @@ import {
 } from '../electron/types';
 import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
-import { PcmCapture } from './pcm-capture';
-import { ProgressiveTranscription } from './progressive-transcription';
+import { PcmCapture, type FrameCapture } from './pcm-capture';
+import { LiveKitLink } from './livekit-link';
+import { NoiseFloor, ProgressiveTranscription } from './progressive-transcription';
 import { VoiceFollowUp } from './voice-follow-up';
 import { detectStopCommand, detectWakeCommand } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
+import { isEcho, shouldBargeIn } from './echo-guard';
+import { continuation, ignoredFinal, type VoiceSubmission } from './voice-turns';
+
+/** How long the user's submitted words stay in the notch. */
+const transcriptMs = 3000;
+/** Friday's voice can still be in the room this long after playback reports it ended. */
+const playbackTailMs = 300;
+/** Share of a partial's words that must follow Friday's wording to be held back as echo. */
+const bargeInEchoSimilarity = 0.5;
 
 const starterIdeas = [
   'Look at my screen and explain what I am seeing',
@@ -564,12 +574,24 @@ function SettingsDialog({
           <label className="setting-toggle">
             <span>
               <strong>Read replies aloud</strong>
-              <small>Speak replies automatically using the local voice.</small>
+              <small>Speak replies to voice requests. You can talk over Friday to interrupt.</small>
             </span>
             <input
               type="checkbox"
               checked={settings.autoSpeak === true}
               onChange={(event) => onSave({ autoSpeak: event.target.checked })}
+            />
+          </label>
+          <label className="setting-toggle">
+            <span>
+              <strong>Speak replies to typed requests</strong>
+              <small>Typed requests are answered on screen unless this is on.</small>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.speakTypedReplies === true}
+              disabled={settings.autoSpeak !== true}
+              onChange={(event) => onSave({ speakTypedReplies: event.target.checked })}
             />
           </label>
         </div>
@@ -685,6 +707,9 @@ export default function App() {
   const [prompt, setPrompt] = useState('');
   const [listenState, setListenState] = useState<ListeningState>('idle');
   const [heard, setHeard] = useState('');
+  // The user's own words in the notch: live while they speak, then briefly after submission.
+  const [transcript, setTranscript] = useState<{ text: string; final: boolean }>();
+  const transcriptTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [voiceLevel, setVoiceLevel] = useState(0);
   const [micEnabled, setMicEnabled] = useState(false);
   const micEnabledRef = useRef(false);
@@ -702,15 +727,17 @@ export default function App() {
   const [actionError, setActionError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const [approvalPending, setApprovalPending] = useState(false);
+  const [notchDrag, setNotchDrag] = useState<{ x: number; y: number }>();
 
   const persistedSettingsRef = useRef<BuddySettings | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
-  const captureRef = useRef<PcmCapture | undefined>(undefined);
+  const captureRef = useRef<FrameCapture | undefined>(undefined);
+  const liveKitRef = useRef<LiveKitLink | undefined>(undefined);
   const transcriptionRef = useRef<ProgressiveTranscription | undefined>(undefined);
   const generationRef = useRef(0);
-  const beginSegmentRef = useRef<((stream: MediaStream, capture: PcmCapture, generation: number) => void) | undefined>(
-    undefined,
-  );
+  const beginSegmentRef = useRef<
+    ((stream: MediaStream, capture: FrameCapture, generation: number) => void) | undefined
+  >(undefined);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [desktopState, setDesktopState] = useState<DesktopStatus>();
@@ -721,6 +748,29 @@ export default function App() {
   const [directVoice, setDirectVoice] = useState(false);
   const pttHeldRef = useRef(false);
   const [speaking, setSpeaking] = useState(false);
+  const speakingRef = useRef(false);
+  const speakingEndedAtRef = useRef<number | undefined>(undefined);
+  // An acknowledgement clip ("Hmm, okay") is playing: audio for the echo guard, not an answer.
+  const [acknowledging, setAcknowledging] = useState(false);
+  // Room noise learned across segments, so each new segment starts calibrated.
+  const noiseFloorRef = useRef(new NoiseFloor());
+  const lastVoiceRef = useRef<VoiceSubmission | undefined>(undefined);
+  const taskStatusRef = useRef(new Map<string, string>());
+  const childRequestRef = useRef(new Map<string, string>());
+  const [reportedChildren, setReportedChildren] = useState<Record<string, number>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('friday.reportedChildren') || '{}');
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem('friday.reportedChildren', JSON.stringify(reportedChildren));
+  }, [reportedChildren]);
+  // What Friday is saying or just said, for dropping its own voice from the microphone.
+  const echoRef = useRef<FridayState['presentation']['echo']>(undefined);
+  // Thinking, submitting, or speaking: listening continues, but the idle timeout is held.
+  const busyRef = useRef(false);
   const [replayPending, setReplayPending] = useState(false);
   const replayGenerationRef = useRef(0);
   const [guiding, setGuiding] = useState(false);
@@ -734,7 +784,9 @@ export default function App() {
   const conversationOpenRef = useRef(false);
   const followUpPendingRef = useRef(false);
   const followUpEngagedRef = useRef(true);
-  const startListeningRef = useRef<((direct?: boolean, engaged?: boolean) => Promise<void>) | undefined>(undefined);
+  const startListeningRef = useRef<
+    ((direct?: boolean, engaged?: boolean, interrupt?: boolean) => Promise<void>) | undefined
+  >(undefined);
   const [selectedChildId, setSelectedChildId] = useState<string>();
   const selectedChildRef = useRef<string | undefined>(undefined);
   const selectChild = useCallback((id?: string) => {
@@ -748,6 +800,29 @@ export default function App() {
     [tasks],
   );
   const wakeWord = settings?.wakeWord || 'Friday';
+  // Friday is voicing an answer; a playing acknowledgement clip does not count.
+  const answering = speaking && !acknowledging;
+
+  const showTranscript = useCallback((next?: { text: string; final: boolean }) => {
+    if (transcriptTimerRef.current) clearTimeout(transcriptTimerRef.current);
+    transcriptTimerRef.current = undefined;
+    setTranscript(next);
+    if (next?.final)
+      transcriptTimerRef.current = setTimeout(() => {
+        transcriptTimerRef.current = undefined;
+        setTranscript(undefined);
+      }, transcriptMs);
+  }, []);
+  /** Drops live words that turned out not to be a request, keeping a submitted transcript. */
+  const dropPartialTranscript = useCallback(() => {
+    setTranscript((current) => (current?.final ? current : undefined));
+  }, []);
+  useEffect(
+    () => () => {
+      if (transcriptTimerRef.current) clearTimeout(transcriptTimerRef.current);
+    },
+    [],
+  );
 
   const listeningRef = useRef<ListeningState>('idle');
   const updateListening = useCallback((state: ListeningState) => {
@@ -765,6 +840,8 @@ export default function App() {
     if (release) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       captureRef.current?.close();
+      // Also fence a microphone publication still waiting for the startup room join.
+      void liveKitRef.current?.release();
       streamRef.current = undefined;
       captureRef.current = undefined;
     }
@@ -780,9 +857,11 @@ export default function App() {
     selectChild();
     void window.buddy.silence();
     setSpeaking(false);
+    showTranscript();
+    lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [updateListening, selectChild, stopCapture]);
+  }, [updateListening, selectChild, stopCapture, showTranscript]);
 
   const disableMicrophone = useCallback(() => {
     micEnabledRef.current = false;
@@ -790,9 +869,11 @@ export default function App() {
     voiceFollowUpRef.current.cancel();
     followUpPendingRef.current = false;
     conversationOpenRef.current = false;
+    showTranscript();
+    lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [stopCapture, updateListening]);
+  }, [stopCapture, updateListening, showTranscript]);
 
   // Text interactions also expire when audio is explicitly off. Editing and active
   // work hold this timer; panel expansion is deliberately independent of it.
@@ -810,11 +891,12 @@ export default function App() {
       const resumeMic = micEnabledRef.current;
       voiceFollowUpRef.current.cancel();
       followUpPendingRef.current = false;
-      conversationOpenRef.current = false;
-      interruptOnlyRef.current = true;
-      updateListening(resumeMic ? 'paused' : 'idle');
-      void window.buddy.silence();
-      setSpeaking(false);
+      // A voice request keeps the conversation engaged, so the user can correct or
+      // interrupt Friday while it works or speaks. A typed request returns to wake gating.
+      conversationOpenRef.current = resumeVoice;
+      interruptOnlyRef.current = typingRef.current;
+      updateListening(resumeMic ? (typingRef.current ? 'paused' : resumeVoice ? 'armed' : 'listening') : 'idle');
+      // The host silences the current reply only after validating this submission.
       followUpEngagedRef.current = resumeVoice;
       if (resumeMic) voiceFollowUpRef.current.beginSubmission();
       submittingRef.current = true;
@@ -829,8 +911,13 @@ export default function App() {
         beginSegmentRef.current?.(streamRef.current, captureRef.current, generationRef.current);
       const epoch = requestEpochRef.current;
       try {
-        const created = await window.buddy.submit(cleaned, { selectedChildId: childId });
+        const created = await window.buddy.submit(cleaned, {
+          selectedChildId: childId,
+          source: resumeVoice ? 'voice' : 'typed',
+        });
         if (epoch !== requestEpochRef.current) return;
+        if (childId) childRequestRef.current.set(created.id, childId);
+        if (resumeVoice && lastVoiceRef.current?.text === cleaned) lastVoiceRef.current.taskId = created.id;
         if (resumeMic) voiceFollowUpRef.current.submitted(created.id);
         setSelected(created.id);
         setMarked(false);
@@ -856,11 +943,26 @@ export default function App() {
   );
 
   const beginSegment = useCallback(
-    (stream: MediaStream, capture: PcmCapture, generation: number) => {
+    (stream: MediaStream, capture: FrameCapture, generation: number) => {
       if (generation !== generationRef.current || !stream.active) return;
       let spokenChildId = selectedChildRef.current;
       let waitingSince = performance.now();
+      // Wall clock, comparable with the host's echo timestamps.
+      let speechStartedAt = Date.now();
+      let startedDuringPlayback = false;
+      let bargedIn = false;
+      // Friday's voice (or its acoustic tail) may be in the microphone right now.
+      const playback = () =>
+        speakingRef.current ||
+        (speakingEndedAtRef.current !== undefined && Date.now() - speakingEndedAtRef.current < playbackTailMs);
       const currentWakeWord = () => persistedSettingsRef.current?.wakeWord || wakeWord;
+      const echoCheck = (text: string, startedAt: number) => ({
+        text,
+        speechStartedAt: startedAt,
+        now: Date.now(),
+        wakeWord: currentWakeWord(),
+        speakingEndedAt: speakingRef.current ? undefined : speakingEndedAtRef.current,
+      });
       const failed = () => {
         if (generation !== generationRef.current) return;
         stopCapture();
@@ -871,9 +973,34 @@ export default function App() {
       };
       const transcription = new ProgressiveTranscription({
         direct: directVoiceRef.current,
+        floor: noiseFloorRef.current,
+        playback,
         decode: (request) => window.buddy.transcribePcm(request),
         speechStart: () => {
           spokenChildId = selectedChildRef.current;
+          speechStartedAt = Date.now();
+          startedDuringPlayback = playback();
+          bargedIn = false;
+        },
+        partial: (text) => {
+          if (generation !== generationRef.current) return;
+          if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
+          const engaged = conversationOpenRef.current || directVoiceRef.current;
+          const addressed = detectWakeCommand(text, currentWakeWord(), false).result.wakeDetected;
+          // Barge-in: stop Friday's voice as soon as the user is clearly talking over it.
+          // The final transcript then replaces the unfinished request. Partials of leaked
+          // playback are often half-mangled, so a looser echo match holds them back.
+          if (
+            !bargedIn &&
+            speakingRef.current &&
+            !isEcho(echoRef.current, echoCheck(text, speechStartedAt), bargeInEchoSimilarity) &&
+            shouldBargeIn(text, engaged, addressed)
+          ) {
+            bargedIn = true;
+            void window.buddy.interrupt();
+          }
+          // Live words only while nothing Friday says could be mistaken for them.
+          if ((engaged || addressed) && (bargedIn || !startedDuringPlayback)) showTranscript({ text, final: false });
         },
         endpoint: () => {
           if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
@@ -915,25 +1042,60 @@ export default function App() {
         final: (text) => {
           if (generation !== generationRef.current) return;
           waitingSince = performance.now();
-          if (detectStopCommand(text, currentWakeWord())) {
+          const echo = isEcho(echoRef.current, echoCheck(text, speechStartedAt));
+          if (!echo && detectStopCommand(text, currentWakeWord())) {
             stopFridayRef.current?.();
             return;
           }
-          // During work, speech playback, and text editing, only an addressed stop
-          // is actionable. Ambient speech and Friday's own reply cannot submit work.
+          // While typing or stopping, only an addressed stop is actionable. During work and
+          // playback, listening stays live: Friday's own voice is dropped as echo, and a new
+          // request replaces the unfinished one.
           if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
+          const resume = () => {
+            dropPartialTranscript();
+            if (directVoiceRef.current) stopListening();
+            else updateListening(conversationOpenRef.current ? 'armed' : 'listening');
+          };
+          if (echo) {
+            resume();
+            return;
+          }
           const wake = detectWakeCommand(text, currentWakeWord(), false).result;
           const wasEngaged = conversationOpenRef.current || directVoiceRef.current;
+          // A hesitation, or a lone "yeah" while Friday talks, must not replace the request.
+          if (
+            ignoredFinal({
+              text,
+              addressed: wake.wakeDetected,
+              duringPlayback: startedDuringPlayback && !directVoiceRef.current,
+            })
+          ) {
+            resume();
+            return;
+          }
           if (text && (wasEngaged || wake.wakeDetected)) setHeard(text);
           if (wake.wakeDetected) {
             selectChild();
             conversationOpenRef.current = true;
           }
-          const command = wake.wakeDetected ? wake.command : wasEngaged ? text : undefined;
+          let command = wake.wakeDetected ? wake.command : wasEngaged ? text : undefined;
           if (command) {
-            void runPrompt(command, true, { selectedChildId: wake.wakeDetected ? undefined : spokenChildId });
+            // The user paused mid-request and kept going before Friday did anything:
+            // resubmit the whole request instead of replacing it with its second half.
+            const previous = lastVoiceRef.current;
+            const merged = continuation(
+              previous,
+              { text: command, speechStartedAt, addressed: wake.wakeDetected },
+              previous?.taskId ? taskStatusRef.current.get(previous.taskId) : undefined,
+            );
+            command = merged ?? command.trim();
+            const childId = merged ? previous?.childId : wake.wakeDetected ? undefined : spokenChildId;
+            lastVoiceRef.current = { text: command, at: Date.now(), childId };
+            showTranscript({ text: command, final: true });
+            void runPrompt(command, true, { selectedChildId: childId });
             return;
           }
+          dropPartialTranscript();
           if (directVoiceRef.current) {
             stopListening();
             return;
@@ -951,7 +1113,7 @@ export default function App() {
         if (transcription.hasSpeech || directVoiceRef.current || interruptOnlyRef.current || stoppingRef.current)
           return;
         const now = performance.now();
-        if (typingRef.current) waitingSince = now;
+        if (typingRef.current || busyRef.current) waitingSince = now;
         if (
           (conversationOpenRef.current || selectedChildRef.current) &&
           !typingRef.current &&
@@ -966,15 +1128,36 @@ export default function App() {
       }, failed);
       if (directVoiceRef.current && !pttHeldRef.current) capture.flush(() => transcription.finish());
     },
-    [runPrompt, stopListening, stopCapture, updateListening, selectChild, wakeWord],
+    [
+      runPrompt,
+      stopListening,
+      stopCapture,
+      updateListening,
+      selectChild,
+      wakeWord,
+      showTranscript,
+      dropPartialTranscript,
+    ],
   );
 
   useEffect(() => {
     beginSegmentRef.current = beginSegment;
   }, [beginSegment]);
 
+  // Friday's voice and the microphone travel over LiveKit when main has it configured.
+  useEffect(() => {
+    if (!window.buddy.livekit) return;
+    const link = new LiveKitLink();
+    liveKitRef.current = link;
+    void link.start();
+    return () => {
+      if (liveKitRef.current === link) liveKitRef.current = undefined;
+      link.close();
+    };
+  }, []);
+
   const startListening = useCallback(
-    async (direct = false, engaged = false) => {
+    async (direct = false, engaged = false, interrupt = false) => {
       micEnabledRef.current = true;
       setMicEnabled(true);
       voiceFollowUpRef.current.cancel();
@@ -987,10 +1170,13 @@ export default function App() {
       conversationOpenRef.current = !typingRef.current && (engaged || direct);
       directVoiceRef.current = direct;
       setDirectVoice(direct);
-      void window.buddy.silence();
-      setSpeaking(false);
+      // Only an explicit "talk to Friday" interrupts its voice; resuming the mic after typing,
+      // Stop or an error must not cut off a reply.
+      if (interrupt) void window.buddy.interrupt();
       setActionError(undefined);
       setHeard('');
+      showTranscript();
+      lastVoiceRef.current = undefined;
       const generation = generationRef.current;
       if (streamRef.current?.active && captureRef.current) {
         updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
@@ -1006,9 +1192,17 @@ export default function App() {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-        let capture: PcmCapture;
+        let capture: FrameCapture;
         try {
-          capture = await PcmCapture.open(stream);
+          // Prefer the microphone as received over LiveKit; direct capture is the local fallback.
+          const [track] = stream.getAudioTracks();
+          const remote = track ? await liveKitRef.current?.capture(track) : undefined;
+          if (remote && generation !== generationRef.current) {
+            remote.close();
+            stream.getTracks().forEach((item) => item.stop());
+            return;
+          }
+          capture = remote ?? (await PcmCapture.open(stream));
         } catch (error) {
           stream.getTracks().forEach((track) => track.stop());
           throw error;
@@ -1049,7 +1243,7 @@ export default function App() {
         updateListening('error');
       }
     },
-    [updateListening, stopCapture],
+    [updateListening, stopCapture, showTranscript],
   );
 
   useEffect(() => {
@@ -1062,11 +1256,12 @@ export default function App() {
         interruptOnlyRef.current = true;
         conversationOpenRef.current = false;
         updateListening(micEnabledRef.current ? 'paused' : 'idle');
-      } else if (micEnabledRef.current && !activeTask && !speaking && !submittingRef.current && !stoppingRef.current) {
+      } else if (micEnabledRef.current && !submittingRef.current && !stoppingRef.current) {
+        // Closing the text input never cancels Friday; only Send does.
         void startListening(false, false);
       }
     };
-  }, [stopCapture, updateListening, startListening, activeTask, speaking]);
+  }, [updateListening, startListening]);
 
   useEffect(() => {
     let disposed = false;
@@ -1083,6 +1278,12 @@ export default function App() {
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
     const removeTask = window.buddy.onTask((next) => {
+      taskStatusRef.current.set(next.id, next.status);
+      const reportedChild = childRequestRef.current.get(next.id);
+      if (reportedChild && next.status === 'completed' && (next.interactions?.length || next.response)) {
+        setReportedChildren((current) => ({ ...current, [reportedChild]: Date.now() }));
+        childRequestRef.current.delete(next.id);
+      }
       setTasks((current) =>
         [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
       );
@@ -1094,12 +1295,16 @@ export default function App() {
     });
     const removeState = window.buddy.onFridayState((runtime) => {
       setFriday(runtime);
+      if (speakingRef.current && !runtime.presentation.speaking) speakingEndedAtRef.current = Date.now();
+      speakingRef.current = runtime.presentation.speaking;
+      echoRef.current = runtime.presentation.echo;
       setSpeaking(runtime.presentation.speaking);
+      setAcknowledging(Boolean(runtime.presentation.acknowledging));
     });
     const removeListen = window.buddy.onListen(() => {
       setView('now');
       selectChild();
-      void startListening(false, true);
+      void startListening(false, true, true);
     });
     const removeStopListen = window.buddy.onStopListening(stopListening);
     return () => {
@@ -1126,6 +1331,8 @@ export default function App() {
     setTyping(false);
     selectChild();
     setHeard('');
+    showTranscript();
+    lastVoiceRef.current = undefined;
     setActionError(undefined);
     setSpeaking(false);
     setGuiding(false);
@@ -1139,23 +1346,28 @@ export default function App() {
         if (micEnabledRef.current) void startListening(false, false);
         else updateListening('idle');
       });
-  }, [selectChild, startListening, stopCapture, updateListening]);
+  }, [selectChild, startListening, stopCapture, updateListening, showTranscript]);
   useEffect(() => {
     stopFridayRef.current = stopFriday;
   }, [stopFriday]);
 
   useEffect(() => {
-    // A reply can start independently of a renderer submission. Keep the same
-    // capture graph running to hear "Friday stop" throughout work and playback.
-    if (activeTask || speaking || submitting || replayPending) {
-      interruptOnlyRef.current = true;
-      if (micEnabledRef.current && listenState !== 'starting') updateListening('paused');
-    } else if (interruptOnlyRef.current && micEnabledRef.current && !typing && !stoppingRef.current) {
-      const engaged = followUpPendingRef.current ? followUpEngagedRef.current : conversationOpenRef.current;
+    // Listening stays live through work and playback on the same capture graph (engaged
+    // listening). Busy time only holds the conversation's idle timeout.
+    busyRef.current = Boolean(activeTask || speaking || submitting || replayPending);
+    if (busyRef.current) return;
+    if (followUpPendingRef.current) {
       followUpPendingRef.current = false;
-      void startListening(false, engaged);
+      if (followUpEngagedRef.current && micEnabledRef.current && !typing && !stoppingRef.current)
+        conversationOpenRef.current = true;
     }
-  }, [activeTask, speaking, submitting, replayPending, typing, listenState, startListening, updateListening]);
+    // A typed request held Stop-only listening; once it is done and the composer is
+    // closed, return to wake gating.
+    if (interruptOnlyRef.current && micEnabledRef.current && !typing && !stoppingRef.current) {
+      interruptOnlyRef.current = false;
+      if (listeningRef.current === 'paused') updateListening(conversationOpenRef.current ? 'armed' : 'listening');
+    }
+  }, [activeTask, speaking, submitting, replayPending, typing, updateListening]);
 
   useEffect(() => {
     let disposed = false;
@@ -1293,15 +1505,13 @@ export default function App() {
   }
 
   async function speakResponse() {
-    if (speaking) {
+    if (answering) {
       await window.buddy.silence();
       return;
     }
     if (!task?.speechText || activeTask || settings?.autoSpeak === false) return;
     const replay = ++replayGenerationRef.current;
     setReplayPending(true);
-    interruptOnlyRef.current = true;
-    updateListening(micEnabledRef.current ? 'paused' : 'idle');
     try {
       await window.buddy.speak(task.id);
     } catch (error) {
@@ -1334,6 +1544,15 @@ export default function App() {
       setActionError(errorMessage(error, 'Could not clear the drawing.'));
     }
   }
+
+  const setNotchOffset = useCallback((offset: { x: number; y: number }) => {
+    setNotchDrag(offset);
+    try {
+      void window.buddy.setNotchOffset(offset);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Friday will reset its notch position.'));
+    }
+  }, []);
 
   async function newTask() {
     try {
@@ -1483,7 +1702,7 @@ export default function App() {
           <Mic size={18} />
         </button>
 
-        {(activeTask || listeningActive || speaking) && (
+        {(activeTask || listeningActive || answering) && (
           <button className="stop-button pressable" type="button" onClick={() => void stopAll()}>
             <CircleStop size={15} /> <span>Stop</span>
           </button>
@@ -1518,13 +1737,17 @@ export default function App() {
         }
         tasks={tasks}
         listening={listenState}
-        speaking={speaking}
+        speaking={answering}
+        transcript={transcript}
         guiding={guiding}
         controlling={controlling}
+        onWindowDrag={setNotchOffset}
+        notchOffset={notchDrag ?? settings?.notchOffset}
         level={voiceLevel}
         heard={heard}
         error={actionError}
         selectedChildId={selectedChildId}
+        reportedChildren={reportedChildren}
         typing={typing}
         onTypingChange={changeTyping}
         micEnabled={micEnabled}
@@ -1533,7 +1756,7 @@ export default function App() {
         onContinue={() => {
           typingRef.current = false;
           setTyping(false);
-          void startListening(false, true);
+          void startListening(false, true, true);
         }}
         onMicOn={() => {
           void startListening(false, false);
@@ -1543,13 +1766,13 @@ export default function App() {
           typingRef.current = false;
           setTyping(false);
           selectChild(id);
-          void startListening(false, true);
+          void startListening(false, true, true);
         }}
         onTalk={() => {
           typingRef.current = false;
           setTyping(false);
           selectChild();
-          void startListening(false, true);
+          void startListening(false, true, true);
         }}
         onSubmit={(value) => {
           void runPrompt(value);
@@ -1658,7 +1881,7 @@ export default function App() {
               onRetry={() => void runPrompt(task.prompt)}
               onApprove={(approved) => void resolveApproval(approved)}
               approvalPending={approvalPending}
-              speaking={speaking}
+              speaking={answering}
               replayDisabledReason={
                 activeTask
                   ? 'Wait for this reply to finish'
