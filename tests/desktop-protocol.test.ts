@@ -5,6 +5,8 @@ import {
   nativeDrawing,
   annotationTextLimits,
   type Observation,
+  computerBatch,
+  nativeBatch,
 } from '../electron/desktop-protocol.js';
 const observation = (): Observation => ({
   id: 'obs-1',
@@ -17,6 +19,57 @@ const observation = (): Observation => ({
 });
 const ids = { observationId: 'obs-1', displayId: 'display-1' };
 describe('desktop coordinate and freshness contract', () => {
+  it('validates an entire input batch before delivery and scales pointers and drag paths', () => {
+    const native = observation();
+    const small = { ...native, width: 1440, height: 810 };
+    const batch = computerBatch(
+      {
+        ...ids,
+        actions: [
+          { type: 'click', x: 750, y: 300 },
+          {
+            type: 'drag',
+            path: [
+              { x: 0, y: 0 },
+              { x: 750, y: 300 },
+            ],
+          },
+          { type: 'keypress', keys: ['CTRL', 'a'] },
+        ],
+      },
+      small,
+    );
+    expect(nativeBatch(batch, small, native).actions).toEqual([
+      { type: 'click', x: 1000, y: 400, button: 'left' },
+      {
+        type: 'drag',
+        path: [
+          { x: 0, y: 0 },
+          { x: 1000, y: 400 },
+        ],
+      },
+      { type: 'keypress', keys: ['ctrl', 'a'] },
+    ]);
+    for (const actions of [
+      [],
+      [{ type: 'click', x: 1440, y: 0 }],
+      [{ type: 'type', text: 'x'.repeat(501) }],
+      [{ type: 'type', text: 'こんにちは' }],
+      [{ type: 'keypress', keys: ['unknown'] }],
+      [
+        { type: 'wait', ms: 2000 },
+        { type: 'wait', ms: 2000 },
+      ],
+      [
+        { type: 'click', x: 1, y: 1 },
+        { type: 'execute', code: 'bad' },
+      ],
+    ])
+      expect(() => computerBatch({ ...ids, actions }, small)).toThrow();
+    expect(() => computerBatch({ ...ids, observationId: 'old', actions: batch.actions }, small)).toThrow(
+      'no longer current',
+    );
+  });
   it('maps resized screenshots back to native drawing coordinates', () => {
     const native = observation();
     const small = { ...native, width: 1440, height: 810 };

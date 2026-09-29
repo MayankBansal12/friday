@@ -1,6 +1,6 @@
 // Deliberately dependency-free: the same compiled validators run inside GNOME Shell.
 /** Bumped whenever the app and the installed GNOME extension stop being interchangeable. */
-export const protocolVersion = 5;
+export const protocolVersion = 7;
 export interface Display {
   id: string;
   x: number;
@@ -162,4 +162,120 @@ function annotationText(value: unknown, limit: number, name: string) {
     .trim();
   if (Array.from(text).length > limit) throw new Error(`${name} is limited to ${limit} characters`);
   return text;
+}
+
+export const keyNames: Record<string, number> = {
+  ctrl: 0xffe3,
+  control: 0xffe3,
+  shift: 0xffe1,
+  alt: 0xffe9,
+  super: 0xffeb,
+  enter: 0xff0d,
+  return: 0xff0d,
+  escape: 0xff1b,
+  esc: 0xff1b,
+  tab: 0xff09,
+  space: 0x20,
+  backspace: 0xff08,
+  delete: 0xffff,
+  up: 0xff52,
+  down: 0xff54,
+  left: 0xff51,
+  right: 0xff53,
+  home: 0xff50,
+  end: 0xff57,
+  pageup: 0xff55,
+  arrowup: 0xff52,
+  arrowdown: 0xff54,
+  arrowleft: 0xff51,
+  arrowright: 0xff53,
+  meta: 0xffeb,
+  cmd: 0xffeb,
+  win: 0xffeb,
+  pgup: 0xff55,
+  pgdn: 0xff56,
+  del: 0xffff,
+  pagedown: 0xff56,
+};
+for (const c of 'abcdefghijklmnopqrstuvwxyz0123456789') keyNames[c] = c.charCodeAt(0);
+for (let i = 1; i <= 12; i++) keyNames[`f${i}`] = 0xffbd + i;
+export type ComputerAction =
+  | { type: 'click' | 'double_click' | 'move'; x: number; y: number; button: 'left' | 'right' | 'middle' }
+  | { type: 'drag'; path: Point[] }
+  | { type: 'type'; text: string }
+  | { type: 'keypress'; keys: string[] }
+  | { type: 'scroll'; x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; amount: number }
+  | { type: 'wait'; ms: number };
+export interface ComputerBatch {
+  observationId: string;
+  displayId: string;
+  actions: ComputerAction[];
+}
+export function computerBatch(value: unknown, observation?: Observation): ComputerBatch {
+  const v = record(value);
+  const o = assertObservation(v, observation);
+  if (!Array.isArray(v.actions) || !v.actions.length || v.actions.length > 12)
+    throw new Error('Use 1–12 actions per batch');
+  const point = (p: Record<string, unknown>) => ({ x: finite(p.x, 0, o.width - 1), y: finite(p.y, 0, o.height - 1) });
+  let textLength = 0;
+  let waitMs = 0;
+  const actions: ComputerAction[] = v.actions.map((raw) => {
+    const a = record(raw);
+    if (a.type === 'click' || a.type === 'double_click' || a.type === 'move') {
+      const button = a.button ?? 'left';
+      if (!['left', 'right', 'middle'].includes(String(button))) throw new Error('Invalid pointer button');
+      return { type: a.type, ...point(a), button: button as 'left' | 'right' | 'middle' };
+    }
+    if (a.type === 'drag') {
+      if (!Array.isArray(a.path) || a.path.length < 2 || a.path.length > 60) throw new Error('Use 2–60 drag points');
+      return { type: a.type, path: a.path.map((p) => point(record(p))) };
+    }
+    if (a.type === 'type') {
+      // Keymap-independent Unicode entry requires a separate backend. Never silently drop characters.
+      if (typeof a.text !== 'string' || !a.text.length || /[^\x20-\x7e\n\t]/.test(a.text))
+        throw new Error('v0 typing supports printable ASCII, tabs, and newlines');
+      textLength += a.text.length;
+      return { type: a.type, text: a.text };
+    }
+    if (a.type === 'keypress') {
+      if (
+        !Array.isArray(a.keys) ||
+        !a.keys.length ||
+        a.keys.length > 5 ||
+        a.keys.some((k) => typeof k !== 'string' || !Object.hasOwn(keyNames, k.toLowerCase()))
+      )
+        throw new Error('Unsupported key combination');
+      return { type: a.type, keys: [...new Set(a.keys.map((k) => String(k).toLowerCase()))] };
+    }
+    if (a.type === 'scroll') {
+      if (!['up', 'down', 'left', 'right'].includes(String(a.direction))) throw new Error('Invalid scroll direction');
+      return {
+        type: a.type,
+        ...point(a),
+        direction: a.direction as 'up' | 'down' | 'left' | 'right',
+        amount: Math.round(finite(a.amount, 1, 10)),
+      };
+    }
+    if (a.type === 'wait') {
+      const ms = finite(a.ms, 0, 2000);
+      waitMs += ms;
+      return { type: a.type, ms };
+    }
+    throw new Error('Unknown computer action');
+  });
+  if (textLength > 500 || waitMs > 3000)
+    throw new Error('Batch too long: use at most 500 characters and 3 seconds of waits');
+  return { observationId: o.id, displayId: o.display.id, actions };
+}
+export function nativeBatch(batch: ComputerBatch, observed: Observation, native: Observation): ComputerBatch {
+  const point = (p: Point) => ({
+    x: (p.x * native.width) / observed.width,
+    y: (p.y * native.height) / observed.height,
+  });
+  return {
+    ...batch,
+    actions: batch.actions.map((a) =>
+      a.type === 'drag' ? { ...a, path: a.path.map(point) } : 'x' in a ? { ...a, ...point(a) } : a,
+    ),
+  };
 }

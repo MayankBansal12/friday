@@ -724,6 +724,7 @@ export default function App() {
   const [replayPending, setReplayPending] = useState(false);
   const replayGenerationRef = useRef(0);
   const [guiding, setGuiding] = useState(false);
+  const [controlling, setControlling] = useState(false);
   const interruptOnlyRef = useRef(false);
   const stopFridayRef = useRef<(() => void) | undefined>(undefined);
   const requestEpochRef = useRef(0);
@@ -1169,6 +1170,21 @@ export default function App() {
   }, []);
 
   useEffect(() => window.buddy.onExpanded(setExpanded), []);
+  useEffect(() => {
+    let disposed = false;
+    let received = false;
+    const remove = window.buddy.onControlling((active) => {
+      received = true;
+      setControlling(active);
+    });
+    void window.buddy.controlling().then((active) => {
+      if (!disposed && !received) setControlling(active);
+    });
+    return () => {
+      disposed = true;
+      remove();
+    };
+  }, []);
 
   const refreshDesktop = useCallback(
     () =>
@@ -1504,6 +1520,7 @@ export default function App() {
         listening={listenState}
         speaking={speaking}
         guiding={guiding}
+        controlling={controlling}
         level={voiceLevel}
         heard={heard}
         error={actionError}

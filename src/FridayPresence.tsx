@@ -61,6 +61,7 @@ interface Props {
   listening: ListeningState;
   speaking: boolean;
   guiding: boolean;
+  controlling: boolean;
   level: number;
   heard: string;
   error?: string;
@@ -136,9 +137,11 @@ export function FridayPresence(props: Props) {
   const important = Boolean(
     approvals.length || ((props.error || task?.error || state?.presentation.expanded) && dismissed !== contentKey),
   );
-  const engaged = Boolean(busy || speaking || props.guiding || listeningToRequest || typing || important || selected);
+  const engaged = Boolean(
+    props.controlling || busy || speaking || props.guiding || listeningToRequest || typing || important || selected,
+  );
   const background = !engaged && visible.length > 0;
-  const expanded = !background && hovered;
+  const expanded = !props.controlling && !background && hovered;
   const resting = !engaged && !expanded;
   const surface: SurfaceLayout = background
     ? hovered
@@ -149,27 +152,29 @@ export function FridayPresence(props: Props) {
       : engaged
         ? 'bar'
         : 'quiet';
-  const status = typing
-    ? 'Type your request…'
-    : approvals.length
-      ? 'Needs your approval'
-      : props.guiding
-        ? 'Guiding you'
-        : speaking
-          ? 'Speaking…'
-          : listening === 'starting'
-            ? 'Opening microphone…'
-            : listening === 'transcribing'
-              ? 'One moment…'
-              : busy
-                ? 'Working on it…'
-                : listening === 'armed'
-                  ? 'Listening…'
-                  : listening === 'error'
-                    ? 'Check your microphone'
-                    : !props.micEnabled
-                      ? 'Microphone off'
-                      : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+  const status = props.controlling
+    ? 'Controlling your computer · Esc twice to stop'
+    : typing
+      ? 'Type your request…'
+      : approvals.length
+        ? 'Needs your approval'
+        : props.guiding
+          ? 'Guiding you'
+          : speaking
+            ? 'Speaking…'
+            : listening === 'starting'
+              ? 'Opening microphone…'
+              : listening === 'transcribing'
+                ? 'One moment…'
+                : busy
+                  ? 'Working on it…'
+                  : listening === 'armed'
+                    ? 'Listening…'
+                    : listening === 'error'
+                      ? 'Check your microphone'
+                      : !props.micEnabled
+                        ? 'Microphone off'
+                        : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);
@@ -233,7 +238,7 @@ export function FridayPresence(props: Props) {
       observer.disconnect();
       syncSurface.current = () => {};
     };
-  }, [surface, background, expanded, resting, reducedMotion]);
+  }, [surface, background, expanded, resting, reducedMotion, props.controlling]);
   useEffect(
     () => () => {
       if (leaveTimer.current) clearTimeout(leaveTimer.current);

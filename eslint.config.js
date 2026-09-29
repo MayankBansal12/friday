@@ -15,7 +15,7 @@ export default tseslint.config(
   },
   {
     files: ['native/gnome-extension/*.js', 'tests/native/*.js'],
-    languageOptions: { globals: { global: 'readonly', TextDecoder: 'readonly' } },
+    languageOptions: { globals: { global: 'readonly', console: 'readonly', TextDecoder: 'readonly' } },
   },
   { files: ['electron/**/*.ts', 'tests/**/*.ts', 'tests/native/*.mjs'], languageOptions: { globals: globals.node } },
 );

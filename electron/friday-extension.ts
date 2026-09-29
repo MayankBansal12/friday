@@ -79,7 +79,7 @@ async function bridge(path: string, body?: unknown, signal?: AbortSignal) {
   const token = process.env.LINUX_BUDDY_RUNTIME_TOKEN;
   if (!runtime || !token) throw new Error('Friday runtime is unavailable');
   const url = `${runtime}${path.startsWith('/tools/') ? path : `/desktop${path}`}`;
-  const timeout = AbortSignal.timeout(90_000);
+  const timeout = AbortSignal.timeout(path === '/control' ? 330_000 : 90_000);
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -225,6 +225,23 @@ export default function fridayExtension(pi: ExtensionAPI) {
     { expanded: { type: 'boolean' } },
     ['expanded'],
   );
+
+  pi.registerTool({
+    name: 'desktop_control',
+    label: 'Use the computer',
+    description:
+      'Complete a bounded GUI task using the signed-in Codex computer operator. Runs inside this parent screen session, supports drawing and progress speech, and returns a verified outcome or a question. Prefer direct file/shell tools when suitable. Only use when the user asks you to act; use observe/draw for guidance. Never send consequential actions as pre-approved. The user can press Escape twice to stop. Physical input is blocked between action bursts, not during injection.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { goal: { type: 'string', minLength: 1, maxLength: 8000 } },
+      required: ['goal'],
+    },
+    async execute(_id, params, signal) {
+      const result = await bridge('/control', params, signal);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  });
 
   pi.registerTool({
     name: 'desktop_observe',

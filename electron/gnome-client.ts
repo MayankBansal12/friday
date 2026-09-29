@@ -21,7 +21,7 @@ export class GnomeClient implements NativeDesktop {
     const child = spawn('python3', ['-u', this.script], {
       env: {
         ...process.env,
-        XDG_RUNTIME_DIR: '/run/user/1000',
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/run/user/1000',
         DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS || 'unix:path=/run/user/1000/bus',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -44,7 +44,13 @@ export class GnomeClient implements NativeDesktop {
             continue;
           }
           if (result.event === 'stopped' && typeof result.runId === 'string') {
-            this.onStopped?.(result.runId, new DesktopError('Desktop session ended', String(result.code)));
+            this.onStopped?.(
+              result.runId,
+              new DesktopError(
+                typeof result.error === 'string' ? result.error : 'Desktop session ended',
+                String(result.code),
+              ),
+            );
             continue;
           }
           if (result.fatal) {

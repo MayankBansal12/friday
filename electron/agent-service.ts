@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 import { parentPrompt, childPrompt } from './agent-prompts.js';
-import { desktopInterruption } from './desktop-status.js';
+import { desktopInterruption, type DesktopStatus } from './desktop-status.js';
 import { TaskStore } from './store.js';
 import type { AgentStep, BuddySettings, FridayState, PresentationState, SessionRecord, TaskRecord } from './types.js';
 import { validateSpeech, speechRecovery } from './speech-policy.js';
@@ -14,7 +14,7 @@ import { validSettings } from './validation.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},desktop_observe,desktop_draw,desktop_clear,speak,show_text,set_presentation,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions`;
+const parentTools = `${fileTools},desktop_observe,desktop_draw,desktop_clear,desktop_control,speak,show_text,set_presentation,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -98,6 +98,7 @@ export class AgentService extends EventEmitter {
   private actionGeneration = 0;
   private presentation: PresentationState = { text: '', expanded: false, speaking: false };
   private speechGeneration = 0;
+  private progressSpeaking = false;
   private shownTextTask?: string;
   private silencedTaskId?: string;
   // One aggregate confirmation boundary per parent request, including concurrent tool calls.
@@ -117,6 +118,7 @@ export class AgentService extends EventEmitter {
       url: string;
       beginRun?(id: string): string;
       revokeRun?(id: string, preserveDrawing?: boolean): void;
+      status?(): Promise<DesktopStatus>;
     },
     private readonly options: AgentServiceOptions = {},
   ) {
@@ -378,6 +380,36 @@ export class AgentService extends EventEmitter {
     this.presentation.speaking = false;
     this.publish();
   }
+  controlProgress(id: string, text: string, speech?: string) {
+    const worker = this.workers.get(this.parentId);
+    const task = worker?.task;
+    if (!task || task.id !== id || terminal.has(task.status)) return;
+    this.addStep(task, 'status', text, 'done');
+    if (speech) void this.speakProgress(task, speech);
+    this.changedDeferred(task);
+  }
+  private async speakProgress(task: TaskRecord, text: string) {
+    const decision = validateSpeech(text);
+    if (
+      !decision.ok ||
+      !this.options.speak ||
+      this.settings.autoSpeak === false ||
+      this.silencedTaskId === task.id ||
+      this.presentation.speaking ||
+      this.progressSpeaking
+    )
+      return;
+    // Optional progress must not replace reply text, replay audio, or active playback.
+    this.progressSpeaking = true;
+    try {
+      await this.options.speak(decision.text);
+    } catch (error) {
+      this.addStep(task, 'status', 'Progress speech unavailable', 'failed', String(error));
+      this.changedDeferred(task);
+    } finally {
+      this.progressSpeaking = false;
+    }
+  }
   async shutdown() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
@@ -464,6 +496,7 @@ export class AgentService extends EventEmitter {
       worker.toolSteps.clear();
       if (session.role === 'parent') worker.desktopToken = this.bridge.beginRun?.(task.id);
       await this.changed(task);
+      const desktop = session.role === 'parent' ? await this.desktopContext() : '';
       if (generation !== this.actionGeneration || terminal.has(task.status)) return structuredClone(task);
       const context =
         session.role === 'parent'
@@ -488,7 +521,7 @@ export class AgentService extends EventEmitter {
             },
           )}`
         : '';
-      this.send(worker, { id: randomUUID(), type: 'prompt', message: `${prompt}${context}${subject}` });
+      this.send(worker, { id: randomUUID(), type: 'prompt', message: `${prompt}${context}${subject}${desktop}` });
     } catch (error) {
       if (worker) await this.fail(worker, error instanceof Error ? error.message : String(error));
       else {
@@ -499,6 +532,48 @@ export class AgentService extends EventEmitter {
       }
     }
     return structuredClone(task);
+  }
+  private async desktopContext() {
+    if (!this.bridge.status) return '';
+    let timer: NodeJS.Timeout | undefined;
+    let status: DesktopStatus | undefined;
+    try {
+      status = await Promise.race([
+        this.bridge.status().catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), 1200);
+        }),
+      ]);
+    } catch {
+      // A readiness check must not prevent ordinary conversation.
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    const interrupted = this.tasks.find(
+      (task) =>
+        task.conversationId === this.parentId &&
+        task.role === 'parent' &&
+        task.status === 'failed' &&
+        task.error &&
+        Date.now() - task.updatedAt < 3600_000,
+    );
+    return `\n\n[Friday desktop status — checked for this request, not a screenshot. Use this instead of old setup errors in conversation history. If ready, attempt the requested desktop tool; Codex/input can still report their own errors. If unknown, do not claim a reinstall or sign-in is required. Missing historical tool results mean the request was interrupted, not that control is unsupported. Use the last interrupted request below to explain missing results; retry when the user asks and current readiness permits.]\n${JSON.stringify(
+      {
+        checkedAt: Date.now(),
+        ready: status?.ready ?? 'unknown',
+        ...(status?.protocolVersion !== undefined ? { protocolVersion: status.protocolVersion } : {}),
+        ...(status?.error ? { error: status.error.slice(0, 1000) } : {}),
+        ...(interrupted
+          ? {
+              lastInterruptedRequest: {
+                id: interrupted.id,
+                at: interrupted.updatedAt,
+                error: interrupted.error!.slice(0, 1000),
+              },
+            }
+          : {}),
+      },
+    )}`;
   }
   private launch(session: SessionRecord) {
     const token = randomBytes(32).toString('hex');
@@ -1063,12 +1138,16 @@ export class AgentService extends EventEmitter {
         if (worker.session.role !== 'parent' || !worker.desktopToken)
           throw new Error('Only the parent can use the screen');
         const route = request.url.slice('/desktop'.length);
-        if (!['/screenshot', '/draw', '/clear'].includes(route)) throw new Error('Unknown desktop route');
+        if (!['/screenshot', '/draw', '/clear', '/control'].includes(route)) throw new Error('Unknown desktop route');
+        const disconnect = new AbortController();
+        response.on('close', () => {
+          if (!response.writableEnded) disconnect.abort();
+        });
         const result = await fetch(`${this.bridge.url}${route}`, {
           method: request.method,
           headers: { authorization: `Bearer ${worker.desktopToken}`, 'content-type': 'application/json' },
           ...(request.method === 'POST' ? { body: JSON.stringify(data) } : {}),
-          signal: AbortSignal.timeout(90_000),
+          signal: AbortSignal.any([disconnect.signal, AbortSignal.timeout(route === '/control' ? 330_000 : 90_000)]),
         });
         return reply(result.status, await result.json());
       }

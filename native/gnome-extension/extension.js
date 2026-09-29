@@ -5,9 +5,10 @@ import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
 import { paintAnnotations } from './drawing.js';
+import { ComputerControl } from './control.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import { drawing, identifier, protocolVersion, record } from './protocol.js';
+import { computerBatch, drawing, identifier, protocolVersion, record } from './protocol.js';
 
 const IFACE = `<node><interface name="dev.Friday.Desktop1">
 <method name="Command"><arg type="s" direction="in" name="token"/><arg type="s" direction="in" name="command"/><arg type="s" direction="out" name="result"/></method>
@@ -44,8 +45,11 @@ export default class FridayDesktop extends Extension {
       this._invalidate();
       this._watchWindow();
     });
-    connect(global.display, 'accelerator-activated', (_display, actionId) => {
-      if (actionId === this._escapeAction) this._stop(true, 'escape');
+    connect(global.display, 'accelerator-activated', (_display, actionId, _device, time) => {
+      if (actionId === this._escapeAction) {
+        if (this._control) this._control.escape(time);
+        else this._stop(true, 'escape');
+      }
     });
     this._watchWindow();
     connect(global.workspace_manager, 'active-workspace-changed', () => this._invalidate());
@@ -75,6 +79,7 @@ export default class FridayDesktop extends Extension {
         (this._observation || this._items.size) &&
         !this._busy &&
         !this._mark &&
+        !this._control &&
         Date.now() > (this._ignorePointerUntil ?? 0) &&
         pointer[2] !== this._lastPointer[2]
       )
@@ -82,7 +87,7 @@ export default class FridayDesktop extends Extension {
       this._lastPointer = pointer;
       return GLib.SOURCE_CONTINUE;
     });
-    this._watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+    this._watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
       if (this._lease && Date.now() > this._deadline) this._stop(true, 'lease_expired');
       if (this._expires && Date.now() > this._expires) this._clear();
       return GLib.SOURCE_CONTINUE;
@@ -197,6 +202,9 @@ export default class FridayDesktop extends Extension {
         marking: Boolean(this._mark),
         lastMark: this._lastMark ?? null,
         active: Boolean(this._lease),
+        controlling: Boolean(this._control),
+        inputBlocked: this._control?.shield.visible ?? false,
+        inputState: { keys: this._control?.keys.size ?? 0, buttons: this._control?.buttons.size ?? 0 },
       };
     if (c.op === 'begin') {
       if (this._busy) throw new Error('Previous desktop operation is stopping; retry shortly');
@@ -226,8 +234,90 @@ export default class FridayDesktop extends Extension {
     }
     this._check(c, sender);
     if (c.op === 'heartbeat') {
-      this._deadline = Date.now() + 15000;
+      this._deadline = Date.now() + (this._control ? 3000 : 15000);
       return { alive: true };
+    }
+    if (c.op === 'control_begin') {
+      if (this._busy || this._mark || this._control) throw new Error('Desktop is already busy');
+      if (Main.modalCount) throw new Error('Close the system dialog before computer control');
+      try {
+        this._control = new ComputerControl(this);
+        this._companionPid = Number.isInteger(c.companionPid) ? c.companionPid : null;
+        this._control.excludeCompanion();
+        // Voice/typed requests can leave the companion focused. Restore an app
+        // before the first observation; never raise/focus the pill mid-action.
+        if (this._companionPid && global.display.focus_window?.get_pid() === this._companionPid) {
+          const target = global.display
+            .get_tab_list(Meta.TabList.NORMAL, global.workspace_manager.get_active_workspace())
+            .find((win) => win.get_pid() !== this._companionPid && !win.minimized);
+          if (!target) throw new Error('Open the app you want Friday to control first');
+          target.activate(global.get_current_time());
+          const deadline = Date.now() + 300;
+          while (
+            (!global.display.focus_window || global.display.focus_window.get_pid() === this._companionPid) &&
+            Date.now() < deadline
+          ) {
+            await this._wait(20);
+            this._check(c, sender);
+          }
+          if (!global.display.focus_window || global.display.focus_window.get_pid() === this._companionPid)
+            throw new Error('Could not focus the target app; try again');
+          this._control.block();
+        }
+        this._deadline = Date.now() + 3000;
+        this._check(c, sender);
+        return { controlling: true, inputPolicy: 'blocked-between-actions' };
+      } catch (error) {
+        this._stop(true, error.code || 'control_failed', error.message?.slice(0, 1000));
+        throw error;
+      }
+    }
+    if (c.op === 'control_end') {
+      if (this._busy) throw new Error('Stop the active action before ending computer control');
+      this._endControl();
+      this._deadline = Date.now() + 15000;
+      return { controlling: false };
+    }
+    if (c.op === 'act') {
+      if (!this._control || this._busy) throw new Error('Computer control is not ready');
+      let batch;
+      try {
+        if (!this._observation || this._observation.scene !== this._scene || this._observation.focus !== this._focus())
+          throw new Error('Observe again: the focused app or desktop changed');
+        batch = computerBatch(c, this._observation);
+      } catch (error) {
+        throw Object.assign(error, { code: 'invalid_action' });
+      }
+      const control = this._control;
+      this._busy = true;
+      this._invalidate();
+      const started = Date.now();
+      try {
+        const result = await control.execute(batch.actions, () => {
+          this._check(c, sender);
+          if (Main.modalCount) throw new Error('System dialog opened; computer control stopped');
+        });
+        await this._wait(100);
+        this._check(c, sender);
+        return { executed: batch.actions.length, ...result, actionMs: Date.now() - started };
+      } catch (error) {
+        const failure = Object.assign(
+          new Error(
+            `Control action ${(control.actionIndex ?? 0) + 1} (${control.actionType ?? 'unknown'}): ${error.message}`.slice(
+              0,
+              1000,
+            ),
+          ),
+          { code: error.code || 'control_failed' },
+        );
+        // A user stop may already have revoked this lease while execute awaited.
+        if (this._lease === c.runId) this._stop(true, failure.code, failure.message);
+        throw failure;
+      } finally {
+        control.release();
+        this._busy = false;
+        this._lastPointer = global.get_pointer();
+      }
     }
     if (c.op === 'clear') {
       if (c.forgetMark) this._lastMark = null;
@@ -236,7 +326,7 @@ export default class FridayDesktop extends Extension {
     }
     if (c.op === 'observe') return this._observe(c, sender);
     if (c.op === 'mark') {
-      if (this._busy) throw new Error('Wait for the current desktop operation');
+      if (this._busy || this._control) throw new Error('Wait for the current desktop operation');
       this._startMark();
       return { marking: true };
     }
@@ -287,15 +377,42 @@ export default class FridayDesktop extends Extension {
   }
 
   async _observe(c, sender) {
+    this._control?.excludeCompanion();
     if (this._busy || this._mark) throw new Error('Finish the current desktop operation first');
     this._busy = true;
-    this._clear();
+    // Retain guidance across observations when the scene is unchanged. Hide only
+    // for Shell's synchronous offscreen paint, not the asynchronous PNG encode.
+    const areaVisible = this._area.visible;
+    // Exclude the app pill only from the offscreen paint, keeping its client
+    // mapped so captures do not change focus or blink the window.
+    const companion =
+      this._control && this._companionPid
+        ? global
+            .get_window_actors()
+            .find(
+              (actor) =>
+                actor.meta_window.get_pid() === this._companionPid &&
+                /linux.buddy|friday|electron/i.test(
+                  actor.meta_window.get_wm_class() || actor.meta_window.get_title() || '',
+                ),
+            )
+        : null;
+    const companionVisible = companion?.visible;
     const scene = this._scene;
     const focus = this._focus();
     const stream = Gio.MemoryOutputStream.new_resizable();
     try {
       const shooter = new Shell.Screenshot();
-      await shooter.screenshot(false, stream);
+      this._area.hide();
+      companion?.hide();
+      let capture;
+      try {
+        capture = shooter.screenshot(false, stream);
+      } finally {
+        if (areaVisible) this._area.show();
+        if (companionVisible) companion.show();
+      }
+      await capture;
       stream.close(null);
       this._check(c, sender);
       if (scene !== this._scene || focus !== this._focus())
@@ -338,14 +455,15 @@ export default class FridayDesktop extends Extension {
     });
   }
 
-  _stop(clear = true, reason = 'user_stop') {
+  _stop(clear = true, reason = 'user_stop', error) {
+    this._endControl();
     const runId = this._lease;
     if (runId && !['completed', 'superseded'].includes(reason))
       this._dbus?.emit_signal(
         'Event',
-        new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason })]),
+        new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason, error })]),
       );
-    if (this._lease) this._lastStop = { runId: this._lease, reason, at: Date.now() };
+    if (this._lease) this._lastStop = { runId: this._lease, reason, error, at: Date.now() };
     this._lease = null;
     this._observation = null;
     if (this._ownerWatch) Gio.bus_unwatch_name(this._ownerWatch);
@@ -359,6 +477,14 @@ export default class FridayDesktop extends Extension {
     }
     this._timers?.clear();
     if (!this._items?.size) this._disarmEscape();
+  }
+
+  _endControl() {
+    if (!this._control) return;
+    const control = this._control;
+    this._control = null;
+    this._companionPid = null;
+    control.end();
   }
 
   _syncCompositing() {
@@ -488,6 +614,7 @@ export default class FridayDesktop extends Extension {
   }
 
   _event(event) {
+    if (this._control) return this._control.event(event);
     const type = event.type();
     if (
       type === Clutter.EventType.KEY_PRESS &&

@@ -44,7 +44,10 @@ class FakeChild extends EventEmitter {
   }
 }
 
-async function fixture(options: ConstructorParameters<typeof AgentService>[4] = {}) {
+async function fixture(
+  options: ConstructorParameters<typeof AgentService>[4] = {},
+  bridgeOptions: Partial<ConstructorParameters<typeof AgentService>[3]> = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'buddy-agent-'));
   dirs.push(dir);
   const children: FakeChild[] = [];
@@ -59,7 +62,7 @@ async function fixture(options: ConstructorParameters<typeof AgentService>[4] = 
     new TaskStore(join(dir, 'state.json')),
     settings,
     '/tmp/extension.mjs',
-    { url: 'http://127.0.0.1:1', beginRun: () => 'token' },
+    { url: 'http://127.0.0.1:1', beginRun: () => 'token', ...bridgeOptions },
     { spawn: spawnMock, terminateGraceMs: 100, persistDebounceMs: 5, ...options },
   );
   services.push(service);
@@ -278,7 +281,147 @@ describe('AgentService lifecycle', () => {
   });
 });
 
+describe('fresh desktop readiness', () => {
+  it('explains an interrupted request when its pending tool result was lost', async () => {
+    const { service, children } = await fixture({}, { status: async () => ({ ready: true }) });
+    const first = await service.submit('Click the test button');
+    await service.desktopInterrupted(first.id, new DesktopError('Desktop session ended', 'lease_expired'));
+    await service.submit('Why did that return no result?');
+    const sent = JSON.parse(children[1].stdin.read().toString()).message;
+    expect(sent).toContain('Missing historical tool results mean the request was interrupted');
+    expect(sent).toContain('lastInterruptedRequest');
+    expect(sent).toContain('desktop connection timed out');
+    expect(sent).toContain('"ready":true');
+  });
+  it('refreshes a recovered extension in the same saved parent conversation', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce({ ready: false, protocolVersion: 5, error: 'Sign out and back in.' })
+      .mockResolvedValueOnce({ ready: true, protocolVersion: 6 });
+    const { service, children } = await fixture({}, { status });
+    const first = await service.submit('Open the app');
+    const previous = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(previous).toContain('"ready":false');
+    expect(previous).toContain('Sign out and back in.');
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Please sign in again.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    const retry = await service.submit('I signed back in. Check again.');
+    const current = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(retry.conversationId).toBe(first.conversationId);
+    expect(children).toHaveLength(1);
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(current).toContain('"ready":true');
+    expect(current).toContain('"protocolVersion":6');
+    expect(current).not.toContain('Sign out and back in.');
+  });
+  it('does not check or send desktop readiness to background children', async () => {
+    const status = vi.fn(async () => ({ ready: true }));
+    const { service, children } = await fixture({}, { status });
+    await service.startChild('Research', 'Read project files');
+    expect(status).not.toHaveBeenCalled();
+    expect(children[0].stdin.read().toString()).not.toContain('Friday desktop status');
+  });
+  it.each(['failure', 'timeout'])('keeps conversation available after a status %s', async (mode) => {
+    const status = vi.fn(() =>
+      mode === 'timeout' ? new Promise<never>(() => {}) : Promise.reject(new Error('Disconnected')),
+    );
+    const { service, children } = await fixture({}, { status });
+    await service.submit('Hello');
+    const sent = JSON.parse(children[0].stdin.read().toString()).message;
+    expect(sent).toContain('"ready":"unknown"');
+    expect(sent).not.toContain('"ready":false');
+    expect(status).toHaveBeenCalledOnce();
+  });
+  it('does not send a queued prompt when Stop arrives during the readiness check', async () => {
+    let finish!: (value: { ready: boolean }) => void;
+    const status = vi.fn(
+      () =>
+        new Promise<{ ready: boolean }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { service, children } = await fixture({}, { status });
+    const pending = service.submit('Open the app');
+    await vi.waitFor(() => expect(status).toHaveBeenCalledOnce());
+    await service.stop();
+    finish({ ready: true });
+    expect((await pending).status).toBe('cancelled');
+    expect(children[0].stdin.read()?.toString()).not.toContain('"type":"prompt"');
+  });
+});
+
 describe('parent and child runtime boundary', () => {
+  it('keeps the final spoken answer after non-blocking computer progress', async () => {
+    const speak = vi.fn(async () => {});
+    const { service, children } = await fixture({ speak });
+    const task = await service.submit('Click the button');
+    service.controlProgress(task.id, 'Clicking', 'Opening it now.');
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Opened and verified.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    expect(speak).toHaveBeenCalledWith('Opening it now.');
+    expect(speak).toHaveBeenCalledWith('Opened and verified.');
+  });
+  it('keeps progress out of reply presentation and Read aloud when the final reply stays silent', async () => {
+    const speak = vi.fn(async () => {});
+    const { service, children } = await fixture({ speak });
+    const task = await service.submit('Click the button');
+    const presentation = { ...service.state().presentation };
+    service.controlProgress(task.id, 'Opening the app', 'Opening it now.');
+    expect(service.state().presentation).toEqual(presentation);
+    expect(service.list()[0].speechText).toBeUndefined();
+    expect(service.list()[0].spoken).toBeFalsy();
+    const long = Array(80).fill('detail').join(' ') + '.';
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: long }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    expect(speak).toHaveBeenCalledExactlyOnceWith('Opening it now.');
+    expect(() => service.readAloud(task.id)).toThrow('on screen');
+  });
+  it.each(['invalid', 'muted', 'silenced'])('drops %s progress speech without changing reply state', async (mode) => {
+    const speak = vi.fn(async () => {});
+    const { service } = await fixture({ speak });
+    const task = await service.submit('Click the button');
+    if (mode === 'muted') await service.updateSettings({ autoSpeak: false });
+    if (mode === 'silenced') service.silence();
+    const presentation = { ...service.state().presentation };
+    service.controlProgress(
+      task.id,
+      'Opening the app',
+      mode === 'invalid' ? Array(80).fill('detail').join(' ') : 'Opening it now.',
+    );
+    await settle();
+    expect(speak).not.toHaveBeenCalled();
+    expect(service.state().presentation).toEqual(presentation);
+    expect(service.list()[0].speechIssue).toBeUndefined();
+    expect(service.list()[0].speechText).toBeUndefined();
+  });
+  it('drops progress while an answer is playing and while previous progress is playing', async () => {
+    let finish!: () => void;
+    const speak = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const silence = vi.fn();
+    const { service, tool } = await fixture({ speak, silence });
+    const task = await service.submit('Click the button');
+    await tool(0, '/tools/speak', { text: 'I can open the app.' });
+    const silenceCalls = silence.mock.calls.length;
+    service.controlProgress(task.id, 'Working', 'Opening it now.');
+    expect(speak).toHaveBeenCalledTimes(1);
+    finish();
+    await settle();
+    service.controlProgress(task.id, 'Working', 'Opening it now.');
+    service.controlProgress(task.id, 'Still working', 'Checking the app.');
+    expect(speak).toHaveBeenCalledTimes(2);
+    expect(silence).toHaveBeenCalledTimes(silenceCalls);
+    expect(service.list()[0].speechText).toBe('I can open the app.');
+    finish();
+    await settle();
+  });
   it('rejects child UI, screen access and delegation even with a valid token', async () => {
     const { service, tool } = await fixture();
     await service.submit('Delegate');
@@ -289,6 +432,7 @@ describe('parent and child runtime boundary', () => {
       '/tools/session_start',
       '/tools/session_list',
       '/desktop/screenshot',
+      '/desktop/control',
     ]) {
       expect((await tool(1, path, { text: 'Hi', title: 'Nested', prompt: 'Run' })).status).toBe(400);
     }

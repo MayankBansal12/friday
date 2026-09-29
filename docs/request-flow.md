@@ -9,6 +9,10 @@ flowchart TD
     typedRequest["Optional typed request"] --> parentSession
     parentSession --> directReply["Reply or guide directly"]
     directReply --> presentation["Speak · show text · draw on screen"]
+    parentSession --> control["desktop_control · same desktop lease"]
+    control --> codex["Signed-in Codex · ephemeral GUI task"]
+    codex <-->|"Screenshot · bounded input · drawing"| native["GNOME desktop integration"]
+    control --> presentation
     parentSession --> backgroundChild["Start or resume a background child"]
     backgroundChild --> savedResult["Save progress, result, or question"]
     savedResult --> taskBadge["Quiet task badge and panel update"]
@@ -22,21 +26,23 @@ flowchart TD
 - **Children:** up to three active or waiting tasks, each with its own Pi process, session file, title, parent ID, and status. Appropriate for independent research, file work, or calculations with a clear deliverable. They use file/shell tools and report progress/results to the registry; only the parent has presentation/session-management tools.
 - **New requests:** interrupt an unfinished parent turn, then resume the same parent session. Children continue. This is not a queue of deferred parent requests or completion announcements.
 - **Child completion:** ends its process and preserves its session file. A small badge signals an update. The parent receives IDs/titles/statuses in a compact registry on its next turn and can read details. A completion during an existing parent turn does not trigger a second foreground turn.
-- **Child questions:** `task_report(needs_input)` stores a question. The parent can read it, ask you, and use `session_update` to resume that same child. Consequential shell approvals use explicit UI controls; the parent cannot approve on your behalf.
+- **Child questions:** `task_report(needs_input)` stores a question. The parent can read it, ask you, and use `session_actions` to resume that same child. Consequential shell approvals use explicit UI controls; the parent cannot approve on your behalf.
 - **History:** the active parent retains Pi's normal conversation context and automatic compaction. Other history is searched/read dynamically via tools, without a separate memory model. Search currently uses case-insensitive text matching, not semantic search. Reads are paginated and omit reasoning/image blocks.
 - **Restart:** the parent ID and task registry survive app restarts. Interrupted children are labeled accordingly and require an explicit resume. No invisible restart of old work.
 
 ## Parent tools
 
-| Tool                                                 | Purpose                                                     |
-| ---------------------------------------------------- | ----------------------------------------------------------- |
-| `session_start`                                      | Start a child and immediately return its ID                 |
-| `session_list`                                       | Inspect saved sessions and statuses                         |
-| `session_read` / `session_search`                    | Fetch a result or relevant saved history                    |
-| `session_update` / `session_stop`                    | Resume, redirect, or stop a child                           |
-| `desktop_observe` / `desktop_draw` / `desktop_clear` | Guide directly on the current screen                        |
-| `speak`                                              | Start short local speech; playback does not block the model |
-| `show_text` / `set_presentation`                     | Store details for the hover panel                           |
+| Tool                                                 | Purpose                                                              |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `session_actions`                                    | Start, update or stop background tasks with one spoken confirmation  |
+| `session_start`                                      | Start a child and immediately return its ID                          |
+| `session_list`                                       | Inspect saved sessions and statuses                                  |
+| `session_read` / `session_search`                    | Fetch a result or relevant saved history                             |
+| `session_update` / `session_stop`                    | Resume, redirect, or stop a child                                    |
+| `desktop_observe` / `desktop_draw` / `desktop_clear` | Guide directly on the current screen                                 |
+| `desktop_control`                                    | Complete a short GUI task with Codex, returning a result or question |
+| `speak`                                              | Start short local speech; playback does not block the model          |
+| `show_text` / `set_presentation`                     | Show details or expand/collapse Friday                               |
 
 The host enforces tool ownership with a per-process token and an active-turn check. Children have `task_report`, file tools, and shell tools. Shell execution is still under the user's account with the existing consequential-command check, not an OS sandbox.
 
@@ -46,9 +52,12 @@ Only the parent speaks. `speak` starts espeak-ng immediately and a newer utteran
 
 Friday starts in active listening and returns to wake waiting after ten seconds without a request. The local Parakeet detector remains active at rest. “Hey Friday” opens listening, and a command can follow in the same utterance. “Friday stop” is an exact addressed interrupt handled before ordinary request classification. During work, playback, replay startup, or text editing, audio stays live for Stop only; other speech is discarded.
 
+During control, the existing Electron notch stays visible as a compact click-through bar showing Esc-twice instructions; GNOME excludes it from reactive picking and from the operator's screenshots. It returns to its normal status after input is released. Speech updates do not pause the operator. Activating Friday stops control before bringing its window forward. Guidance remains request-driven; only an active control task runs an observation/action loop.
+
+The Codex operator is a blocking parent tool, not another child session. It shares the native permission, validates bounded input against the latest screenshot, and refreshes the screen after each batch. It uses the existing Codex login and an ephemeral thread, disables inherited integrations/environment tools, and returns only summary/progress/timing data to the parent. A question releases input before the parent asks the user. The README documents time limits and the limits of GNOME input shielding.
 The notch's Stop cancels speech and all active parent/child tasks, revokes desktop access, clears drawings, and returns an enabled microphone to wake waiting. A submission generation fences requests queued before Stop; capture generations discard stale recognition. Explicit mic-off cancels automatic resumption. Replay holds stop-only listening until its host promise settles, and only one effect restarts follow-up listening.
 
-One Electron notch handles all foreground states and expands only on hover or keyboard focus. It is hidden only for screenshot capture and restored in a finally block without taking focus. GNOME draws annotations but has no separate caption box. Guidance starts only after a confirmed nonempty drawing, and ends on clear, Stop, failure, or native expiry/invalidation. Blank optional annotation titles are omitted before validation and native transport.
+Outside active computer control, one Electron notch handles foreground states and expands only on hover or keyboard focus. It is hidden only for screenshot capture and restored in a finally block without taking focus. GNOME draws annotations without a separate guidance caption box. Captures preserve existing valid drawings. Guidance starts only after a confirmed nonempty drawing, and ends on clear, Stop, failure, or native expiry/invalidation. Blank optional annotation titles are omitted before validation and native transport.
 
 ## Implementation and validation
 

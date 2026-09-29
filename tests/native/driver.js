@@ -29,6 +29,51 @@ export default class Driver extends Extension {
       const c = JSON.parse(raw);
       let result = {};
       if (c.op === 'ready') result = { ready: !Main.layoutManager._startingUp };
+      if (c.op === 'recordControlCapture') {
+        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj;
+        const observe = friday._observe;
+        friday._observe = async (...args) => {
+          const frame = await observe.apply(friday, args);
+          if (friday._control && !friday._testControlCaptured) {
+            friday._testControlCaptured = true;
+            GLib.file_set_contents(
+              GLib.build_filenamev([GLib.getenv('FRIDAY_TEST_STAGE'), 'ui-control-clean.png']),
+              GLib.base64_decode(frame.data),
+            );
+          }
+          return frame;
+        };
+      }
+      if (c.op === 'failControl') {
+        Main.extensionManager
+          .lookup('friday-desktop@linux-buddy.local')
+          .stateObj._stop(true, 'control_failed', 'Synthetic input delivery failure');
+      }
+      if (c.op === 'breakControlCleanup') {
+        const control = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj._control;
+        this.brokenControl = control;
+        control.release = () => {
+          throw new Error('Synthetic cleanup failure');
+        };
+      }
+      if (c.op === 'controlCleanup')
+        result = { imRestored: Main.inputMethod.notify_key_event === this.brokenControl.originalNotify };
+      if (c.op === 'controlPillPick') {
+        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj;
+        const shield = friday._control.shield;
+        const reactive = shield.reactive;
+        try {
+          shield.reactive = false;
+          let actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, c.x, c.y);
+          while (actor && !actor.meta_window) actor = actor.get_parent();
+          result = {
+            friday: actor?.meta_window?.get_title()?.startsWith('Friday —') ?? false,
+            keyboardBlocked: global.stage.get_key_focus() === shield,
+          };
+        } finally {
+          shield.reactive = reactive;
+        }
+      }
       if (c.op === 'displayEnvironment') {
         result = {};
         for (const key of ['DISPLAY', 'XAUTHORITY']) if (GLib.getenv(key)) result[key] = GLib.getenv(key);
@@ -49,9 +94,11 @@ export default class Driver extends Extension {
           .find((a) => a.meta_window.get_title() === 'Friday native smoke target');
         if (!target) throw new Error('No test target window');
         const { x, y, width, height } = target.meta_window.get_frame_rect();
+        const buffer = target.meta_window.get_buffer_rect();
         result = {
           items: [...friday._items.values()],
           frame: { x, y, width, height },
+          buffer: { x: buffer.x, y: buffer.y },
           fullscreen: target.meta_window.is_fullscreen(),
         };
       }
@@ -153,11 +200,6 @@ export default class Driver extends Extension {
       if (c.op === 'key') {
         this.keyboard.notify_keyval(GLib.get_monotonic_time(), c.key, Clutter.KeyState.PRESSED);
         this.keyboard.notify_keyval(GLib.get_monotonic_time(), c.key, Clutter.KeyState.RELEASED);
-      }
-      if (c.op === 'reveal') {
-        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
-        if (!friday?._replyButton) throw new Error('No companion reply button');
-        friday._replyButton.emit('clicked', 1);
       }
       invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(result)]));
     } catch (e) {

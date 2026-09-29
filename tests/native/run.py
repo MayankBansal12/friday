@@ -29,7 +29,7 @@ if '--inside' not in sys.argv:
     speaker.chmod(0o700)
     env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'], XDG_RUNTIME_DIR=str(runtime), XDG_DATA_HOME=str(stage / 'data'), XDG_CONFIG_HOME=str(stage / 'config'), XDG_CACHE_HOME=str(stage / 'cache'), FRIDAY_ISOLATED_TEST='1', FRIDAY_TEST_STAGE=str(stage), FRIDAY_TEST_RESULT=str(stage / 'clicked'), WAYLAND_DISPLAY='wayland-friday-smoke', NO_AT_BRIDGE='1')
     print('Native smoke artifacts:', stage, flush=True)
-    result = subprocess.run(['dbus-run-session', '--', sys.executable, __file__, '--inside', *[flag for flag in ['--agent', '--ui'] if flag in sys.argv]], env=env)
+    result = subprocess.run(['dbus-run-session', '--', sys.executable, __file__, '--inside', *[flag for flag in ['--agent', '--ui', '--computer'] if flag in sys.argv]], env=env)
     sys.exit(result.returncode)
 
 import gi
@@ -197,7 +197,7 @@ try:
             display_env = driver('displayEnvironment')
             assert display_env.get('DISPLAY'), 'Isolated GNOME did not provide an XWayland display'
             ui_env = dict(os.environ, **display_env)
-            ui = subprocess.Popen([str(executable), '--no-sandbox', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, env=ui_env, stdout=ui_log, stderr=ui_log)
+            ui = subprocess.Popen([str(executable), '--no-sandbox', '--ozone-platform=x11', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, env=ui_env, stdout=ui_log, stderr=ui_log)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and ui.poll() is None:
                 if any('friday —' in t.lower() or 'linux buddy' in t.lower() for t in driver('windows')['titles']): break
@@ -214,6 +214,8 @@ try:
             subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions', '["friday-desktop@linux-buddy.local", "friday-test@linux-buddy.local"]'], check=True)
             time.sleep(.5)
             subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'reconnected'], env=ui_env, check=True, timeout=30)
+            if '--computer' in sys.argv:
+                subprocess.run(['node', str(ROOT/'tests/native/ui-control.mjs'), str(debug_port)], env=ui_env, check=True, timeout=550)
             if '--agent' in sys.argv:
                 driver('fullscreen', enabled=True); time.sleep(.5)
                 driver('fridayWindow', activate=True); time.sleep(.3)
@@ -261,6 +263,10 @@ try:
             errors = (stage / 'ui.log').read_text()
             assert 'Error launching app' not in errors and 'Unable to find Electron app' not in errors and 'A JavaScript error occurred' not in errors, errors
             print('PASS: packaged Electron app launches with the native helper present', flush=True)
+    from control import exercise
+    exercise(command, driver, observe, stage)
+    if '--computer' in sys.argv:
+        subprocess.run(['node', str(ROOT/'tests/native/computer.mjs')], check=True, timeout=330)
     errors = (stage / 'shell.log').read_text()
     assert 'JS ERROR' not in errors and 'Extension friday-desktop' not in errors, errors[-4000:]
     print('PASS: GNOME integration smoke suite. Artifacts:', stage, flush=True)
