@@ -7,7 +7,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ParakeetClient, type ParakeetOptions } from './parakeet-client.js';
+import { GroqClient } from './groq-client.js';
 import type { TranscriptResult } from './types.js';
+
+/** Any backend that decodes one recorded utterance at a time. */
+export interface Transcriber {
+  prepare(): Promise<void>;
+  transcribe(path: string): Promise<{ text: string; inferenceMs: number }>;
+  transcribePcm(audio: ArrayBuffer): Promise<{ text: string; inferenceMs: number }>;
+  close(): void;
+}
 
 function run(command: string, args: string[], timeoutMs: number) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -51,16 +60,34 @@ export class SpeechService {
   private armed = false;
   private generation = 0;
   private pending: Promise<unknown> = Promise.resolve();
-  private readonly client: ParakeetClient;
+  private readonly client: Transcriber;
 
   constructor(
     private wakeWord: string,
     options: Partial<ParakeetOptions> = {},
   ) {
-    this.client = new ParakeetClient({
-      workerPath: fileURLToPath(new URL('../native/parakeet-worker.py', import.meta.url)),
-      ...options,
-    });
+    // Hosted Groq Whisper is selected when a key is present; otherwise local
+    // Parakeet. An explicit LINUX_BUDDY_STT_PROVIDER chooses between them.
+    const apiKey = process.env.GROQ_API_KEY ?? '';
+    const provider = process.env.LINUX_BUDDY_STT_PROVIDER || (apiKey ? 'groq' : 'parakeet');
+    if (provider === 'groq') {
+      if (!apiKey)
+        throw new Error(
+          'LINUX_BUDDY_STT_PROVIDER is groq but GROQ_API_KEY is missing. Set the key or choose parakeet.',
+        );
+      // Remove the credential from inherited environments before agents spawn.
+      delete process.env.GROQ_API_KEY;
+      this.client = new GroqClient({
+        apiKey,
+        model: process.env.LINUX_BUDDY_GROQ_STT_MODEL,
+        language: process.env.LINUX_BUDDY_GROQ_STT_LANGUAGE,
+      });
+    } else if (provider === 'parakeet') {
+      this.client = new ParakeetClient({
+        workerPath: fileURLToPath(new URL('../native/parakeet-worker.py', import.meta.url)),
+        ...options,
+      });
+    } else throw new Error(`Unknown STT provider ${provider}. Choose groq or parakeet.`);
   }
 
   prepare() {
@@ -207,10 +234,9 @@ export class SpeechService {
         },
       };
     } catch (error) {
-      throw new Error(
-        `Local Parakeet transcription failed: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
+      throw new Error(`Speech transcription failed: ${error instanceof Error ? error.message : String(error)}`, {
+        cause: error,
+      });
     } finally {
       if (directory) await rm(directory, { recursive: true, force: true });
     }
