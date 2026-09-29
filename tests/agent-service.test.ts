@@ -282,6 +282,17 @@ describe('AgentService lifecycle', () => {
 });
 
 describe('fresh desktop readiness', () => {
+  it('explains an interrupted request when its pending tool result was lost', async () => {
+    const { service, children } = await fixture({}, { status: async () => ({ ready: true }) });
+    const first = await service.submit('Click the test button');
+    await service.desktopInterrupted(first.id, new DesktopError('Desktop session ended', 'lease_expired'));
+    await service.submit('Why did that return no result?');
+    const sent = JSON.parse(children[1].stdin.read().toString()).message;
+    expect(sent).toContain('Missing historical tool results mean the request was interrupted');
+    expect(sent).toContain('lastInterruptedRequest');
+    expect(sent).toContain('desktop connection timed out');
+    expect(sent).toContain('"ready":true');
+  });
   it('refreshes a recovered extension in the same saved parent conversation', async () => {
     const status = vi
       .fn()

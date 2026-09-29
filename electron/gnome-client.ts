@@ -44,7 +44,13 @@ export class GnomeClient implements NativeDesktop {
             continue;
           }
           if (result.event === 'stopped' && typeof result.runId === 'string') {
-            this.onStopped?.(result.runId, new DesktopError('Desktop session ended', String(result.code)));
+            this.onStopped?.(
+              result.runId,
+              new DesktopError(
+                typeof result.error === 'string' ? result.error : 'Desktop session ended',
+                String(result.code),
+              ),
+            );
             continue;
           }
           if (result.fatal) {

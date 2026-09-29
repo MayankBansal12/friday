@@ -1,6 +1,6 @@
 // Deliberately dependency-free: the same compiled validators run inside GNOME Shell.
 /** Bumped whenever the app and the installed GNOME extension stop being interchangeable. */
-export const protocolVersion = 6;
+export const protocolVersion = 7;
 export interface Display {
   id: string;
   x: number;

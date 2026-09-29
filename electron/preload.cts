@@ -29,6 +29,12 @@ function invoke<T>(channel: string, timeoutMs: number, ...args: unknown[]): Prom
 
 contextBridge.exposeInMainWorld('buddy', {
   guidance: (): Promise<boolean> => invoke('desktop:guidance', 10_000),
+  controlling: (): Promise<boolean> => invoke('desktop:controlling', 10_000),
+  onControlling: (callback: (active: boolean) => void) => {
+    const handler = (_: unknown, active: boolean) => callback(active);
+    ipcRenderer.on('desktop:controlling', handler);
+    return () => ipcRenderer.removeListener('desktop:controlling', handler);
+  },
   onGuidance: (callback: (guiding: boolean) => void) => {
     const handler = (_: unknown, guiding: boolean) => callback(guiding);
     ipcRenderer.on('desktop:guidance', handler);

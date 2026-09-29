@@ -44,6 +44,7 @@
         <option>thinking</option>
         <option>speaking</option>
         <option>guidance</option>
+        <option>control</option>
         <option>approval</option>
         <option>updates</option>
         <option>error</option></select
@@ -134,6 +135,7 @@
         runtime,
         tasks,
         guiding: scenario === 'guidance',
+        controlling: scenario === 'control',
         calls: [],
         surfaceChanges: [],
         level: 0,
@@ -143,6 +145,7 @@
         emit() {
           callbacks.onFridayState?.(structuredClone(runtime));
           callbacks.onGuidance?.(fixture.guiding);
+          callbacks.onControlling?.(fixture.controlling);
         },
         task(t) {
           callbacks.onTask?.(t);
@@ -248,6 +251,7 @@
       window.buddy = {
         fridayState: async () => runtime,
         guidance: async () => fixture.guiding,
+        controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
         getSettings: async () => ({ wakeWord: 'Friday' }),
         desktopStatus: async () => ({ ready: true }),
@@ -324,6 +328,7 @@
         'onExpanded',
         'onMark',
         'onGuidance',
+        'onControlling',
       ])
         window.buddy[name] = (fn) => {
           callbacks[name] = fn;

@@ -269,9 +269,11 @@ export class CodexComputerRunner implements ComputerRunner {
     };
     const abort = () => {
       fail(
-        new Error(
-          externalSignal.aborted ? 'Computer control stopped' : 'Computer control reached its four-minute limit',
-        ),
+        externalSignal.aborted && externalSignal.reason instanceof Error && externalSignal.reason.name !== 'AbortError'
+          ? externalSignal.reason
+          : new Error(
+              externalSignal.aborted ? 'Computer control stopped' : 'Computer control reached its four-minute limit',
+            ),
       );
       this.close();
     };

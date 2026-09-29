@@ -197,7 +197,7 @@ try:
             display_env = driver('displayEnvironment')
             assert display_env.get('DISPLAY'), 'Isolated GNOME did not provide an XWayland display'
             ui_env = dict(os.environ, **display_env)
-            ui = subprocess.Popen([str(executable), '--no-sandbox', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, env=ui_env, stdout=ui_log, stderr=ui_log)
+            ui = subprocess.Popen([str(executable), '--no-sandbox', '--ozone-platform=x11', f'--remote-debugging-port={debug_port}', '--remote-debugging-address=127.0.0.1'], cwd=ROOT, env=ui_env, stdout=ui_log, stderr=ui_log)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and ui.poll() is None:
                 if any('friday —' in t.lower() or 'linux buddy' in t.lower() for t in driver('windows')['titles']): break
@@ -214,6 +214,8 @@ try:
             subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions', '["friday-desktop@linux-buddy.local", "friday-test@linux-buddy.local"]'], check=True)
             time.sleep(.5)
             subprocess.run(['node', str(ROOT / 'tests/native/ui.mjs'), str(debug_port), 'reconnected'], env=ui_env, check=True, timeout=30)
+            if '--computer' in sys.argv:
+                subprocess.run(['node', str(ROOT/'tests/native/ui-control.mjs'), str(debug_port)], env=ui_env, check=True, timeout=550)
             if '--agent' in sys.argv:
                 driver('fullscreen', enabled=True); time.sleep(.5)
                 driver('fridayWindow', activate=True); time.sleep(.3)

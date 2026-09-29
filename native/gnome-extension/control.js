@@ -45,6 +45,38 @@ export class ComputerControl {
     this.shield.grab_key_focus();
     this.host._raiseOverlays();
   }
+  excludeCompanion() {
+    this.companionPid = this.host._companionPid;
+    if (!this.companionPid) return;
+    this.companionActors ??= new Map();
+    // Apply click-through to the actual compositor pick tree. Xwayland's input
+    // shape can lag until the client commits another frame. Revisit on every
+    // observation/action to include late maps and replacement surface actors.
+    const visit = (actor) => {
+      if (!this.companionActors.has(actor)) {
+        const entry = { reactive: actor.reactive };
+        entry.destroy = actor.connect('destroy', () => this.companionActors.delete(actor));
+        this.companionActors.set(actor, entry);
+      }
+      actor.reactive = false;
+      for (const child of actor.get_children()) visit(child);
+    };
+    for (const actor of global.get_window_actors())
+      if (
+        actor.meta_window.get_pid() === this.companionPid &&
+        /linux.buddy|friday|electron/i.test(actor.meta_window.get_wm_class() || actor.meta_window.get_title() || '')
+      )
+        visit(actor);
+  }
+  validateTarget(point) {
+    if (!this.companionPid) return;
+    // Called only inside the already-open action window, immediately before
+    // pointer injection. Never disturb the shield merely to inspect a target.
+    let actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, point.x, point.y);
+    while (actor && !actor.meta_window) actor = actor.get_parent();
+    if (actor?.meta_window?.get_pid() === this.companionPid)
+      throw new Error('Friday’s pill is intercepting input; stop and retry control');
+  }
   unblock() {
     if (global.stage.get_key_focus() === this.shield) global.stage.set_key_focus(null);
     this.shield.hide();
@@ -56,18 +88,7 @@ export class ComputerControl {
     this.lastEscapeEvent = time;
     const now = Date.now();
     if (this.escapeAt && now - this.escapeAt < 1500) this.host._stop(true, 'escape');
-    else {
-      this.escapeAt = now;
-      const previous = this.host._captionLabel?.text;
-      this.host._showCaption('Press Esc again to stop computer control.', false);
-      if (this.escapeTimer) GLib.source_remove(this.escapeTimer);
-      this.escapeTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
-        this.escapeTimer = 0;
-        if (this.active && this.host._captionLabel?.text === 'Press Esc again to stop computer control.')
-          this.host._showCaption(previous || 'Working on your computer…', false);
-        return GLib.SOURCE_REMOVE;
-      });
-    }
+    else this.escapeAt = now;
   }
   event(event) {
     if (!this.active) return Clutter.EVENT_PROPAGATE;
@@ -79,7 +100,22 @@ export class ComputerControl {
       this.escape(event.get_time());
       return Clutter.EVENT_STOP;
     }
-    return this.shield.visible ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+    // Crossing and device/lifecycle events must reach Shell's grab machinery.
+    const input = [
+      Clutter.EventType.KEY_PRESS,
+      Clutter.EventType.KEY_RELEASE,
+      Clutter.EventType.BUTTON_PRESS,
+      Clutter.EventType.BUTTON_RELEASE,
+      Clutter.EventType.MOTION,
+      Clutter.EventType.SCROLL,
+      Clutter.EventType.TOUCH_BEGIN,
+      Clutter.EventType.TOUCH_UPDATE,
+      Clutter.EventType.TOUCH_END,
+      Clutter.EventType.TOUCH_CANCEL,
+      Clutter.EventType.TOUCHPAD_PINCH,
+      Clutter.EventType.TOUCHPAD_SWIPE,
+    ];
+    return this.shield.visible && input.includes(event.type()) ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
   }
   release() {
     for (const key of [...this.keys].reverse()) this.key(key, false);
@@ -122,8 +158,13 @@ export class ComputerControl {
     this.release();
     this.unblock();
     this.shield.destroy();
-    if (this.escapeTimer) GLib.source_remove(this.escapeTimer);
-    this.escapeTimer = 0;
+    for (const [actor, entry] of this.companionActors ?? []) {
+      actor.disconnect(entry.destroy);
+      let owner = actor;
+      while (owner && !owner.meta_window) owner = owner.get_parent();
+      if (owner?.meta_window?.get_pid() === this.companionPid) actor.reactive = entry.reactive;
+    }
+    this.companionActors?.clear();
     if (this.inputMethod.notify_key_event === this.notify) this.inputMethod.notify_key_event = this.originalNotify;
   }
   async execute(actions, check) {
@@ -134,6 +175,8 @@ export class ComputerControl {
       if (!this.active) throw new Error('Computer control stopped');
     };
     const move = async (p) => {
+      this.excludeCompanion();
+      this.validateTarget(p);
       this.pointer.notify_absolute_motion(GLib.get_monotonic_time(), p.x, p.y);
       await pause(35);
       const [x, y] = global.get_pointer();
@@ -148,7 +191,10 @@ export class ComputerControl {
         pressed ? Clutter.ButtonState.PRESSED : Clutter.ButtonState.RELEASED,
       );
     };
-    for (const a of actions) {
+    for (const [index, a] of actions.entries()) {
+      this.actionIndex = index;
+      this.actionType = a.type;
+      this.excludeCompanion();
       check();
       if (!this.active) throw new Error('Computer control stopped');
       if (a.type === 'wait') {

@@ -549,12 +549,29 @@ export class AgentService extends EventEmitter {
     } finally {
       if (timer) clearTimeout(timer);
     }
-    return `\n\n[Friday desktop status — checked for this request, not a screenshot. Use this instead of old setup errors in conversation history. If ready, attempt the requested desktop tool; Codex/input can still report their own errors. If unknown, do not claim a reinstall or sign-in is required.]\n${JSON.stringify(
+    const interrupted = this.tasks.find(
+      (task) =>
+        task.conversationId === this.parentId &&
+        task.role === 'parent' &&
+        task.status === 'failed' &&
+        task.error &&
+        Date.now() - task.updatedAt < 3600_000,
+    );
+    return `\n\n[Friday desktop status — checked for this request, not a screenshot. Use this instead of old setup errors in conversation history. If ready, attempt the requested desktop tool; Codex/input can still report their own errors. If unknown, do not claim a reinstall or sign-in is required. Missing historical tool results mean the request was interrupted, not that control is unsupported. Use the last interrupted request below to explain missing results; retry when the user asks and current readiness permits.]\n${JSON.stringify(
       {
         checkedAt: Date.now(),
         ready: status?.ready ?? 'unknown',
         ...(status?.protocolVersion !== undefined ? { protocolVersion: status.protocolVersion } : {}),
         ...(status?.error ? { error: status.error.slice(0, 1000) } : {}),
+        ...(interrupted
+          ? {
+              lastInterruptedRequest: {
+                id: interrupted.id,
+                at: interrupted.updatedAt,
+                error: interrupted.error!.slice(0, 1000),
+              },
+            }
+          : {}),
       },
     )}`;
   }

@@ -76,6 +76,11 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
 
 function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?: number) {
   if (!window || window.isDestroyed()) return;
+  if (bridge?.controlling) {
+    layout = 'bar';
+    contentHeight = 64;
+    contentWidth = 500;
+  }
   const layoutChanged = layout !== surface;
   surface = layout;
   surfaceHeight = contentHeight;
@@ -86,7 +91,7 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   if (boundsChanged) window.setBounds(bounds);
   // XWayland input shape leaves the empty space beside the task circle click-through.
   // Keep a small margin for the shadow and the bridge into the hover panel.
-  if (process.platform === 'linux') {
+  if (process.platform === 'linux' && !bridge?.controlling) {
     const { width, height } = bounds;
     const notchWidth = Math.max(1, Math.min(width, Math.ceil((contentWidth ?? (layout === 'quiet' ? 360 : 500)) + 20)));
     const regions =
@@ -273,6 +278,18 @@ if (hasSingleInstanceLock)
               showInactive: () => {
                 window!.showInactive();
               },
+              setControlling: (active) => {
+                window!.setFocusable(!active);
+                if (active) {
+                  setExpanded(false);
+                  setSurface('bar');
+                  // Shape updates replace X11's input region. Clear the old
+                  // outline once, then leave it alone while clicks pass through.
+                  window!.setShape([]);
+                  if (!window!.isVisible()) window!.showInactive();
+                }
+                window!.setIgnoreMouseEvents(active);
+              },
             }
           : null,
       (data) => {
@@ -315,6 +332,9 @@ if (hasSingleInstanceLock)
 
     bridge.onGuidanceChanged = (guiding) => {
       if (window && !window.isDestroyed()) window.webContents.send('desktop:guidance', guiding);
+    };
+    bridge.onControlChanged = (active) => {
+      if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
     };
     service.on('state', (state) => window?.webContents.send('friday:state', state));
     service.on('task', (task: TaskRecord) => {
@@ -376,6 +396,10 @@ if (hasSingleInstanceLock)
       bridge.stop();
       await bridge.clear().catch(() => {});
       return id;
+    });
+    ipcMain.handle('desktop:controlling', (event) => {
+      fromWindow(event);
+      return bridge.controlling;
     });
     ipcMain.handle('desktop:guidance', (event) => {
       fromWindow(event);

@@ -73,8 +73,9 @@ def _exercise(command, driver, observe, stage,heartbeat_enabled):
     from PIL import Image, ImageChops
     clean=Image.open(stage/'control-clean.png').convert('RGB')
     composed=Image.open(stage/'control-composed.png').convert('RGB')
-    for region in [(90,170,310,290),(700,950,1220,1050)]:
+    for region in [(90,170,310,290)]:
         assert ImageChops.difference(clean.crop(region),composed.crop(region)).getbbox(), 'Overlay leaked into observation or vanished'
+    assert not ImageChops.difference(clean.crop((700,950,1220,1050)),composed.crop((700,950,1220,1050))).getbbox(), 'Extra control banner appeared'
     driver('key',key=0xff1b); time.sleep(.1)
     first=command('status')
     assert first['controlling'], first

@@ -11,7 +11,13 @@ import {
 } from './desktop-protocol.js';
 import { CodexComputerRunner, type ComputerRunner, type ComputerFrame } from './computer-runner.js';
 import type { NativeDesktop } from './gnome-client.js';
-import { DesktopError, desktopErrorMessage, desktopUpdateMessage, type DesktopStatus } from './desktop-status.js';
+import {
+  DesktopError,
+  desktopErrorMessage,
+  desktopInterruption,
+  desktopUpdateMessage,
+  type DesktopStatus,
+} from './desktop-status.js';
 
 interface Run {
   id: string;
@@ -26,6 +32,7 @@ interface CompanionWindow {
   isVisible(): boolean;
   hide(): void;
   showInactive(): void;
+  setControlling?(active: boolean): void;
 }
 function json(response: ServerResponse, status: number, value: unknown) {
   response.writeHead(status, {
@@ -56,12 +63,14 @@ export class DesktopBridge {
   private hiddenForDesktop = false;
   private markTimer?: NodeJS.Timeout;
   private guidance = false;
+  private controlVisible = false;
   // Bumped on every guidance transition so late draw/status replies cannot resurrect an old state.
   private guidanceGeneration = 0;
   private guidanceTimer?: NodeJS.Timeout;
   onStopped?: (runId: string, error: unknown) => void;
   onMark?: (mark: Record<string, unknown>) => void;
   onControlProgress?: (runId: string, text: string, spoken?: string) => void;
+  onControlChanged?: (active: boolean) => void;
   /** Fires only on transitions. True means GNOME confirmed a nonempty drawing is on screen. */
   onGuidanceChanged?: (active: boolean) => void;
 
@@ -88,6 +97,15 @@ export class DesktopBridge {
   get guiding() {
     return this.guidance;
   }
+  get controlling() {
+    return this.controlVisible;
+  }
+  private setControlling(active: boolean) {
+    if (active === this.controlVisible) return;
+    this.controlVisible = active;
+    this.getWindow()?.setControlling?.(active);
+    this.onControlChanged?.(active);
+  }
   beginRun(id: string) {
     if (this.active) this.revokeRun(this.active.id);
     this.active = { id, token: randomBytes(32).toString('hex'), revoked: false };
@@ -104,8 +122,7 @@ export class DesktopBridge {
       this.heartbeat = setInterval(() => {
         void this.native.command({ op: 'heartbeat', runId: run.id }).catch((error: unknown) => {
           if (this.active !== run) return;
-          this.revokeRun(run.id);
-          this.onStopped?.(run.id, error);
+          this.nativeStopped(run.id, error);
         });
       }, 1000);
       this.heartbeat.unref();
@@ -113,11 +130,11 @@ export class DesktopBridge {
     await run.ready;
     this.assert(run);
   }
-  revokeRun(id: string, preserveDrawing = false) {
+  revokeRun(id: string, preserveDrawing = false, reason?: Error) {
     const run = this.active;
     if (!run || run.id !== id) return;
     run.revoked = true;
-    run.control?.abort();
+    run.control?.abort(reason);
     this.active = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
@@ -129,7 +146,10 @@ export class DesktopBridge {
     if (!preserveDrawing) this.setGuidance(false);
     if (run.control)
       void released.then(() => {
-        if (!this.active?.control) this.restore();
+        if (!this.active?.control) {
+          this.setControlling(false);
+          this.restore();
+        }
       });
     else this.restore();
   }
@@ -248,12 +268,14 @@ export class DesktopBridge {
     }
   }
   private async observe(run: Run) {
+    // GNOME excludes the pill from the offscreen paint during control, without
+    // hiding its client window or introducing a focus/animation race.
+    if (run.control) return this.capture(run);
     // Captures preserve existing marks; only confirmed drawings start guidance.
     this.hide();
     try {
       return await this.capture(run);
     } finally {
-      // During control the native banner stays visible and Electron cannot intercept clicks.
       if (!run.control && !this.active?.control) this.restore();
     }
   }
@@ -307,11 +329,9 @@ export class DesktopBridge {
     run.control = controller;
     let spoken = 0;
     try {
-      this.hide();
-      // Hide Electron once, rather than before every frame.
-      await new Promise((resolve) => setTimeout(resolve, 180));
-      this.assert(run);
-      await this.native.command({ op: 'control_begin', runId: run.id });
+      this.setControlling(true);
+      this.restore();
+      await this.native.command({ op: 'control_begin', runId: run.id, companionPid: process.pid });
       this.assert(run);
       const result = await this.computer.run(
         goal,
@@ -356,7 +376,6 @@ export class DesktopBridge {
           },
           progress: (text, speech) => {
             this.assert(run);
-            void this.setCaption(run.id, text);
             this.onControlProgress?.(run.id, text, speech && spoken++ < 2 ? speech : undefined);
           },
         },
@@ -365,11 +384,14 @@ export class DesktopBridge {
       this.assert(run);
       await this.native.command({ op: 'control_end', runId: run.id });
       this.assert(run);
+      this.setControlling(false);
       this.restore();
       return result;
     } catch (error) {
+      const reason = controller.signal.reason;
+      const failure = reason instanceof Error && reason.name !== 'AbortError' ? reason : error;
       if (this.active === run) this.revokeRun(run.id);
-      throw error;
+      throw failure;
     } finally {
       controller.abort();
       run.control = undefined;
@@ -392,27 +414,14 @@ export class DesktopBridge {
     if (timer) clearTimeout(timer);
     this.onStopped?.(run.id, new DesktopError('Computer control stopped', 'user_stop'));
   }
-  private async setCaption(runId: string, text: string) {
-    const run = this.active;
-    if (run?.id !== runId || !run.control) return false;
-    try {
-      const result = await this.native.command({ op: 'caption', runId, text });
-      if (result.visible !== true) throw new Error('Desktop caption did not become visible');
-      return true;
-    } catch (error) {
-      if (this.active === run && run.control) {
-        this.revokeRun(runId);
-        this.onStopped?.(
-          runId,
-          new Error(`Could not display Friday’s on-screen controls: ${desktopErrorMessage(error)}`),
-        );
-      }
-      return false;
-    }
-  }
   nativeStopped(runId: string, error: unknown) {
     if (this.active?.id !== runId) return;
-    this.revokeRun(runId);
+    const interruption = desktopInterruption(error);
+    const returnControlError = Boolean(this.active.control) && !interruption.user;
+    this.revokeRun(runId, false, new Error(interruption.message));
+    // The blocking control tool must return its error before the parent responds.
+    // Retiring the parent here loses the pending tool result from its history.
+    if (returnControlError) return;
     this.onStopped?.(runId, error);
   }
 

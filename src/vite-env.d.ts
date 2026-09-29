@@ -14,6 +14,8 @@ import type {
 declare global {
   interface Window {
     buddy: {
+      controlling(): Promise<boolean>;
+      onControlling(callback: (active: boolean) => void): () => void;
       guidance(): Promise<boolean>;
       onGuidance(callback: (guiding: boolean) => void): () => void;
       fridayState(): Promise<FridayState>;

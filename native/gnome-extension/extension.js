@@ -233,14 +233,6 @@ export default class FridayDesktop extends Extension {
       return { stopped: true };
     }
     this._check(c, sender);
-    if (c.op === 'caption') {
-      if (!this._control) return { visible: false };
-      if (typeof c.text !== 'string' || c.text.length > 1200) throw new Error('Invalid control caption');
-      this._showCaption(c.text);
-      await this._waitForPresentation(this._caption);
-      this._check(c, sender);
-      return { visible: true };
-    }
     if (c.op === 'heartbeat') {
       this._deadline = Date.now() + (this._control ? 3000 : 15000);
       return { alive: true };
@@ -248,15 +240,35 @@ export default class FridayDesktop extends Extension {
     if (c.op === 'control_begin') {
       if (this._busy || this._mark || this._control) throw new Error('Desktop is already busy');
       if (Main.modalCount) throw new Error('Close the system dialog before computer control');
-      this._control = new ComputerControl(this);
-      this._deadline = Date.now() + 3000;
       try {
-        this._showCaption('Starting computer control…');
-        await this._waitForPresentation(this._caption);
+        this._control = new ComputerControl(this);
+        this._companionPid = Number.isInteger(c.companionPid) ? c.companionPid : null;
+        this._control.excludeCompanion();
+        // Voice/typed requests can leave the companion focused. Restore an app
+        // before the first observation; never raise/focus the pill mid-action.
+        if (this._companionPid && global.display.focus_window?.get_pid() === this._companionPid) {
+          const target = global.display
+            .get_tab_list(Meta.TabList.NORMAL, global.workspace_manager.get_active_workspace())
+            .find((win) => win.get_pid() !== this._companionPid && !win.minimized);
+          if (!target) throw new Error('Open the app you want Friday to control first');
+          target.activate(global.get_current_time());
+          const deadline = Date.now() + 300;
+          while (
+            (!global.display.focus_window || global.display.focus_window.get_pid() === this._companionPid) &&
+            Date.now() < deadline
+          ) {
+            await this._wait(20);
+            this._check(c, sender);
+          }
+          if (!global.display.focus_window || global.display.focus_window.get_pid() === this._companionPid)
+            throw new Error('Could not focus the target app; try again');
+          this._control.block();
+        }
+        this._deadline = Date.now() + 3000;
         this._check(c, sender);
         return { controlling: true, inputPolicy: 'blocked-between-actions' };
       } catch (error) {
-        this._stop(true, 'control_failed');
+        this._stop(true, error.code || 'control_failed', error.message?.slice(0, 1000));
         throw error;
       }
     }
@@ -289,8 +301,18 @@ export default class FridayDesktop extends Extension {
         this._check(c, sender);
         return { executed: batch.actions.length, ...result, actionMs: Date.now() - started };
       } catch (error) {
-        this._stop(true, 'control_failed');
-        throw error;
+        const failure = Object.assign(
+          new Error(
+            `Control action ${(control.actionIndex ?? 0) + 1} (${control.actionType ?? 'unknown'}): ${error.message}`.slice(
+              0,
+              1000,
+            ),
+          ),
+          { code: error.code || 'control_failed' },
+        );
+        // A user stop may already have revoked this lease while execute awaited.
+        if (this._lease === c.runId) this._stop(true, failure.code, failure.message);
+        throw failure;
       } finally {
         control.release();
         this._busy = false;
@@ -355,25 +377,40 @@ export default class FridayDesktop extends Extension {
   }
 
   async _observe(c, sender) {
+    this._control?.excludeCompanion();
     if (this._busy || this._mark) throw new Error('Finish the current desktop operation first');
     this._busy = true;
     // Retain guidance across observations when the scene is unchanged. Hide only
     // for Shell's synchronous offscreen paint, not the asynchronous PNG encode.
     const areaVisible = this._area.visible;
-    const captionVisible = this._caption?.visible;
+    // Exclude the app pill only from the offscreen paint, keeping its client
+    // mapped so captures do not change focus or blink the window.
+    const companion =
+      this._control && this._companionPid
+        ? global
+            .get_window_actors()
+            .find(
+              (actor) =>
+                actor.meta_window.get_pid() === this._companionPid &&
+                /linux.buddy|friday|electron/i.test(
+                  actor.meta_window.get_wm_class() || actor.meta_window.get_title() || '',
+                ),
+            )
+        : null;
+    const companionVisible = companion?.visible;
     const scene = this._scene;
     const focus = this._focus();
     const stream = Gio.MemoryOutputStream.new_resizable();
     try {
       const shooter = new Shell.Screenshot();
       this._area.hide();
-      this._caption?.hide();
+      companion?.hide();
       let capture;
       try {
         capture = shooter.screenshot(false, stream);
       } finally {
         if (areaVisible) this._area.show();
-        if (captionVisible) this._caption?.show();
+        if (companionVisible) companion.show();
       }
       await capture;
       stream.close(null);
@@ -418,15 +455,15 @@ export default class FridayDesktop extends Extension {
     });
   }
 
-  _stop(clear = true, reason = 'user_stop') {
+  _stop(clear = true, reason = 'user_stop', error) {
     this._endControl();
     const runId = this._lease;
     if (runId && !['completed', 'superseded'].includes(reason))
       this._dbus?.emit_signal(
         'Event',
-        new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason })]),
+        new GLib.Variant('(s)', [JSON.stringify({ event: 'stopped', runId, code: reason, error })]),
       );
-    if (this._lease) this._lastStop = { runId: this._lease, reason, at: Date.now() };
+    if (this._lease) this._lastStop = { runId: this._lease, reason, error, at: Date.now() };
     this._lease = null;
     this._observation = null;
     if (this._ownerWatch) Gio.bus_unwatch_name(this._ownerWatch);
@@ -446,22 +483,15 @@ export default class FridayDesktop extends Extension {
     if (!this._control) return;
     const control = this._control;
     this._control = null;
+    this._companionPid = null;
     control.end();
-    if (this._caption) this._clearCaption();
-  }
-
-  _clearCaption() {
-    this._caption?.destroy();
-    this._caption = null;
-    this._captionLabel = null;
-    this._syncCompositing();
   }
 
   _syncCompositing() {
     // Fullscreen Wayland surfaces may be scanned out directly to the display.
     // Shell chrome alone does not prevent that. Match GNOME's own OSD lifecycle:
     // inhibit unredirect for as long as Friday's overlay is visible.
-    const needed = Boolean(this._alive && (this._area?.visible || this._caption?.visible));
+    const needed = Boolean(this._alive && this._area?.visible);
     if (needed === this._compositingHeld) return;
     if (needed) global.compositor.disable_unredirect();
     else global.compositor.enable_unredirect();
@@ -470,14 +500,12 @@ export default class FridayDesktop extends Extension {
 
   _raiseOverlays() {
     if (this._area?.visible) this._area.get_parent()?.set_child_above_sibling(this._area, null);
-    if (this._caption?.visible) this._caption.get_parent()?.set_child_above_sibling(this._caption, null);
   }
 
   _presentation() {
     return {
       compositingHeld: this._compositingHeld,
       drawingMapped: this._area?.is_mapped() ?? false,
-      captionMapped: this._caption?.is_mapped() ?? false,
       drawingSize: this._area?.get_size() ?? [0, 0],
       paintSerial: this._paintSerial,
       paintError: this._paintError,
@@ -488,7 +516,7 @@ export default class FridayDesktop extends Extension {
     const deadline = Date.now() + 1500;
     while (this._alive && Date.now() < deadline) {
       await this._wait(32);
-      if ((actor !== this._area && actor !== this._caption) || !actor.visible) break;
+      if (actor !== this._area || !actor.visible) break;
       if (afterPaint !== undefined && this._paintError) throw new Error(`Drawing failed: ${this._paintError}`);
       if (
         this._compositingHeld &&
@@ -501,40 +529,6 @@ export default class FridayDesktop extends Extension {
         return;
     }
     throw new Error('Friday could not display its screen overlay. Clear it and try again.');
-  }
-
-  _showCaption(text) {
-    if (!this._control) return;
-    if (!this._caption) {
-      this._caption = new St.BoxLayout({
-        vertical: true,
-        reactive: false,
-        can_focus: false,
-        style:
-          'background-color: rgba(27,31,27,0.96); color: #fbfaf4; border: 1px solid #748042; border-radius: 18px; padding: 12px 16px; spacing: 10px;',
-        width: 520,
-      });
-      this._caption.connect('notify::visible', () => this._syncCompositing());
-      this._caption.add_child(
-        new St.Label({
-          text: 'Friday is controlling your computer · Esc twice to stop',
-          style: 'font-size: 13px; font-weight: bold; color: #d9ff63;',
-        }),
-      );
-      this._captionLabel = new St.Label({ text, style: 'font-size: 14px; color: #fbfaf4;' });
-      this._captionLabel.clutter_text.line_wrap = true;
-      this._caption.add_child(this._captionLabel);
-      Main.layoutManager.addTopChrome(this._caption, {
-        affectsInputRegion: false,
-        affectsStruts: false,
-        trackFullscreen: false,
-      });
-    }
-    this._captionLabel.text = text || 'Friday is working…';
-    this._caption.set_position(700, 950);
-    this._caption.show();
-    this._raiseOverlays();
-    this._syncCompositing();
   }
 
   _watchWindow() {

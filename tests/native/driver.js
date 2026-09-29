@@ -29,6 +29,42 @@ export default class Driver extends Extension {
       const c = JSON.parse(raw);
       let result = {};
       if (c.op === 'ready') result = { ready: !Main.layoutManager._startingUp };
+      if (c.op === 'recordControlCapture') {
+        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj;
+        const observe = friday._observe;
+        friday._observe = async (...args) => {
+          const frame = await observe.apply(friday, args);
+          if (friday._control && !friday._testControlCaptured) {
+            friday._testControlCaptured = true;
+            GLib.file_set_contents(
+              GLib.build_filenamev([GLib.getenv('FRIDAY_TEST_STAGE'), 'ui-control-clean.png']),
+              GLib.base64_decode(frame.data),
+            );
+          }
+          return frame;
+        };
+      }
+      if (c.op === 'failControl') {
+        Main.extensionManager
+          .lookup('friday-desktop@linux-buddy.local')
+          .stateObj._stop(true, 'control_failed', 'Synthetic input delivery failure');
+      }
+      if (c.op === 'controlPillPick') {
+        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj;
+        const shield = friday._control.shield;
+        const reactive = shield.reactive;
+        try {
+          shield.reactive = false;
+          let actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, c.x, c.y);
+          while (actor && !actor.meta_window) actor = actor.get_parent();
+          result = {
+            friday: actor?.meta_window?.get_title()?.startsWith('Friday —') ?? false,
+            keyboardBlocked: global.stage.get_key_focus() === shield,
+          };
+        } finally {
+          shield.reactive = reactive;
+        }
+      }
       if (c.op === 'displayEnvironment') {
         result = {};
         for (const key of ['DISPLAY', 'XAUTHORITY']) if (GLib.getenv(key)) result[key] = GLib.getenv(key);
