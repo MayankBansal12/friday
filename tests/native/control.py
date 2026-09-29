@@ -107,4 +107,14 @@ def _exercise(command, driver, observe, stage,heartbeat_enabled):
     heartbeat_enabled.clear()
     time.sleep(4.1)
     assert not command('status')['controlling'], 'Heartbeat loss left input blocked'
-    print('PASS: controlled click/type/keys, user-input shield, popup survival, drawing/capture, double Esc, stop and watchdog',flush=True)
+    # A throwing cleanup step must not leave the shield, IM hook or lease behind.
+    command('begin'); command('control_begin')
+    driver('breakControlCleanup')
+    command('stop')
+    status=command('status')
+    assert not status['controlling'] and not status['active'], status
+    (stage/'clicked').unlink(missing_ok=True)
+    driver('click', **targets()['button']); time.sleep(.15)
+    assert (stage/'clicked').exists(), 'Cleanup failure left the input shield up'
+    assert driver('controlCleanup')['imRestored'], 'Cleanup failure left the input-method hook installed'
+    print('PASS: controlled click/type/keys, user-input shield, popup survival, drawing/capture, double Esc, stop, watchdog and cleanup failure',flush=True)

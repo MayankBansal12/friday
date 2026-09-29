@@ -32,7 +32,6 @@ async function fixture(compressed = false, computer?: ComputerRunner) {
       if (held) return held();
       if (value.op === 'begin' || value.op === 'status') return { ready: true, protocolVersion, annotations };
       if (value.op === 'draw') return drawReply;
-      if (value.op === 'caption') return { visible: true };
       if (value.op === 'observe')
         return {
           id: 'obs',

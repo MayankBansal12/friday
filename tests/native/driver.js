@@ -49,6 +49,15 @@ export default class Driver extends Extension {
           .lookup('friday-desktop@linux-buddy.local')
           .stateObj._stop(true, 'control_failed', 'Synthetic input delivery failure');
       }
+      if (c.op === 'breakControlCleanup') {
+        const control = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj._control;
+        this.brokenControl = control;
+        control.release = () => {
+          throw new Error('Synthetic cleanup failure');
+        };
+      }
+      if (c.op === 'controlCleanup')
+        result = { imRestored: Main.inputMethod.notify_key_event === this.brokenControl.originalNotify };
       if (c.op === 'controlPillPick') {
         const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local').stateObj;
         const shield = friday._control.shield;
@@ -191,11 +200,6 @@ export default class Driver extends Extension {
       if (c.op === 'key') {
         this.keyboard.notify_keyval(GLib.get_monotonic_time(), c.key, Clutter.KeyState.PRESSED);
         this.keyboard.notify_keyval(GLib.get_monotonic_time(), c.key, Clutter.KeyState.RELEASED);
-      }
-      if (c.op === 'reveal') {
-        const friday = Main.extensionManager.lookup('friday-desktop@linux-buddy.local')?.stateObj;
-        if (!friday?._replyButton) throw new Error('No companion reply button');
-        friday._replyButton.emit('clicked', 1);
       }
       invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(result)]));
     } catch (e) {

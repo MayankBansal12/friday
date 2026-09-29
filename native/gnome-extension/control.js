@@ -155,17 +155,30 @@ export class ComputerControl {
   }
   end() {
     this.active = false;
-    this.release();
-    this.unblock();
-    this.shield.destroy();
-    for (const [actor, entry] of this.companionActors ?? []) {
-      actor.disconnect(entry.destroy);
-      let owner = actor;
-      while (owner && !owner.meta_window) owner = owner.get_parent();
-      if (owner?.meta_window?.get_pid() === this.companionPid) actor.reactive = entry.reactive;
+    // Runs first in _stop(): every step must run and none may throw, or a stuck
+    // shield, non-reactive pill or unrevoked lease would outlive this session.
+    const steps = [
+      () => this.release(),
+      () => this.unblock(),
+      () => this.shield.destroy(),
+      ...[...(this.companionActors ?? [])].map(([actor, entry]) => () => {
+        actor.disconnect(entry.destroy);
+        let owner = actor;
+        while (owner && !owner.meta_window) owner = owner.get_parent();
+        if (owner?.meta_window?.get_pid() === this.companionPid) actor.reactive = entry.reactive;
+      }),
+      () => {
+        if (this.inputMethod.notify_key_event === this.notify) this.inputMethod.notify_key_event = this.originalNotify;
+      },
+    ];
+    for (const step of steps) {
+      try {
+        step();
+      } catch (error) {
+        console.error('Friday computer control cleanup failed', error);
+      }
     }
     this.companionActors?.clear();
-    if (this.inputMethod.notify_key_event === this.notify) this.inputMethod.notify_key_event = this.originalNotify;
   }
   async execute(actions, check) {
     let openMs = 0;
