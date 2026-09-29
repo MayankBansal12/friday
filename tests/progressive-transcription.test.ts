@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { ProgressiveTranscription, type SpeechTrace } from '../src/progressive-transcription';
+import {
+  NoiseFloor,
+  ProgressiveTranscription,
+  soundsUnfinished,
+  type SpeechTrace,
+} from '../src/progressive-transcription';
 import type { PcmRequest, PcmResult } from '../electron/pcm-transcription';
 import { validPcmRequest } from '../electron/pcm-transcription';
-function setup(direct = false) {
+function setup(direct = false, playing = () => false, floor = new NoiseFloor()) {
   let time = 0;
   const jobs: { request: PcmRequest; resolve: (r: PcmResult) => void }[] = [];
   const final: string[] = [],
@@ -13,6 +18,8 @@ function setup(direct = false) {
     revocations = 0;
   const stt = new ProgressiveTranscription({
     direct,
+    floor,
+    playback: playing,
     now: () => time,
     decode: (request) => new Promise((resolve) => jobs.push({ request, resolve })),
     final: (text) => final.push(text),
@@ -23,10 +30,11 @@ function setup(direct = false) {
     error: (e) => errors.push(e),
     trace: (t) => traces.push(t),
   });
-  const feed = (ms: number, loud = true) => {
+  const feed = (ms: number, loud: boolean | number = true) => {
+    const level = typeof loud === 'number' ? loud : loud ? 4000 : 0;
     for (let n = 0; n < ms / 20; n++) {
       time += 20;
-      stt.push(new Int16Array(320).fill(loud ? 4000 : 0));
+      stt.push(new Int16Array(320).fill(level));
     }
   };
   const complete = async (index: number, text: string, inferenceMs = 500) => {
@@ -36,6 +44,7 @@ function setup(direct = false) {
   };
   return {
     stt,
+    floor,
     jobs,
     final,
     partials,
@@ -169,6 +178,141 @@ describe('progressive batch coverage', () => {
       expect(s.errors).toHaveLength(1);
     },
   );
+});
+describe('speech detection and endpointing', () => {
+  const events = (s: ReturnType<typeof setup>, name: string) => s.traces.filter((t) => t.event === name).length;
+  it('hears quiet speech that the old fixed .025 RMS gate dropped', async () => {
+    const s = setup();
+    s.feed(1000, false);
+    s.feed(1500, 150); // RMS ~.0046, like a soft talker far from the mic
+    s.feed(860, false);
+    expect(s.starts()).toBe(1);
+    await s.complete(s.jobs.length - 1, 'Open my downloads.');
+    if (!s.final.length) await s.complete(s.jobs.length - 1, 'Open my downloads.');
+    expect(s.final).toEqual(['Open my downloads.']);
+  });
+  it('keeps a turn open through soft syllables and word tails', () => {
+    const s = setup();
+    s.feed(600);
+    s.feed(1000, 70); // below the old gate, above the room floor
+    s.feed(600);
+    expect(events(s, 'endpoint')).toBe(0);
+    expect(s.starts()).toBe(1);
+  });
+  it('ignores clicks shorter than the onset window', () => {
+    const s = setup();
+    for (let n = 0; n < 20; n++) {
+      s.feed(40);
+      s.feed(400, false);
+    }
+    expect(s.starts()).toBe(0);
+    expect(s.jobs).toEqual([]);
+  });
+  it('holds the endpoint after an unfinished phrase, then submits once when speech resumes', async () => {
+    const s = setup();
+    s.feed(1200);
+    await s.complete(0, 'Open the');
+    s.feed(860, false);
+    await s.complete(1, 'Open the');
+    expect(s.final).toEqual([]);
+    expect(events(s, 'endpoint-extended')).toBe(1);
+    s.feed(500, false); // a 1.36 s thinking pause
+    s.feed(800);
+    expect(s.revocations()).toBe(1);
+    s.feed(860, false);
+    await s.complete(s.jobs.length - 1, 'Open the browser settings.');
+    if (!s.final.length) await s.complete(s.jobs.length - 1, 'Open the browser settings.');
+    expect(s.final).toEqual(['Open the browser settings.']);
+    expect(s.starts()).toBe(1);
+  });
+  it('submits an unfinished phrase after the longer pause instead of waiting forever', async () => {
+    const s = setup();
+    s.feed(1200);
+    await s.complete(0, 'Open the');
+    s.feed(860, false);
+    await s.complete(1, 'Open the,');
+    s.feed(680, false);
+    expect(s.final).toEqual([]);
+    s.feed(80, false);
+    expect(s.final).toEqual(['Open the,']);
+  });
+  it.each([
+    ['Open the', true],
+    ['Show me the settings and', true],
+    ['Um', true],
+    ['Wait,', true],
+    ['What do I click...', true],
+    ['Open the browser settings.', false],
+    ['What is this for?', false],
+    ['Turn it on', false],
+    ['Yeah.', false],
+    ['', false],
+  ])('treats %j as unfinished=%s', (text, unfinished) => {
+    expect(soundsUnfinished(text)).toBe(unfinished);
+  });
+  it('requires louder speech during playback so echo residue neither starts nor holds a turn', () => {
+    let playing = true;
+    const s = setup(false, () => playing);
+    s.feed(1500, 500); // RMS ~.015: typical echo residue
+    expect(s.starts()).toBe(0);
+    s.feed(400); // genuine talk-over is still heard, so barge-in keeps working
+    expect(s.starts()).toBe(1);
+    s.feed(900, 300);
+    expect(events(s, 'endpoint')).toBe(1);
+    playing = false;
+    const t = setup(false, () => playing);
+    t.feed(400);
+    t.feed(900, 300);
+    expect(events(t, 'endpoint')).toBe(0);
+  });
+  it('keeps a long, uneven turn as one request and never learns speech as the floor', async () => {
+    const s = setup();
+    s.feed(1000, false);
+    for (let n = 0; n < 30; n++) {
+      s.feed(400, 4000);
+      s.feed(160, 90);
+      s.feed(100, false);
+    }
+    expect(events(s, 'endpoint')).toBe(0);
+    expect(s.floor.level).toBe(0);
+    s.feed(860, false);
+    expect(events(s, 'endpoint')).toBe(1);
+    for (let n = 0; n < 5 && !s.final.length; n++) await s.complete(s.jobs.length - 1, 'A long request.');
+    expect(s.final).toEqual(['A long request.']);
+    expect(s.starts()).toBe(1);
+  });
+  it('calibrates to sustained wordless noise, then still hears speech over it', async () => {
+    const floor = new NoiseFloor();
+    const s = setup(false, () => false, floor);
+    s.feed(3500, 120); // a fan starting; the floor has not seen it yet
+    expect(s.starts()).toBe(1);
+    await s.complete(0, '');
+    s.feed(1300, 120);
+    await s.complete(1, '');
+    expect(events(s, 'noise-discarded')).toBe(1);
+    expect(s.final).toEqual(['']);
+    const jobs = s.jobs.length;
+    s.feed(5000, 120);
+    expect(s.starts()).toBe(1);
+    expect(s.jobs).toHaveLength(jobs);
+    s.feed(800, 2000);
+    expect(s.starts()).toBe(2);
+    // The floor is shared, so the next request segment starts calibrated too.
+    const next = setup(false, () => false, floor);
+    next.feed(2000, 120);
+    expect(next.starts()).toBe(0);
+  });
+  it('ignores late frames after close without starting or failing', () => {
+    const s = setup();
+    s.feed(1400);
+    s.stt.close();
+    s.feed(2000);
+    s.stt.finish();
+    expect(s.starts()).toBe(1);
+    expect(s.errors).toEqual([]);
+    expect(s.final).toEqual([]);
+    expect(s.jobs).toHaveLength(1);
+  });
 });
 it('validates IPC boundaries before queueing', () => {
   const good = { segment: 'a-1', revision: 1, coverage: 320, audio: new ArrayBuffer(640) };

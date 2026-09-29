@@ -250,6 +250,53 @@ describe('renderer LiveKit link', () => {
     expect(await pending).toBeUndefined();
     expect(rooms[0].unpublished).toEqual([[track, false]]);
   });
+  it('waits for the startup room join before choosing the microphone path', async () => {
+    const { api, listeners } = bridge();
+    let joined!: (session: Awaited<ReturnType<typeof api.session>>) => void;
+    api.session.mockImplementationOnce(() => new Promise((resolve) => (joined = resolve)));
+    const link = new LiveKitLink(api);
+    const starting = link.start();
+    const track = { id: 'startup-mic' } as unknown as MediaStreamTrack;
+    const pending = link.capture(track);
+    expect(rooms).toHaveLength(0);
+    joined({ url: 'ws://127.0.0.1:18780', token: 'token', voice: 'friday-voice' });
+    await starting;
+    await vi.waitFor(() => expect(rooms[0].published).toEqual([track]));
+    for (const ready of listeners.ready) ready('TR_1');
+    const capture = await pending;
+    expect(capture).toBeInstanceOf(RemoteCapture);
+    capture!.close();
+    link.close();
+  });
+  it('mic-off during startup prevents a late room join from publishing the microphone', async () => {
+    const { api } = bridge();
+    let joined!: (session: Awaited<ReturnType<typeof api.session>>) => void;
+    api.session.mockImplementationOnce(() => new Promise((resolve) => (joined = resolve)));
+    const link = new LiveKitLink(api);
+    const starting = link.start();
+    const pending = link.capture({ id: 'cancelled-mic' } as unknown as MediaStreamTrack);
+    await link.release();
+    joined({ url: 'ws://127.0.0.1:18780', token: 'token', voice: 'friday-voice' });
+    await starting;
+    expect(await pending).toBeUndefined();
+    expect(rooms[0].published).toEqual([]);
+    link.close();
+  });
+  it('bounds the startup wait and falls back when the room join stalls', async () => {
+    vi.useFakeTimers();
+    const { api } = bridge();
+    let joined!: (session: Awaited<ReturnType<typeof api.session>>) => void;
+    api.session.mockImplementationOnce(() => new Promise((resolve) => (joined = resolve)));
+    const link = new LiveKitLink(api);
+    const starting = link.start();
+    const pending = link.capture({ id: 'fallback-mic' } as unknown as MediaStreamTrack);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(await pending).toBeUndefined();
+    joined({ url: 'ws://127.0.0.1:18780', token: 'token', voice: 'friday-voice' });
+    await starting;
+    expect(rooms[0].published).toEqual([]);
+    link.close();
+  });
   it('a publish that completes after close or mic-off is withdrawn, never left live', async () => {
     const { api, listeners } = bridge();
     const link = new LiveKitLink(api);

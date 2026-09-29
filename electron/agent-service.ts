@@ -21,7 +21,7 @@ import type {
 import type { Drawing, Observation } from './desktop-protocol.js';
 import { executeInteract, parseInteract, type InteractPlan, type InteractRejection } from './interact.js';
 import { SpeechChannel } from './speech-channel.js';
-import type { VoiceOutput } from './speech-output.js';
+import type { Utterance, VoiceOutput } from './speech-output.js';
 import { validateSpeech } from './speech-policy.js';
 import { validSettings } from './validation.js';
 
@@ -73,6 +73,8 @@ export interface AgentServiceOptions {
   voice?: VoiceOutput;
   /** together: bound on waiting for first playable audio before releasing visuals. */
   interactSyncWaitMs?: number;
+  /** Local acknowledgement clips, one per accepted request while the model works. */
+  acknowledgements?: { next(): Utterance | undefined };
 }
 function messageText(message: RpcMessage | string | undefined) {
   if (!message || typeof message === 'string' || message.role !== 'assistant') return '';
@@ -144,8 +146,9 @@ export class AgentService extends EventEmitter {
     this.spawnProcess = options.spawn ?? spawn;
     this.grace = options.terminateGraceMs ?? 1200;
     this.channel = new SpeechChannel(() => this.options.voice, {
-      speaking: (active) => {
+      speaking: (active, _text, lane) => {
         this.presentation.speaking = active;
+        this.presentation.acknowledging = active && lane === 'ack' ? true : undefined;
         this.presentation.echo = this.channel.echoes();
         this.publish();
       },
@@ -194,13 +197,11 @@ export class AgentService extends EventEmitter {
         s.status = 'interrupted';
         s.summary = 'Interrupted when Friday closed. Resume explicitly to continue.';
       }
-    this.parentId =
-      this.sessions.find((s) => s.id === saved.parentId && s.role === 'parent')?.id ??
-      this.sessions.find((s) => s.role === 'parent')?.id ??
-      this.parentId;
-    if (!this.sessions.some((s) => s.id === this.parentId))
-      this.sessions.unshift(this.newSession('parent', 'Friday', this.parentId));
-    this.session(this.parentId).status = 'idle';
+    // Every start is a fresh conversation: an app restart begins a new parent
+    // Pi session, while all saved sessions and tasks stay searchable/readable
+    // through the session tools.
+    this.parentId = randomUUID();
+    this.sessions.unshift(this.newSession('parent', 'Friday', this.parentId));
     this.server.requestTimeout = 30_000;
     this.server.headersTimeout = 5000;
     await new Promise<void>((yes, no) => {
@@ -418,6 +419,7 @@ export class AgentService extends EventEmitter {
     this.revealing.clear();
     this.channel.silence();
     this.presentation.speaking = false;
+    this.presentation.acknowledging = undefined;
     this.presentation.echo = this.channel.echoes();
     this.publish();
   }
@@ -427,6 +429,9 @@ export class AgentService extends EventEmitter {
    * cannot talk over the user. Background children and transcription continue.
    */
   interrupt() {
+    // Talking over an acknowledgement is usually the user continuing: stop only the clip, so a
+    // false trigger never mutes the reply. A finalized request still replaces the turn.
+    if (this.channel.cancelAcknowledgement()) return;
     this.silence();
   }
   /** Friday's current and recent utterances, for renderer echo suppression. */
@@ -455,6 +460,15 @@ export class AgentService extends EventEmitter {
       this.addStep(task, 'status', 'Progress speech unavailable', 'failed', outcome.error);
       this.changedDeferred(task);
     });
+  }
+  /**
+   * One local clip per accepted request, under the same policy and channel as the reply: it only
+   * plays on a free channel, the reply preempts it, and Stop, barge-in or a new request cancel it.
+   */
+  private acknowledge(task: TaskRecord) {
+    if (!this.options.acknowledgements || this.speechSuppressed(task) || this.channel.active()) return;
+    const playback = this.channel.prepare('', 'ack', task.id, () => this.options.acknowledgements?.next());
+    if (playback && !playback.start()) playback.utterance.cancel();
   }
   private speechSuppressed(task: TaskRecord) {
     if (!this.options.voice) return 'Voice output is unavailable.';
@@ -553,6 +567,7 @@ export class AgentService extends EventEmitter {
       worker.error = undefined;
       worker.toolSteps.clear();
       if (session.role === 'parent') worker.desktopToken = this.bridge.beginRun?.(task.id);
+      if (session.role === 'parent' && source) this.acknowledge(task);
       await this.changed(task);
       const desktop = session.role === 'parent' ? await this.desktopContext() : '';
       if (generation !== this.actionGeneration || terminal.has(task.status)) return structuredClone(task);

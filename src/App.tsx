@@ -48,11 +48,19 @@ import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { PcmCapture, type FrameCapture } from './pcm-capture';
 import { LiveKitLink } from './livekit-link';
-import { ProgressiveTranscription } from './progressive-transcription';
+import { NoiseFloor, ProgressiveTranscription } from './progressive-transcription';
 import { VoiceFollowUp } from './voice-follow-up';
 import { detectStopCommand, detectWakeCommand } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
 import { isEcho, shouldBargeIn } from './echo-guard';
+import { continuation, ignoredFinal, type VoiceSubmission } from './voice-turns';
+
+/** How long the user's submitted words stay in the notch. */
+const transcriptMs = 3000;
+/** Friday's voice can still be in the room this long after playback reports it ended. */
+const playbackTailMs = 300;
+/** Share of a partial's words that must follow Friday's wording to be held back as echo. */
+const bargeInEchoSimilarity = 0.5;
 
 const starterIdeas = [
   'Look at my screen and explain what I am seeing',
@@ -699,6 +707,9 @@ export default function App() {
   const [prompt, setPrompt] = useState('');
   const [listenState, setListenState] = useState<ListeningState>('idle');
   const [heard, setHeard] = useState('');
+  // The user's own words in the notch: live while they speak, then briefly after submission.
+  const [transcript, setTranscript] = useState<{ text: string; final: boolean }>();
+  const transcriptTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [voiceLevel, setVoiceLevel] = useState(0);
   const [micEnabled, setMicEnabled] = useState(false);
   const micEnabledRef = useRef(false);
@@ -716,6 +727,7 @@ export default function App() {
   const [actionError, setActionError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const [approvalPending, setApprovalPending] = useState(false);
+  const [notchDrag, setNotchDrag] = useState<{ x: number; y: number }>();
 
   const persistedSettingsRef = useRef<BuddySettings | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
@@ -738,6 +750,23 @@ export default function App() {
   const [speaking, setSpeaking] = useState(false);
   const speakingRef = useRef(false);
   const speakingEndedAtRef = useRef<number | undefined>(undefined);
+  // An acknowledgement clip ("Hmm, okay") is playing: audio for the echo guard, not an answer.
+  const [acknowledging, setAcknowledging] = useState(false);
+  // Room noise learned across segments, so each new segment starts calibrated.
+  const noiseFloorRef = useRef(new NoiseFloor());
+  const lastVoiceRef = useRef<VoiceSubmission | undefined>(undefined);
+  const taskStatusRef = useRef(new Map<string, string>());
+  const childRequestRef = useRef(new Map<string, string>());
+  const [reportedChildren, setReportedChildren] = useState<Record<string, number>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('friday.reportedChildren') || '{}');
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem('friday.reportedChildren', JSON.stringify(reportedChildren));
+  }, [reportedChildren]);
   // What Friday is saying or just said, for dropping its own voice from the microphone.
   const echoRef = useRef<FridayState['presentation']['echo']>(undefined);
   // Thinking, submitting, or speaking: listening continues, but the idle timeout is held.
@@ -771,6 +800,29 @@ export default function App() {
     [tasks],
   );
   const wakeWord = settings?.wakeWord || 'Friday';
+  // Friday is voicing an answer; a playing acknowledgement clip does not count.
+  const answering = speaking && !acknowledging;
+
+  const showTranscript = useCallback((next?: { text: string; final: boolean }) => {
+    if (transcriptTimerRef.current) clearTimeout(transcriptTimerRef.current);
+    transcriptTimerRef.current = undefined;
+    setTranscript(next);
+    if (next?.final)
+      transcriptTimerRef.current = setTimeout(() => {
+        transcriptTimerRef.current = undefined;
+        setTranscript(undefined);
+      }, transcriptMs);
+  }, []);
+  /** Drops live words that turned out not to be a request, keeping a submitted transcript. */
+  const dropPartialTranscript = useCallback(() => {
+    setTranscript((current) => (current?.final ? current : undefined));
+  }, []);
+  useEffect(
+    () => () => {
+      if (transcriptTimerRef.current) clearTimeout(transcriptTimerRef.current);
+    },
+    [],
+  );
 
   const listeningRef = useRef<ListeningState>('idle');
   const updateListening = useCallback((state: ListeningState) => {
@@ -788,6 +840,8 @@ export default function App() {
     if (release) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       captureRef.current?.close();
+      // Also fence a microphone publication still waiting for the startup room join.
+      void liveKitRef.current?.release();
       streamRef.current = undefined;
       captureRef.current = undefined;
     }
@@ -803,9 +857,11 @@ export default function App() {
     selectChild();
     void window.buddy.silence();
     setSpeaking(false);
+    showTranscript();
+    lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [updateListening, selectChild, stopCapture]);
+  }, [updateListening, selectChild, stopCapture, showTranscript]);
 
   const disableMicrophone = useCallback(() => {
     micEnabledRef.current = false;
@@ -813,9 +869,11 @@ export default function App() {
     voiceFollowUpRef.current.cancel();
     followUpPendingRef.current = false;
     conversationOpenRef.current = false;
+    showTranscript();
+    lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [stopCapture, updateListening]);
+  }, [stopCapture, updateListening, showTranscript]);
 
   // Text interactions also expire when audio is explicitly off. Editing and active
   // work hold this timer; panel expansion is deliberately independent of it.
@@ -858,6 +916,8 @@ export default function App() {
           source: resumeVoice ? 'voice' : 'typed',
         });
         if (epoch !== requestEpochRef.current) return;
+        if (childId) childRequestRef.current.set(created.id, childId);
+        if (resumeVoice && lastVoiceRef.current?.text === cleaned) lastVoiceRef.current.taskId = created.id;
         if (resumeMic) voiceFollowUpRef.current.submitted(created.id);
         setSelected(created.id);
         setMarked(false);
@@ -889,7 +949,12 @@ export default function App() {
       let waitingSince = performance.now();
       // Wall clock, comparable with the host's echo timestamps.
       let speechStartedAt = Date.now();
+      let startedDuringPlayback = false;
       let bargedIn = false;
+      // Friday's voice (or its acoustic tail) may be in the microphone right now.
+      const playback = () =>
+        speakingRef.current ||
+        (speakingEndedAtRef.current !== undefined && Date.now() - speakingEndedAtRef.current < playbackTailMs);
       const currentWakeWord = () => persistedSettingsRef.current?.wakeWord || wakeWord;
       const echoCheck = (text: string, startedAt: number) => ({
         text,
@@ -908,23 +973,34 @@ export default function App() {
       };
       const transcription = new ProgressiveTranscription({
         direct: directVoiceRef.current,
+        floor: noiseFloorRef.current,
+        playback,
         decode: (request) => window.buddy.transcribePcm(request),
         speechStart: () => {
           spokenChildId = selectedChildRef.current;
           speechStartedAt = Date.now();
+          startedDuringPlayback = playback();
           bargedIn = false;
         },
         partial: (text) => {
-          // Barge-in: stop Friday's voice as soon as the user is clearly talking over it.
-          // The final transcript then replaces the unfinished request.
-          if (generation !== generationRef.current || bargedIn || !speakingRef.current) return;
+          if (generation !== generationRef.current) return;
           if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
-          if (isEcho(echoRef.current, echoCheck(text, speechStartedAt))) return;
           const engaged = conversationOpenRef.current || directVoiceRef.current;
           const addressed = detectWakeCommand(text, currentWakeWord(), false).result.wakeDetected;
-          if (!shouldBargeIn(text, engaged, addressed)) return;
-          bargedIn = true;
-          void window.buddy.interrupt();
+          // Barge-in: stop Friday's voice as soon as the user is clearly talking over it.
+          // The final transcript then replaces the unfinished request. Partials of leaked
+          // playback are often half-mangled, so a looser echo match holds them back.
+          if (
+            !bargedIn &&
+            speakingRef.current &&
+            !isEcho(echoRef.current, echoCheck(text, speechStartedAt), bargeInEchoSimilarity) &&
+            shouldBargeIn(text, engaged, addressed)
+          ) {
+            bargedIn = true;
+            void window.buddy.interrupt();
+          }
+          // Live words only while nothing Friday says could be mistaken for them.
+          if ((engaged || addressed) && (bargedIn || !startedDuringPlayback)) showTranscript({ text, final: false });
         },
         endpoint: () => {
           if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
@@ -966,7 +1042,8 @@ export default function App() {
         final: (text) => {
           if (generation !== generationRef.current) return;
           waitingSince = performance.now();
-          if (detectStopCommand(text, currentWakeWord())) {
+          const echo = isEcho(echoRef.current, echoCheck(text, speechStartedAt));
+          if (!echo && detectStopCommand(text, currentWakeWord())) {
             stopFridayRef.current?.();
             return;
           }
@@ -974,22 +1051,51 @@ export default function App() {
           // playback, listening stays live: Friday's own voice is dropped as echo, and a new
           // request replaces the unfinished one.
           if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
-          if (isEcho(echoRef.current, echoCheck(text, speechStartedAt))) {
-            updateListening(conversationOpenRef.current ? 'armed' : 'listening');
+          const resume = () => {
+            dropPartialTranscript();
+            if (directVoiceRef.current) stopListening();
+            else updateListening(conversationOpenRef.current ? 'armed' : 'listening');
+          };
+          if (echo) {
+            resume();
             return;
           }
           const wake = detectWakeCommand(text, currentWakeWord(), false).result;
           const wasEngaged = conversationOpenRef.current || directVoiceRef.current;
+          // A hesitation, or a lone "yeah" while Friday talks, must not replace the request.
+          if (
+            ignoredFinal({
+              text,
+              addressed: wake.wakeDetected,
+              duringPlayback: startedDuringPlayback && !directVoiceRef.current,
+            })
+          ) {
+            resume();
+            return;
+          }
           if (text && (wasEngaged || wake.wakeDetected)) setHeard(text);
           if (wake.wakeDetected) {
             selectChild();
             conversationOpenRef.current = true;
           }
-          const command = wake.wakeDetected ? wake.command : wasEngaged ? text : undefined;
+          let command = wake.wakeDetected ? wake.command : wasEngaged ? text : undefined;
           if (command) {
-            void runPrompt(command, true, { selectedChildId: wake.wakeDetected ? undefined : spokenChildId });
+            // The user paused mid-request and kept going before Friday did anything:
+            // resubmit the whole request instead of replacing it with its second half.
+            const previous = lastVoiceRef.current;
+            const merged = continuation(
+              previous,
+              { text: command, speechStartedAt, addressed: wake.wakeDetected },
+              previous?.taskId ? taskStatusRef.current.get(previous.taskId) : undefined,
+            );
+            command = merged ?? command.trim();
+            const childId = merged ? previous?.childId : wake.wakeDetected ? undefined : spokenChildId;
+            lastVoiceRef.current = { text: command, at: Date.now(), childId };
+            showTranscript({ text: command, final: true });
+            void runPrompt(command, true, { selectedChildId: childId });
             return;
           }
+          dropPartialTranscript();
           if (directVoiceRef.current) {
             stopListening();
             return;
@@ -1022,7 +1128,16 @@ export default function App() {
       }, failed);
       if (directVoiceRef.current && !pttHeldRef.current) capture.flush(() => transcription.finish());
     },
-    [runPrompt, stopListening, stopCapture, updateListening, selectChild, wakeWord],
+    [
+      runPrompt,
+      stopListening,
+      stopCapture,
+      updateListening,
+      selectChild,
+      wakeWord,
+      showTranscript,
+      dropPartialTranscript,
+    ],
   );
 
   useEffect(() => {
@@ -1060,6 +1175,8 @@ export default function App() {
       if (interrupt) void window.buddy.interrupt();
       setActionError(undefined);
       setHeard('');
+      showTranscript();
+      lastVoiceRef.current = undefined;
       const generation = generationRef.current;
       if (streamRef.current?.active && captureRef.current) {
         updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
@@ -1126,7 +1243,7 @@ export default function App() {
         updateListening('error');
       }
     },
-    [updateListening, stopCapture],
+    [updateListening, stopCapture, showTranscript],
   );
 
   useEffect(() => {
@@ -1161,6 +1278,12 @@ export default function App() {
       .catch((error) => setActionError(errorMessage(error, 'Friday could not load.')))
       .finally(() => setLoading(false));
     const removeTask = window.buddy.onTask((next) => {
+      taskStatusRef.current.set(next.id, next.status);
+      const reportedChild = childRequestRef.current.get(next.id);
+      if (reportedChild && next.status === 'completed' && (next.interactions?.length || next.response)) {
+        setReportedChildren((current) => ({ ...current, [reportedChild]: Date.now() }));
+        childRequestRef.current.delete(next.id);
+      }
       setTasks((current) =>
         [next, ...current.filter((item) => item.id !== next.id)].sort((a, b) => b.createdAt - a.createdAt),
       );
@@ -1176,6 +1299,7 @@ export default function App() {
       speakingRef.current = runtime.presentation.speaking;
       echoRef.current = runtime.presentation.echo;
       setSpeaking(runtime.presentation.speaking);
+      setAcknowledging(Boolean(runtime.presentation.acknowledging));
     });
     const removeListen = window.buddy.onListen(() => {
       setView('now');
@@ -1207,6 +1331,8 @@ export default function App() {
     setTyping(false);
     selectChild();
     setHeard('');
+    showTranscript();
+    lastVoiceRef.current = undefined;
     setActionError(undefined);
     setSpeaking(false);
     setGuiding(false);
@@ -1220,7 +1346,7 @@ export default function App() {
         if (micEnabledRef.current) void startListening(false, false);
         else updateListening('idle');
       });
-  }, [selectChild, startListening, stopCapture, updateListening]);
+  }, [selectChild, startListening, stopCapture, updateListening, showTranscript]);
   useEffect(() => {
     stopFridayRef.current = stopFriday;
   }, [stopFriday]);
@@ -1379,7 +1505,7 @@ export default function App() {
   }
 
   async function speakResponse() {
-    if (speaking) {
+    if (answering) {
       await window.buddy.silence();
       return;
     }
@@ -1418,6 +1544,15 @@ export default function App() {
       setActionError(errorMessage(error, 'Could not clear the drawing.'));
     }
   }
+
+  const setNotchOffset = useCallback((offset: { x: number; y: number }) => {
+    setNotchDrag(offset);
+    try {
+      void window.buddy.setNotchOffset(offset);
+    } catch (error) {
+      setActionError(errorMessage(error, 'Friday will reset its notch position.'));
+    }
+  }, []);
 
   async function newTask() {
     try {
@@ -1567,7 +1702,7 @@ export default function App() {
           <Mic size={18} />
         </button>
 
-        {(activeTask || listeningActive || speaking) && (
+        {(activeTask || listeningActive || answering) && (
           <button className="stop-button pressable" type="button" onClick={() => void stopAll()}>
             <CircleStop size={15} /> <span>Stop</span>
           </button>
@@ -1602,13 +1737,17 @@ export default function App() {
         }
         tasks={tasks}
         listening={listenState}
-        speaking={speaking}
+        speaking={answering}
+        transcript={transcript}
         guiding={guiding}
         controlling={controlling}
+        onWindowDrag={setNotchOffset}
+        notchOffset={notchDrag ?? settings?.notchOffset}
         level={voiceLevel}
         heard={heard}
         error={actionError}
         selectedChildId={selectedChildId}
+        reportedChildren={reportedChildren}
         typing={typing}
         onTypingChange={changeTyping}
         micEnabled={micEnabled}
@@ -1742,7 +1881,7 @@ export default function App() {
               onRetry={() => void runPrompt(task.prompt)}
               onApprove={(approved) => void resolveApproval(approved)}
               approvalPending={approvalPending}
-              speaking={speaking}
+              speaking={answering}
               replayDisabledReason={
                 activeTask
                   ? 'Wait for this reply to finish'

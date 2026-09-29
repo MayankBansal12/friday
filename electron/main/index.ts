@@ -7,6 +7,8 @@ import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
+import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
+import { pwCatSink } from '../speech-output.js';
 import {
   listenerIdentity,
   liveKitConfigFromEnvironment,
@@ -51,6 +53,16 @@ let service: AgentService;
 let speech: SpeechService;
 let bridge: DesktopBridge;
 const speaker = createSpeakerFromEnvironment();
+// Bundled clips (app.asar when packaged); they follow Friday's voice route, LiveKit or pw-cat.
+let acknowledgements: Acknowledgements | undefined;
+try {
+  acknowledgements = new Acknowledgements(
+    loadAcknowledgements(acknowledgementDirectory(root)),
+    () => speaker.sink ?? pwCatSink(),
+  );
+} catch (error) {
+  console.warn('Acknowledgement clips are unavailable:', error instanceof Error ? error.message : error);
+}
 // Read once after dotenv; this removes the LiveKit key and secret from inherited environments.
 const liveKitSetup = liveKitConfigFromEnvironment();
 if (liveKitSetup.error) console.warn(`LiveKit is off: ${liveKitSetup.error}`);
@@ -61,6 +73,8 @@ let surfaceHeight: number | undefined;
 let surfaceWidth: number | undefined;
 let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
+let notchOffset: { x: number; y: number } | undefined;
+let notchPersistTimer: NodeJS.Timeout | undefined;
 
 function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const area = screen.getPrimaryDisplay().workArea;
@@ -89,6 +103,12 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
     : area.x + Math.round((area.width - width) / 2);
   // Keep the visible edge 5px below the desktop's system panel, outside its input region.
   const y = area.y + (notch ? 5 : 12);
+  if (notch && notchOffset) {
+    const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
+    const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
+    if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
+    return { x: nextX, y: nextY, width, height };
+  }
   return { x, y, width, height };
 }
 
@@ -128,7 +148,14 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   const placement = JSON.stringify({ layout, ...bounds });
   if (nativeWindowPlacement && (layoutChanged || boundsChanged || nativePlacement !== placement))
     void native
-      ?.command({ op: 'place_companion', pid: process.pid, layout, width: bounds.width, height: bounds.height })
+      ?.command({
+        op: 'place_companion',
+        pid: process.pid,
+        layout,
+        width: bounds.width,
+        height: bounds.height,
+        ...(surface === layout && notchOffset ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y } : {}),
+      })
       .then((result) => {
         if (result.placed) nativePlacement = placement;
       })
@@ -341,7 +368,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
-      { voice: speaker },
+      { voice: speaker, acknowledgements },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -351,6 +378,7 @@ if (hasSingleInstanceLock)
     bridge.onControlProgress = (id, text, spoken) => service.controlProgress(id, text, spoken);
     await service.init();
     const persistedSettings = service.getSettings();
+    notchOffset = persistedSettings.notchOffset;
     speech.setWakeWord(persistedSettings.wakeWord);
     app.setLoginItemSettings({ openAtLogin: persistedSettings.launchAtLogin });
     createWindow(openedAtLogin);
@@ -528,6 +556,29 @@ if (hasSingleInstanceLock)
       window?.show();
       window?.focus();
     });
+    ipcMain.handle('window:notch-offset', (event, value: unknown) => {
+      fromWindow(event);
+      if (value === undefined || value === null) {
+        if (notchOffset) {
+          notchOffset = undefined;
+          setSurface(surface, surfaceHeight, surfaceWidth);
+          void service.updateSettings({ notchOffset: undefined }).catch(() => {});
+        }
+        return;
+      }
+      if (!value || typeof value !== 'object') throw new Error('Invalid notch offset');
+      const offset = value as Record<string, unknown>;
+      if (typeof offset.x !== 'number' || typeof offset.y !== 'number') throw new Error('Invalid notch offset');
+      // Drags compose over the previous offset and re-place synchronously;
+      // persistence happens in the background.
+      notchOffset = { x: Math.round(offset.x), y: Math.round(offset.y) };
+      setSurface(surface, surfaceHeight, surfaceWidth);
+      if (notchPersistTimer) clearTimeout(notchPersistTimer);
+      notchPersistTimer = setTimeout(() => {
+        notchPersistTimer = undefined;
+        void service.updateSettings({ notchOffset }).catch(() => {});
+      }, 1000);
+    });
     ipcMain.handle('window:hide', (event) => {
       fromWindow(event);
       stopListening();
@@ -577,6 +628,7 @@ app.on('before-quit', (event) => {
 });
 app.on('will-quit', () => {
   if (placementTimer) clearTimeout(placementTimer);
+  if (notchPersistTimer) clearTimeout(notchPersistTimer);
   globalShortcut.unregisterAll();
   bridge?.close();
 });

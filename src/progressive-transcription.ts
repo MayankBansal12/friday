@@ -22,7 +22,67 @@ interface Options {
   trace?(event: SpeechTrace): void;
   now?(): number;
   direct?: boolean;
+  /** True while Friday's own voice may reach the mic; speech then needs more energy to count. */
+  playback?(): boolean;
+  /** Shared across segments so a new request starts with a calibrated noise floor. */
+  floor?: NoiseFloor;
 }
+
+const frameSamples = 320;
+const trailingContext = 3840; // 240 ms of silence decoded with the final suffix
+const endpointQuiet = 13_600; // 850 ms
+const extendedQuiet = 25_600; // 1.6 s when the recognized text stops mid-phrase
+const onsetFrames = 3; // 60 ms above the start threshold
+const resumeFrames = 2;
+// Words that do not end a spoken request; a pause after them is usually thinking, not done.
+const dangling = new Set(
+  'and or but because the a an my your our their his her its to of for with from if than into um uh uhm er erm'.split(
+    ' ',
+  ),
+);
+
+/** Text that looks cut off mid-phrase: trailing comma/dash/ellipsis or a dangling function word. */
+export function soundsUnfinished(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed || /[?!]$/.test(trimmed)) return false;
+  if (/(?:[,;:\-\u2013\u2014]|\.\.\.|\u2026)$/.test(trimmed)) return true;
+  const last = trimmed
+    .toLowerCase()
+    .replace(/[.\s]+$/, '')
+    .split(/[^a-z']+/)
+    .filter(Boolean)
+    .at(-1);
+  return last !== undefined && dangling.has(last);
+}
+
+/**
+ * Minimum-statistics noise floor: the quietest 100 ms block of recent non-speech audio. It is
+ * frozen while someone talks, so a long turn can never become the "floor" and cut itself off.
+ */
+export class NoiseFloor {
+  private blocks: number[] = [];
+  private energy = 0;
+  private frames = 0;
+  private last = 0;
+  get level() {
+    // Until 0.5 s of room audio is known, only the absolute thresholds apply.
+    return this.blocks.length < 5 ? 0 : Math.min(...this.blocks);
+  }
+  add(meanSquare: number, background: boolean) {
+    this.energy += meanSquare;
+    if (++this.frames < 5) return;
+    this.last = Math.sqrt(this.energy / this.frames);
+    this.energy = this.frames = 0;
+    if (!background) return;
+    this.blocks.push(this.last);
+    if (this.blocks.length > 30) this.blocks.shift();
+  }
+  /** Sustained sound that produced no words is room noise: calibrate to it. */
+  adopt() {
+    this.blocks = Array.from({ length: 5 }, () => this.last);
+  }
+}
+
 /** Progressive *batch* recognition. No prefix is committed, and partial text may revise. */
 export class ProgressiveTranscription {
   /** Bounded metadata only; never audio or transcript text, and never written to history. */
@@ -46,11 +106,15 @@ export class ProgressiveTranscription {
   private decodeCount = 0;
   private coalesced = 0;
   private peakQueued = 0;
-  private wasLoud = false;
+  private inSpeech = false;
+  private run = 0;
+  private extended = false;
+  private floor: NoiseFloor;
   private now: () => number;
 
   constructor(private options: Options) {
     this.now = options.now ?? (() => performance.now());
+    this.floor = options.floor ?? new NoiseFloor();
   }
   get hasSpeech() {
     return this.speechEnd > 0;
@@ -58,43 +122,57 @@ export class ProgressiveTranscription {
 
   push(frame: Int16Array) {
     if (this.closed || this.sealed) return;
-    if (!(frame instanceof Int16Array) || frame.length !== 320) {
+    if (!(frame instanceof Int16Array) || frame.length !== frameSamples) {
       this.fail(new Error('Invalid microphone frame.'));
       return;
     }
     let sum = 0;
     for (const sample of frame) sum += (sample / 32768) ** 2;
-    const loud = Math.sqrt(sum / frame.length) > 0.025;
-    if (!this.hasSpeech && !loud) {
+    const rms = Math.sqrt(sum / frame.length);
+    const floor = this.floor.level;
+    this.floor.add(sum / frame.length, !this.inSpeech);
+    // Hysteresis relative to the room: soft syllables and word tails keep a turn open, while
+    // Friday's own playback (echo residue) needs clearly louder speech to start or resume one.
+    const playing = this.options.playback?.() ?? false;
+    const on = playing ? Math.max(0.025, floor * 6) : Math.max(0.0025, floor * 3);
+    const off = playing ? Math.max(0.0125, floor * 3) : Math.max(0.0015, floor * 2);
+    this.run = rms >= on ? this.run + 1 : 0;
+    if (!this.hasSpeech) {
       this.pre.copyWithin(0, frame.length);
       this.pre.set(frame, this.pre.length - frame.length);
       this.preLength = Math.min(this.pre.length, this.preLength + frame.length);
-      return;
-    }
-    if (!this.hasSpeech) {
+      if (this.run < onsetFrames) return;
       this.options.speechStart();
       this.audio.set(this.pre.subarray(this.pre.length - this.preLength));
       this.length = this.preLength;
-      this.record('speech-start');
-    }
-    this.audio.set(frame.subarray(0, this.audio.length - this.length), this.length);
-    this.length = Math.min(this.audio.length, this.length + frame.length);
-    if (loud) {
       this.speechEnd = this.length;
-      if (this.ended) {
-        this.ended = false;
-        this.record('endpoint-revoked');
-        this.options.endpointRevoked?.();
-      }
-    } else if (this.wasLoud) this.record('speech-end');
-    this.wasLoud = loud;
+      this.inSpeech = true;
+      this.record('speech-start');
+    } else {
+      this.audio.set(frame.subarray(0, this.audio.length - this.length), this.length);
+      this.length = Math.min(this.audio.length, this.length + frame.length);
+      const voiced = this.inSpeech ? rms >= off : this.run >= resumeFrames;
+      if (voiced) {
+        this.speechEnd = this.length;
+        this.extended = false;
+        if (this.ended) {
+          this.ended = false;
+          this.record('endpoint-revoked');
+          this.options.endpointRevoked?.();
+        }
+      } else if (this.inSpeech) this.record('speech-end');
+      this.inSpeech = voiced;
+    }
     const quiet = this.length - this.speechEnd;
     // Decode a complete suffix during silence, once, with 240 ms trailing context.
-    const target = Math.min(this.length, this.speechEnd + 3840);
-    if (quiet >= 3840) this.want(target);
-    else if (loud && this.now() - this.lastDecodeAt >= this.cadenceMs && this.length >= 9600) this.want(this.length);
-    if (!this.options.direct && quiet >= 13_600) this.finish(false);
-    else if (this.length === this.audio.length) this.fail(new Error('Please use a shorter voice request.'), true);
+    const target = Math.min(this.length, this.speechEnd + trailingContext);
+    if (quiet >= trailingContext) this.want(target);
+    else if (this.inSpeech && this.now() - this.lastDecodeAt >= this.cadenceMs && this.length >= 9600)
+      this.want(this.length);
+    if (!this.options.direct && quiet >= endpointQuiet) {
+      this.finish(false);
+      if (quiet >= extendedQuiet) this.deliver();
+    } else if (this.length === this.audio.length) this.fail(new Error('Please use a shorter voice request.'), true);
   }
 
   /** Push-to-talk release is an explicit endpoint; use every received sample. */
@@ -108,7 +186,7 @@ export class ProgressiveTranscription {
     this.ended = true;
     this.record('endpoint');
     this.options.endpoint();
-    this.want(seal ? this.length : Math.min(this.length, this.speechEnd + 3840));
+    this.want(seal ? this.length : Math.min(this.length, this.speechEnd + trailingContext));
     this.deliver();
   }
 
@@ -155,8 +233,17 @@ export class ProgressiveTranscription {
         this.result = result;
         this.cadenceMs = Math.max(1200, Math.min(4000, result.inferenceMs * 1.3));
         this.record('inference-end', request.coverage);
-        if (result.coverage >= this.speechEnd + 3840 || this.sealed) this.record('final-ready', result.coverage);
+        if (result.coverage >= this.speechEnd + trailingContext || this.sealed)
+          this.record('final-ready', result.coverage);
         this.active = false;
+        if (!this.ended && !result.text.trim() && this.inSpeech && result.coverage >= 48_000) {
+          // Seconds of "speech" without a single word: a fan, music bed or hum, not a request.
+          this.record('noise-discarded', result.coverage);
+          this.floor.adopt();
+          this.reset();
+          this.options.final('');
+          return;
+        }
         if (!this.ended && result.text.trim()) this.options.partial?.(result.text);
         this.deliver();
         this.drain();
@@ -168,16 +255,26 @@ export class ProgressiveTranscription {
   }
   private deliver() {
     if (!this.ended || !this.result || this.result.coverage < this.desired || this.closed) return;
-    this.record('final-delivered', this.result.coverage);
     const text = this.result.text;
+    // A pause after "open the" or "and," is usually thinking: hold the final a little longer.
+    // Resumed speech revokes the endpoint and the whole turn is decoded again.
+    if (!this.sealed && this.length - this.speechEnd < extendedQuiet && soundsUnfinished(text)) {
+      if (!this.extended) this.record('endpoint-extended', this.result.coverage);
+      this.extended = true;
+      return;
+    }
+    this.record('final-delivered', this.result.coverage);
     // Reset synchronously: frames arriving during wake-only handling stay in capture.
+    this.reset();
+    this.options.final(text);
+  }
+  private reset() {
     this.audio = new Int16Array(400_000);
-    this.length = this.speechEnd = this.preLength = this.desired = this.requested = 0;
-    this.ended = this.sealed = this.wasLoud = false;
+    this.length = this.speechEnd = this.preLength = this.desired = this.requested = this.run = 0;
+    this.ended = this.sealed = this.inSpeech = this.extended = false;
     this.result = undefined;
     this.id = crypto.randomUUID();
     this.revision = this.decodeCount = this.coalesced = this.peakQueued = 0;
-    this.options.final(text);
   }
   private fail(error: unknown, requireRestart = false) {
     this.close();

@@ -117,6 +117,7 @@ interface Playback {
 
 export class LiveKitLink {
   private room?: Room;
+  private connecting = false;
   private closed = false;
   private playback?: Playback;
   private retry?: ReturnType<typeof setTimeout>;
@@ -150,7 +151,16 @@ export class LiveKitLink {
 
   /** Connects when LiveKit is configured; retries while the room is unreachable. */
   async start() {
-    if (this.closed || this.room) return;
+    if (this.closed || this.room || this.connecting) return;
+    this.connecting = true;
+    try {
+      await this.join();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async join() {
     let session;
     try {
       session = await this.bridge.session();
@@ -281,10 +291,21 @@ export class LiveKitLink {
    * LiveKit, or undefined to fall back to direct capture. Never stops `track`: the caller owns it.
    */
   async capture(track: MediaStreamTrack): Promise<RemoteCapture | undefined> {
-    const room = this.room;
-    if (this.closed || !room || room.state !== 'connected') return undefined;
     const generation = ++this.microphoneGeneration;
-    const current = () => !this.closed && this.room === room && generation === this.microphoneGeneration;
+    const active = () => !this.closed && generation === this.microphoneGeneration;
+    // The microphone can open before the startup room join finishes. Give that join
+    // the same bounded grace as mic publication instead of permanently falling back.
+    const connectingAt = Date.now();
+    while (
+      this.connecting &&
+      this.room?.state !== 'connected' &&
+      active() &&
+      Date.now() - connectingAt < microphoneWaitMs
+    )
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    const room = this.room;
+    if (!active() || !room || room.state !== 'connected') return undefined;
+    const current = () => active() && this.room === room;
     const sid = await this.serial(async () => {
       await this.unpublish(room);
       if (!current()) return undefined;

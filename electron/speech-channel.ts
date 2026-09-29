@@ -7,7 +7,8 @@ import {
 } from './speech-output.js';
 import type { EchoEntry } from './types.js';
 
-export type SpeechLane = 'reply' | 'progress';
+/** Reply owns the channel; progress and acknowledgement only play when it is free. */
+export type SpeechLane = 'reply' | 'progress' | 'ack';
 export interface SpeechOutcome {
   status: 'completed' | 'cancelled' | 'failed';
   /** True only when cancellation happened after playback was requested. */
@@ -43,12 +44,14 @@ export interface SpeechChannelEvents {
 /**
  * The single owner of Friday's voice output. Every utterance, from any lane,
  * passes through here so that barge-in, Stop and supersession have one fence.
- * Reply speech replaces progress speech; progress speech never replaces anything.
+ * Reply speech replaces progress and acknowledgement speech; those never replace anything.
  */
 export class SpeechChannel {
   private generationValue = 0;
   private sequence = 0;
   private current?: SpeechPlayback;
+  /** The playback that last announced speaking; only it may announce the end. */
+  private announcer?: SpeechPlayback;
   private recent: Array<{ text: string; endedAt: number }> = [];
   constructor(
     private readonly voice: () => VoiceOutput | undefined,
@@ -80,18 +83,25 @@ export class SpeechChannel {
     ];
   }
   /**
-   * Prepare speech without starting it. Returns undefined when the lane may not
-   * take the channel (progress while anything else is prepared or playing).
+   * Prepare speech without starting it. Returns undefined when the lane may not take the
+   * channel (progress or acknowledgement while anything else is prepared or playing).
+   * `source` supplies a ready-made utterance (a local clip) instead of synthesizing `text`.
    */
-  prepare(text: string, lane: SpeechLane, taskId: string): SpeechPlayback | undefined {
+  prepare(
+    text: string,
+    lane: SpeechLane,
+    taskId: string,
+    source?: () => Utterance | undefined,
+  ): SpeechPlayback | undefined {
     const voice = this.voice();
     if (!voice) return undefined;
     const active = this.active();
-    if (lane === 'progress' && active) return undefined;
+    if (lane !== 'reply' && active) return undefined;
     // Replies own the channel; any older reply was already fenced by the caller's busy check.
     if (active) active.utterance.cancel();
+    const utterance = source ? source() : voice.prepare(text);
+    if (!utterance) return undefined;
     const generation = this.generationValue;
-    const utterance = voice.prepare(text);
     let startRequested = false;
     let finished = false;
     let speaking = false;
@@ -99,8 +109,9 @@ export class SpeechChannel {
     const setSpeaking = (value: boolean) => {
       if (speaking === value) return;
       speaking = value;
-      // A superseded utterance must not clear the new owner's speaking state.
-      if (!value && this.current && this.current !== playback && !this.current.finished()) return;
+      // A superseded utterance must not clear the speaking state of a newer one that started.
+      if (!value && this.announcer !== playback) return;
+      this.announcer = value ? playback : undefined;
       this.events.speaking?.(value, value ? utterance.text : undefined, lane);
     };
     const outcome = utterance.done.then(
@@ -153,11 +164,19 @@ export class SpeechChannel {
     this.current = playback;
     return playback;
   }
+  /** Stops a playing acknowledgement only; a request's own speech is untouched. */
+  cancelAcknowledgement() {
+    const active = this.active();
+    if (active?.lane !== 'ack') return false;
+    active.utterance.cancel();
+    return true;
+  }
   /** Barge-in, Stop, mute and supersession: fence every older utterance and stop output now. */
   silence() {
     this.generationValue++;
     const active = this.current;
     this.current = undefined;
+    this.announcer = undefined;
     active?.utterance.cancel();
     this.voice()?.stop();
     if (active) this.events.speaking?.(false, undefined, active.lane);

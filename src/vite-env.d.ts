@@ -23,6 +23,7 @@ declare global {
       stopChild(id: string): Promise<unknown>;
       stopForeground(): Promise<void>;
       setSurface(layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void>;
+      setNotchOffset(offset?: { x: number; y: number }): Promise<void>;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;

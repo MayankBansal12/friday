@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { echoTailMs, echoWindowMs, isEcho, shouldBargeIn } from '../src/echo-guard';
+import { echoTailMs, echoWindowMs, fillerOnly, isEcho, shouldBargeIn } from '../src/echo-guard';
 
 const reply = 'Click the blue Save button in the top right corner.';
 
@@ -59,5 +59,23 @@ describe('echo guard', () => {
     expect(shouldBargeIn('wait stop', true, false)).toBe(true);
     expect(shouldBargeIn('something else entirely', false, false)).toBe(false);
     expect(shouldBargeIn('Friday wait', false, true)).toBe(true);
+  });
+
+  it('holds back half-mangled playback partials with a looser match', () => {
+    const entries = [{ text: 'I opened the display settings for you.' }];
+    const at = { speechStartedAt: 10_000, now: 10_500 };
+    const mangled = { ...at, text: 'opened a display thing for' };
+    expect(isEcho(entries, mangled)).toBe(false);
+    expect(isEcho(entries, mangled, 0.5)).toBe(true);
+    expect(isEcho(entries, { ...at, text: 'close the browser window now' }, 0.5)).toBe(false);
+  });
+
+  it('does not barge in on hesitation sounds', () => {
+    expect(fillerOnly('Um, uh.')).toBe(true);
+    expect(fillerOnly('Um, stop.')).toBe(false);
+    expect(fillerOnly('')).toBe(false);
+    expect(shouldBargeIn('um uh', true, false)).toBe(false);
+    expect(shouldBargeIn('uh wait', true, false)).toBe(false);
+    expect(shouldBargeIn('uh wait stop', true, false)).toBe(true);
   });
 });

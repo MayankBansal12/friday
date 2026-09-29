@@ -5,7 +5,7 @@ Friday has one foreground parent Pi session. Each user request is a turn in that
 ```mermaid
 flowchart TD
     userRequest["You speak a request"] -->|"Echo-cancelled mic · optional LiveKit room"| localStt["Local Parakeet transcription (batch)"]
-    localStt --> parentSession["One persistent parent Pi session"]
+    localStt --> parentSession["One parent Pi session per app run"]
     typedRequest["Optional typed request"] --> parentSession
     parentSession --> directReply["Reply or guide directly"]
     directReply --> presentation["interact · speak_tool · draw_tool · show_text_tool"]
@@ -29,7 +29,7 @@ flowchart TD
 - **Child completion:** ends its process and preserves its session file. A small badge signals an update. The parent receives IDs/titles/statuses in a compact registry on its next turn and can read details. A completion during an existing parent turn does not trigger a second foreground turn.
 - **Child questions:** `task_report(needs_input)` stores a question. The parent can read it, ask you, and use `session_actions` to resume that same child. Consequential shell approvals use explicit UI controls; the parent cannot approve on your behalf.
 - **History:** the active parent retains Pi's normal conversation context and automatic compaction. Other history is searched/read dynamically via tools, without a separate memory model. Search currently uses case-insensitive text matching, not semantic search. Reads are paginated and omit reasoning/image blocks.
-- **Restart:** the parent ID and task registry survive app restarts. Interrupted children are labeled accordingly and require an explicit resume. No invisible restart of old work.
+- **Restart:** every app restart begins a fresh parent Pi session. The task registry and all earlier sessions stay searchable via the session tools. Interrupted children are labeled accordingly and require an explicit resume. No invisible restart of old work.
 
 ## Parent tools
 
@@ -54,7 +54,7 @@ Speech status carries its evidence: `dispatch-estimate` (PCM handed to `pw-cat`)
 
 Friday starts in active listening and returns to wake waiting after ten seconds without a request. The local Parakeet detector remains active at rest. “Hey Friday” opens listening, and a command can follow in the same utterance. “Friday stop” is an exact addressed interrupt handled before ordinary request classification.
 
-A voice request keeps the conversation engaged while the parent works and speaks. Parakeet is batch recognition: progressive re-decodes of the growing segment give revisable partials before the 850 ms endpoint yields the final transcript. A partial of two or more words, or one addressed to Friday, barges in: `interrupt` stops the voice and unrevealed presentation without cancelling work. The final transcript then replaces the unfinished parent turn. The echo guard compares each transcript with what Friday was saying. Timing uses host timestamps on the renderer clock: an entry counts only while it plays or within 1.5 s of its end, and never after 8 s. Words that change meaning (“no”, “not”, “instead”, …) are never discounted as echo. Typed requests and text editing keep audio live for Stop only.
+A voice request keeps the conversation engaged while the parent works and speaks. Parakeet is batch recognition: progressive re-decodes of the growing segment give revisable partials before the 850 ms endpoint yields the final transcript. A partial of two or more words, or one addressed to Friday, barges in: `interrupt` stops the voice and unrevealed presentation without cancelling work. The final transcript then replaces the unfinished parent turn. The echo guard compares each transcript with what Friday was saying. Timing uses host timestamps on the renderer clock: an entry counts only while it plays or within 1.5 s of its end, and never after 8 s. Words that change meaning (“no”, “not”, “instead”, …) are never discounted as echo. Partials use a looser echo match (half the words) before barging in, and filler sounds never count toward the two words. Finals that are only hesitation sounds, or a lone non-corrective word spoken over Friday, are dropped (`src/voice-turns.ts`). A final that begins within 2.5 s of the previous voice submission, while that request is still thinking (no tool ran, nothing said), is merged with it and resubmitted. The segmenter (`src/progressive-transcription.ts`) learns the room noise floor between turns, holds an endpoint to 1.6 s when the text ends mid-phrase, and discards long wordless noise. For each accepted parent request with audible replies, the host plays one random bundled acknowledgement clip on the lowest-priority `ack` speech lane: the reply, Stop, a new request or barge-in cancels it, and its transcript joins the echo history. Typed requests and text editing keep audio live for Stop only.
 
 ### Optional LiveKit transport
 

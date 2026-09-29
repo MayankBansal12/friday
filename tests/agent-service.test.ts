@@ -496,7 +496,7 @@ describe('parent and child runtime boundary', () => {
       (await tool(0, '/tools/interact', { actions: [{ tool: 'speak_tool', args: { text: 'Late.' } }] })).status,
     ).toBe(401);
   });
-  it('restores the parent identity and marks unfinished children interrupted on restart', async () => {
+  it('starts a fresh parent session on restart and keeps earlier sessions searchable', async () => {
     const { service, dir } = await fixture();
     const parentId = service.state().parentId;
     await service.submit('Delegate');
@@ -507,9 +507,14 @@ describe('parent and child runtime boundary', () => {
     });
     services.push(restored);
     await restored.init();
-    expect(restored.state().parentId).toBe(parentId);
-    expect(restored.state().sessions.find((s) => s.id === child.id)?.status).toBe('interrupted');
-    expect((await restored.searchSessions('Keep going'))[0].session.id).toBe(child.id);
+    expect(restored.state().parentId).not.toBe(parentId);
+    const previous = restored.state().sessions.find((s) => s.id === parentId);
+    expect(previous?.role).toBe('parent');
+    const interrupted = restored.state().sessions.find((s) => s.id === child.id);
+    expect(interrupted?.status).toBe('interrupted');
+    expect(interrupted?.parentId).toBe(parentId);
+    expect((await restored.searchSessions('Keep going')).map((r) => r.session.id)).toContain(child.id);
+    expect((await restored.searchSessions('Delegate')).map((r) => r.session.id)).toContain(parentId);
   });
 });
 
@@ -1135,5 +1140,92 @@ describe('mixed spoken answer and action-only work', () => {
       'speech_exhausted',
     );
     expect(voice.utterances).toHaveLength(0);
+  });
+});
+
+describe('acknowledgement clips', () => {
+  const say = (text: string) => ({ actions: [{ tool: 'speak_tool', args: { text } }] });
+  async function acked(options: ConstructorParameters<typeof AgentService>[4] = {}) {
+    const voice = new FakeVoice();
+    voice.instant = true;
+    const clips = new FakeVoice();
+    clips.instant = true;
+    let offered = 0;
+    const acknowledgements = {
+      next: () => {
+        offered++;
+        return clips.prepare('Hmm okay.');
+      },
+    };
+    const setup = await fixture({ voice, acknowledgements, interactSyncWaitMs: 1000, ...options });
+    return { ...setup, voice, clips, offered: () => offered };
+  }
+  it('plays one clip while the model works; the reply preempts it without overlap', async () => {
+    const { service, tool, voice, clips } = await acked();
+    await service.submit('What time is it?', { source: 'voice' });
+    expect(clips.started).toEqual(['Hmm okay.']);
+    expect(service.state().presentation).toMatchObject({ speaking: true, acknowledging: true });
+    expect(service.state().presentation.echo).toEqual([{ text: 'Hmm okay.' }]);
+    await tool(0, '/tools/interact', say('It is four o’clock.'));
+    // The clip was stopped before the reply was handed any audio.
+    expect(clips.last!.state()).toBe('cancelled');
+    expect(voice.started).toEqual(['It is four o’clock.']);
+    expect(service.state().presentation.acknowledging).toBeUndefined();
+    voice.last!.finish();
+    await settle();
+    expect(clips.utterances).toHaveLength(1);
+    expect(clips.started).toEqual(['Hmm okay.']);
+  });
+  it('never queues a clip behind a reply that already finished', async () => {
+    const { service, tool, voice, clips, children } = await acked();
+    await service.submit('Hello', { source: 'voice' });
+    await tool(0, '/tools/interact', say('Hi there.'));
+    voice.last!.finish();
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Hi there.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await settle();
+    expect(clips.utterances).toHaveLength(1);
+    expect(clips.last!.state()).toBe('cancelled');
+  });
+  it('Stop and a replacing request cancel the clip', async () => {
+    const { service, clips } = await acked();
+    await service.submit('Open settings', { source: 'voice' });
+    await service.stop();
+    expect(clips.utterances[0].state()).toBe('cancelled');
+    await service.submit('Open the browser', { source: 'voice' });
+    await service.submit('Open the browser settings', { source: 'voice' });
+    expect(clips.utterances[1].state()).toBe('cancelled');
+    expect(clips.utterances.filter((u) => u.state() === 'playing')).toHaveLength(1);
+  });
+  it('barge-in over a clip stops only the clip, so the reply still speaks', async () => {
+    const { service, tool, voice, clips } = await acked();
+    await service.submit('Open settings', { source: 'voice' });
+    service.interrupt();
+    expect(clips.last!.state()).toBe('cancelled');
+    await settle();
+    expect(service.state().presentation.speaking).toBe(false);
+    await tool(0, '/tools/interact', say('Opening settings.'));
+    expect(voice.started).toEqual(['Opening settings.']);
+    // Barge-in over the reply itself still silences the whole turn.
+    service.interrupt();
+    expect(voice.last!.state()).toBe('cancelled');
+  });
+  it.each(['typed', 'muted'])('follows the reply speech policy (%s)', async (mode) => {
+    const { service, clips, offered } = await acked();
+    if (mode === 'muted') await service.updateSettings({ autoSpeak: false });
+    await service.submit('Open settings', { source: mode === 'typed' ? 'typed' : 'voice' });
+    expect(offered()).toBe(0);
+    expect(clips.utterances).toHaveLength(0);
+  });
+  it('acknowledges typed requests when typed replies are spoken', async () => {
+    const { service, clips } = await acked();
+    await service.updateSettings({ speakTypedReplies: true });
+    await service.submit('Open settings', { source: 'typed' });
+    expect(clips.started).toEqual(['Hmm okay.']);
+  });
+  it('does not acknowledge background children', async () => {
+    const { service, offered } = await acked();
+    await service.startChild('Research', 'Find the answer');
+    expect(offered()).toBe(0);
   });
 });

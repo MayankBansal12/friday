@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   ArrowUp,
   CircleHelp,
@@ -64,8 +66,11 @@ interface Props {
   controlling: boolean;
   level: number;
   heard: string;
+  /** The user's recognized words: live while they speak, final briefly after submission. */
+  transcript?: { text: string; final: boolean };
   error?: string;
   selectedChildId?: string;
+  reportedChildren?: Record<string, number>;
   onSelectTask(id: string): void;
   onClearContext(): void;
   micEnabled: boolean;
@@ -82,6 +87,27 @@ interface Props {
   onDetails(): void;
   onStopChild(id: string): void;
   onApprove(id: string, approved: boolean): void;
+  notchOffset?: { x: number; y: number };
+  onWindowDrag?(offset: { x: number; y: number }): void;
+}
+
+/** Quoted user words; live words keep their newest end visible in the narrow notch. */
+function spokenLine(text: string, final: boolean) {
+  const clean = text.trim().replace(/\s+/g, ' ');
+  const shown = !final && clean.length > 56 ? `…${clean.slice(-55).trimStart()}` : clean;
+  return `“${shown}”`;
+}
+
+function taskPreview(text: string) {
+  return (
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('|'))
+      ?.replace(/^#{1,6}\s+/, '')
+      .replace(/[*_`]/g, '')
+      .slice(0, 180) || 'Done'
+  );
 }
 
 export function FridayPresence(props: Props) {
@@ -92,6 +118,7 @@ export function FridayPresence(props: Props) {
   const { typing, onTypingChange: setTyping } = props;
   const [text, setText] = useState('');
   const [dismissed, setDismissed] = useState<string>();
+  const [autoOpen, setAutoOpen] = useState(false);
   const [acknowledged, setAcknowledged] = useState<Record<string, number>>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem('friday.taskUpdates') || '{}');
@@ -126,22 +153,49 @@ export function FridayPresence(props: Props) {
   const visible = children.filter(
     (s) =>
       ['running', 'needs_input'].includes(s.status) ||
-      (['completed', 'failed', 'interrupted'].includes(s.status) && acknowledged[s.id] !== s.updatedAt),
+      (['completed', 'failed', 'interrupted'].includes(s.status) &&
+        acknowledged[s.id] !== s.updatedAt &&
+        (props.reportedChildren?.[s.id] ?? 0) < s.updatedAt),
   );
   const running = children.filter((s) => s.status === 'running');
   const attention = visible.filter((s) => ['needs_input', 'failed', 'interrupted'].includes(s.status)).length;
   const selected = children.find((s) => s.id === props.selectedChildId);
   const detail = props.error || task?.error || state?.presentation.text || '';
   const contentKey = `${state?.presentation.taskId ?? ''}:${detail}`;
+  useEffect(() => {
+    if (!state?.presentation.expanded || !detail || dismissed === contentKey) return;
+    const opening = setTimeout(() => setAutoOpen(true), 0);
+    const timer = setTimeout(() => setAutoOpen(false), 15_000);
+    return () => {
+      clearTimeout(opening);
+      clearTimeout(timer);
+    };
+  }, [contentKey, state?.presentation.expanded, detail, dismissed]);
   const approvals = props.tasks.filter((t) => t.approval);
   const important = Boolean(
     approvals.length || ((props.error || task?.error || state?.presentation.expanded) && dismissed !== contentKey),
   );
+  // The user's words take the status line until Friday answers or needs something.
+  const userWords =
+    props.transcript?.text.trim() && !props.controlling && !typing && !approvals.length && !props.guiding && !speaking
+      ? props.transcript
+      : undefined;
   const engaged = Boolean(
-    props.controlling || busy || speaking || props.guiding || listeningToRequest || typing || important || selected,
+    props.controlling ||
+    busy ||
+    speaking ||
+    props.guiding ||
+    listeningToRequest ||
+    typing ||
+    important ||
+    selected ||
+    userWords,
   );
   const background = !engaged && visible.length > 0;
-  const expanded = !props.controlling && !background && hovered;
+  const expanded = !props.controlling && !background && (hovered || (autoOpen && dismissed !== contentKey));
+  const conversation = props.tasks
+    .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
+    .sort((a, b) => a.createdAt - b.createdAt);
   const resting = !engaged && !expanded;
   const surface: SurfaceLayout = background
     ? hovered
@@ -162,19 +216,21 @@ export function FridayPresence(props: Props) {
           ? 'Guiding you'
           : speaking
             ? 'Speaking…'
-            : listening === 'starting'
-              ? 'Opening microphone…'
-              : listening === 'transcribing'
-                ? 'One moment…'
-                : busy
-                  ? 'Working on it…'
-                  : listening === 'armed'
-                    ? 'Listening…'
-                    : listening === 'error'
-                      ? 'Check your microphone'
-                      : !props.micEnabled
-                        ? 'Microphone off'
-                        : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+            : userWords
+              ? spokenLine(userWords.text, userWords.final)
+              : listening === 'starting'
+                ? 'Opening microphone…'
+                : listening === 'transcribing'
+                  ? 'One moment…'
+                  : busy
+                    ? 'Working on it…'
+                    : listening === 'armed'
+                      ? 'Listening…'
+                      : listening === 'error'
+                        ? 'Check your microphone'
+                        : !props.micEnabled
+                          ? 'Microphone off'
+                          : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);
@@ -239,6 +295,78 @@ export function FridayPresence(props: Props) {
       syncSurface.current = () => {};
     };
   }, [surface, background, expanded, resting, reducedMotion, props.controlling]);
+  // Drag the notch by its bar. Deltas use screen coordinates: the window moves
+  // under the pointer, so client coordinates would cancel the drag. Offsets
+  // compose over the last committed anchor; main clamps to the work area.
+  const dragRef = useRef(props.onWindowDrag);
+  const offsetRef = useRef(props.notchOffset);
+  const controllingRef = useRef(props.controlling);
+  useEffect(() => {
+    dragRef.current = props.onWindowDrag;
+    offsetRef.current = props.notchOffset;
+    controllingRef.current = props.controlling;
+  });
+  useEffect(() => {
+    if (!props.onWindowDrag) return;
+    const root = panelRef.current?.closest('main') ?? document.body;
+    let origin: { x: number; y: number } | undefined;
+    let base: { x: number; y: number } | undefined;
+    let pending: { x: number; y: number } | undefined;
+    let moved = false;
+    let frame = 0;
+    const flush = () => {
+      frame = 0;
+      const latest = pending;
+      pending = undefined;
+      // With no pending frame the last rAF already sent the final offset.
+      if (latest) dragRef.current?.(latest);
+    };
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0 || controllingRef.current) return;
+      if (!event.target || !(event.target as Element).closest?.('.presence-bar')) return;
+      origin = { x: event.screenX, y: event.screenY };
+      base = { ...(offsetRef.current ?? { x: 0, y: 0 }) };
+      moved = false;
+      // Keep receiving moves if the pointer leaves the narrow window mid-drag.
+      // Never capture on buttons: pointer capture would retarget their clicks.
+      if (event.target instanceof Element && !event.target.closest('button, input, a'))
+        event.target.setPointerCapture?.(event.pointerId);
+    };
+    const move = (event: PointerEvent) => {
+      if (!origin || !base) return;
+      const dx = Math.round(event.screenX - origin.x);
+      const dy = Math.round(event.screenY - origin.y);
+      if (!moved && Math.hypot(dx, dy) < 6) return;
+      moved = true;
+      event.preventDefault();
+      if (!panelRef.current?.hasPointerCapture?.(event.pointerId))
+        panelRef.current?.setPointerCapture?.(event.pointerId);
+      pending = { x: base.x + dx, y: base.y + dy };
+      if (frame) return;
+      frame = requestAnimationFrame(flush);
+    };
+    const up = (event: PointerEvent) => {
+      if (panelRef.current?.hasPointerCapture?.(event.pointerId))
+        panelRef.current.releasePointerCapture(event.pointerId);
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      if (moved) flush();
+      origin = undefined;
+      base = undefined;
+      moved = false;
+    };
+    root.addEventListener('pointerdown', down, true);
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      root.removeEventListener('pointerdown', down, true);
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+    };
+  }, [props.onWindowDrag]);
   useEffect(
     () => () => {
       if (leaveTimer.current) clearTimeout(leaveTimer.current);
@@ -262,6 +390,7 @@ export function FridayPresence(props: Props) {
   }
   function collapse() {
     setHovered(false);
+    setAutoOpen(false);
     setTyping(false);
     setDismissed(contentKey);
     props.onDismiss();
@@ -308,8 +437,8 @@ export function FridayPresence(props: Props) {
                   : session.status === 'interrupted'
                     ? 'Interrupted'
                     : session.status === 'completed'
-                      ? session.summary || 'Done'
-                      : session.summary || 'Working on it…'}
+                      ? taskPreview(session.summary || 'Done')
+                      : taskPreview(session.summary || 'Working on it…')}
             </small>
           </button>
           {['running', 'needs_input'].includes(session.status) ? (
@@ -426,8 +555,10 @@ export function FridayPresence(props: Props) {
               <strong>Friday</strong>
               <span role="status">
                 <motion.span
-                  className="presence-status-copy"
-                  key={status}
+                  className={`presence-status-copy ${userWords ? 'presence-transcript' : ''}`}
+                  // Live words update in place; only a change of kind animates.
+                  key={userWords ? 'transcript' : status}
+                  aria-label={userWords ? `You said: ${userWords.text}` : undefined}
                   initial={reducedMotion ? false : { opacity: 0, y: 3 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: reducedMotion ? 0 : 0.18 }}
@@ -488,14 +619,42 @@ export function FridayPresence(props: Props) {
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
                 <div className="presence-content">
                   {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
-                  {detail && (
-                    <p
-                      className={`presence-reply ${props.error || task?.error ? 'is-error' : ''}`}
-                      role={props.error || task?.error ? 'alert' : undefined}
-                    >
-                      {detail}
-                    </p>
+                  {conversation.length > 0 && (
+                    <div className="presence-conversation" aria-label="Conversation transcript">
+                      {conversation.map((item) => {
+                        const reply =
+                          item.interactions
+                            ?.flatMap((interaction) => interaction.actions)
+                            .filter((action) => action.tool === 'show_text_tool' && action.status === 'completed')
+                            .map((action) => action.text)
+                            .filter(Boolean)
+                            .join('\n\n') ||
+                          item.response ||
+                          (state?.presentation.taskId === item.id ? state.presentation.text : '');
+                        return (
+                          <div className="presence-turn" key={item.id}>
+                            <div className="presence-turn-user">{item.prompt}</div>
+                            {reply && (
+                              <div className="presence-reply presence-markdown">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{reply}</ReactMarkdown>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
+                  {detail &&
+                    (props.error ||
+                      task?.error ||
+                      !conversation.some((item) => item.id === state?.presentation.taskId)) && (
+                      <div
+                        className={`presence-reply presence-markdown ${props.error || task?.error ? 'is-error' : ''}`}
+                        role={props.error || task?.error ? 'alert' : undefined}
+                      >
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{detail}</ReactMarkdown>
+                      </div>
+                    )}
                   {approvals.map((item) => (
                     <div className="presence-approval" key={item.id}>
                       <strong>{item.approval!.title}</strong>

@@ -22,4 +22,12 @@ describe('IPC validation', () => {
     expect(() => validSettings({ model: 'model with spaces' })).toThrow('valid OpenCode Go model ID');
     expect(() => validSettings({ secretOption: true })).toThrow('Unknown setting');
   });
+
+  it('accepts integer notch anchors and rejects malformed ones', () => {
+    expect(validSettings({ notchOffset: { x: -120, y: 40 } })).toEqual({ notchOffset: { x: -120, y: 40 } });
+    expect(() => validSettings({ notchOffset: { x: 1.5, y: 0 } })).toThrow('Invalid notch anchor');
+    expect(() => validSettings({ notchOffset: { x: 0, y: 90_000 } })).toThrow('Invalid notch anchor');
+    expect(() => validSettings({ notchOffset: { x: 0 } })).toThrow('Invalid notch anchor');
+    expect(() => validSettings({ notchOffset: [0, 0] })).toThrow('Invalid notch anchor');
+  });
 });

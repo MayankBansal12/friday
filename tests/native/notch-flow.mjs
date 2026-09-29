@@ -95,7 +95,8 @@ try {
     ['open my mail instead', 'voice'],
   ]);
   await complete(true);
-  await check('armed', 'bar');
+  await check('armed', 'panel');
+  assert.match(await evaluate("document.querySelector('.presence-reply')?.textContent"), /Here is the result/);
   await shot('04-speaking');
   await speech('Friday stop');
   await check('listening', 'quiet');
@@ -124,7 +125,12 @@ try {
   await speech('Hey Friday, what time is it?');
   await check('armed', 'bar');
   await complete();
-  await check('armed', 'bar');
+  await check('armed', 'panel');
+  await evaluate(
+    "fixture.runtime.presentation={taskId:'request',text:'**Formatted** reply',expanded:true,speaking:false};fixture.task({...fixture.request,status:'completed',response:'**Formatted** reply'});fixture.emit()",
+  );
+  await pause();
+  assert.equal(await evaluate("document.querySelector('.presence-markdown strong')?.textContent"), 'Formatted');
   await evaluate('fixture.clock+=11000');
   await pause();
   assert.equal(await evaluate('fixture.listening'), 'listening');

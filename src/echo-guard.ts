@@ -93,10 +93,11 @@ export interface EchoCheck {
 /**
  * Whether `text` is most likely Friday's own voice. An utterance counts only while it is
  * playing or if the user's speech began within `echoTailMs` of its end, and never after
- * `echoWindowMs`. Most recognized words must follow Friday's wording in order; a wake word
- * Friday did not say marks the speech as the user's.
+ * `echoWindowMs`. Most recognized words (`similarity`) must follow Friday's wording in order;
+ * a wake word Friday did not say marks the speech as the user's. Revisable partials use a
+ * lower bar before interrupting, because leaked playback is often recognized half-mangled.
  */
-export function isEcho(entries: EchoEntry[] | undefined, check: EchoCheck) {
+export function isEcho(entries: EchoEntry[] | undefined, check: EchoCheck, similarity = 0.8) {
   const heard = words(check.text);
   if (!heard.length || !entries?.length) return false;
   const wake = check.wakeWord ? words(check.wakeWord) : [];
@@ -110,15 +111,28 @@ export function isEcho(entries: EchoEntry[] | undefined, check: EchoCheck) {
     if (wake.length && includesRun(heard, wake) && !includesRun(said, wake)) return false;
     // "Not the blue button" is a correction, not a slip in recognizing Friday's own words.
     if (heard.some((word) => corrections.has(word) && count(heard, word) > count(said, word))) return false;
-    return commonSubsequence(heard, said) / heard.length >= 0.8;
+    return commonSubsequence(heard, said) / heard.length >= similarity;
   });
+}
+
+/** Hesitation sounds that never carry a request on their own. */
+const fillers = new Set(['um', 'uh', 'uhm', 'umm', 'er', 'erm', 'ah', 'eh', 'oh', 'hm', 'hmm', 'mm', 'mhm', 'mmhmm']);
+
+/** Recognized words that carry content, without hesitation sounds. */
+export function contentWords(text: string) {
+  return words(text).filter((word) => !fillers.has(word));
+}
+
+export function fillerOnly(text: string) {
+  return words(text).length > 0 && !contentWords(text).length;
 }
 
 /**
  * Whether a revisable partial transcript should interrupt Friday's playback. Engaged
- * conversations need at least two words; otherwise the user must address Friday by name.
+ * conversations need at least two content words ("um okay" is not a correction); otherwise
+ * the user must address Friday by name.
  */
 export function shouldBargeIn(partial: string, engaged: boolean, addressed: boolean) {
   if (addressed) return true;
-  return engaged && words(partial).length >= 2;
+  return engaged && contentWords(partial).length >= 2;
 }

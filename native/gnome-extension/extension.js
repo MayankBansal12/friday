@@ -183,11 +183,16 @@ export default class FridayDesktop extends Extension {
       const notch = ['quiet', 'bar', 'panel'].includes(c.layout);
       const width = Math.min(Math.max(Number(c.width) || 96, 76), Math.min(800, area.width - 24));
       const height = Math.min(Math.max(Number(c.height) || 96, notch ? 1 : 60), Math.min(850, area.height - 24));
-      const x = ['orb', 'tasks'].includes(c.layout)
+      let x = ['orb', 'tasks'].includes(c.layout)
         ? area.x + area.width - width - 18
         : area.x + Math.round((area.width - width) / 2);
       // The notch surfaces hug the top of the usable screen; the renderer adds no top padding.
-      const y = area.y + (notch ? 5 : 12);
+      let y = area.y + (notch ? 5 : 12);
+      // A user drag offset applies only to notch surfaces and is clamped to the work area.
+      if (notch && Number.isFinite(Number(c.notchOffsetX)) && Number.isFinite(Number(c.notchOffsetY))) {
+        x = Math.min(Math.max(x + Number(c.notchOffsetX), area.x), area.x + area.width - width);
+        y = Math.min(Math.max(y + Number(c.notchOffsetY), area.y), area.y + area.height - height);
+      }
       win.move_resize_frame(false, x, y, width, height);
       return { placed: true, layout: c.layout, x, y, width, height };
     }

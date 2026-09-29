@@ -63,6 +63,7 @@ export function validSettings(value: unknown): Partial<BuddySettings> {
     'model',
     'autoSpeak',
     'speakTypedReplies',
+    'notchOffset',
   ]);
   if (Object.keys(input).some((key) => !allowed.has(key as keyof BuddySettings))) throw new Error('Unknown setting.');
   const result: Partial<BuddySettings> = {};
@@ -87,6 +88,18 @@ export function validSettings(value: unknown): Partial<BuddySettings> {
     if (typeof input.model !== 'string' || !modelPattern.test(input.model.trim()))
       throw new Error('Enter a valid OpenCode Go model ID.');
     result.model = input.model.trim();
+  }
+  if ('notchOffset' in input) {
+    const offset = input.notchOffset as Record<string, unknown> | undefined;
+    if (
+      !offset ||
+      typeof offset !== 'object' ||
+      Array.isArray(offset) ||
+      Object.keys(offset).some((key) => !['x', 'y'].includes(key)) ||
+      ![offset.x, offset.y].every((v) => Number.isInteger(v) && Math.abs(v as number) <= 8_192)
+    )
+      throw new Error('Invalid notch anchor.');
+    result.notchOffset = { x: offset.x as number, y: offset.y as number };
   }
   if ('defaultCwd' in input) {
     if (typeof input.defaultCwd !== 'string' || !input.defaultCwd.trim() || input.defaultCwd.length > 4_096)

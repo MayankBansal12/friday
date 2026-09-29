@@ -94,4 +94,55 @@ describe('SpeechChannel', () => {
       evidence: 'none',
     });
   });
+  it('plays an acknowledgement only on a free channel, and any reply preempts it', async () => {
+    const { speech, voice, events } = channel();
+    voice.instant = true;
+    const clips = new FakeVoice();
+    clips.instant = true;
+    const ack = speech.prepare('', 'ack', 't1', () => clips.prepare('Hmm okay.'))!;
+    expect(ack.start()).toBe(true);
+    expect(events.at(-1)).toEqual([true, 'Hmm okay.']);
+    // Progress and a second clip never displace it; nothing is prepared for them either.
+    expect(speech.prepare('Opening it.', 'progress', 't1')).toBeUndefined();
+    let offered = 0;
+    expect(speech.prepare('', 'ack', 't1', () => (offered++, clips.prepare('Mm-hmm.')))).toBeUndefined();
+    expect(offered).toBe(0);
+    const reply = speech.prepare('Here it is.', 'reply', 't1')!;
+    expect(ack.utterance.state()).toBe('cancelled');
+    expect(await ack.outcome).toMatchObject({ status: 'cancelled', interrupted: true });
+    // The cancelled clip announced the end; the reply announces its own start.
+    expect(events.at(-1)).toEqual([false, undefined]);
+    reply.start();
+    expect(events.at(-1)).toEqual([true, 'Here it is.']);
+    // A reply playing refuses a clip outright.
+    expect(speech.prepare('', 'ack', 't2', () => clips.prepare('Hmm.'))).toBeUndefined();
+    expect(speech.recentText()).toContain('Hmm okay.');
+  });
+  it('cancels only an acknowledgement without fencing the request', async () => {
+    const { speech, voice } = channel();
+    const clips = new FakeVoice();
+    clips.instant = true;
+    expect(speech.cancelAcknowledgement()).toBe(false);
+    const ack = speech.prepare('', 'ack', 't1', () => clips.prepare('Hmm okay.'))!;
+    ack.start();
+    const generation = speech.generation;
+    expect(speech.cancelAcknowledgement()).toBe(true);
+    expect(speech.generation).toBe(generation);
+    expect((await ack.outcome).status).toBe('cancelled');
+    const reply = speech.prepare('Still answering.', 'reply', 't1')!;
+    expect(reply.start()).toBe(true);
+    expect(speech.cancelAcknowledgement()).toBe(false);
+    expect(voice.last!.state()).toBe('playing');
+  });
+  it('clears speaking when a replacement is cancelled before it ever started', async () => {
+    const { speech, voice, events } = channel();
+    voice.instant = true;
+    const first = speech.prepare('First.', 'reply', 't1')!;
+    first.start();
+    const second = speech.prepare('Second.', 'reply', 't1')!;
+    await first.outcome;
+    second.utterance.cancel();
+    await second.outcome;
+    expect(events.at(-1)).toEqual([false, undefined]);
+  });
 });

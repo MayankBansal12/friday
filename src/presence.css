@@ -157,6 +157,11 @@
 .presence-status-copy {
   display: block;
 }
+/* The user's own words, set apart from Friday's status and answers. */
+.presence-heading .presence-transcript {
+  color: #d8e6c4;
+  font-style: italic;
+}
 .presence-action {
   width: 29px;
   height: 29px;
@@ -205,6 +210,44 @@
 }
 .presence-reply.is-error {
   color: #f1b69d;
+}
+.presence-turn {
+  margin-bottom: 18px;
+}
+.presence-turn-user {
+  padding: 9px 12px;
+  margin: 0 0 10px 32px;
+  border-radius: 12px;
+  background: #ffffff12;
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.presence-markdown {
+  white-space: normal;
+}
+.presence-markdown > :first-child {
+  margin-top: 0;
+}
+.presence-markdown > :last-child {
+  margin-bottom: 0;
+}
+.presence-markdown pre,
+.presence-markdown table {
+  max-width: 100%;
+  overflow-x: auto;
+  display: block;
+}
+.presence-markdown code {
+  overflow-wrap: anywhere;
+}
+.presence-markdown th,
+.presence-markdown td {
+  border: 1px solid #ffffff30;
+  padding: 5px 8px;
+}
+.presence-markdown a {
+  color: #d9ff91;
 }
 .presence-hint {
   color: #b2bdb0;

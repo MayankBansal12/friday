@@ -74,6 +74,8 @@ export interface PresentationState {
   text: string;
   expanded: boolean;
   speaking: boolean;
+  /** The speech playing is only a short "hmm, let's see" acknowledgement, not a reply. */
+  acknowledging?: boolean;
   taskId?: string;
   /** Current or recent Friday utterances; the renderer drops transcripts that echo them. */
   echo?: EchoEntry[];
@@ -95,6 +97,8 @@ export interface BuddySettings {
   autoSpeak?: boolean;
   /** Typed requests reply visibly by default; opt in to also speak them. */
   speakTypedReplies?: boolean;
+  /** Renderer drag offset from the default top-center notch anchor, in CSS px. */
+  notchOffset?: { x: number; y: number };
 }
 
 export type ListeningState = 'idle' | 'paused' | 'starting' | 'listening' | 'transcribing' | 'armed' | 'error';

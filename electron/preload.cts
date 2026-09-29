@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('buddy', {
   stopForeground: (): Promise<void> => invoke('foreground:stop', 15_000),
   setSurface: (layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void> =>
     invoke('window:surface', 10_000, layout, height, contentWidth),
+  setNotchOffset: (offset?: { x: number; y: number }): Promise<void> => invoke('window:notch-offset', 10_000, offset),
   onFridayState: (callback: (state: FridayState) => void) => {
     const handler = (_: unknown, state: FridayState) => callback(state);
     ipcRenderer.on('friday:state', handler);
