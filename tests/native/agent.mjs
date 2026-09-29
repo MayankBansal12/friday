@@ -14,7 +14,7 @@ async function evaluate(expression) {
   return result.result.value;
 }
 async function request(prompt) {
-  await evaluate(`document.querySelector('[aria-label="Show Friday updates"]')?.click()`);
+  await evaluate(`document.querySelector('.presence-heading')?.focus()`);
   await delay(200);
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Type instead'))?.click()`);
   await delay(200);
@@ -47,7 +47,7 @@ async function request(prompt) {
   throw new Error('Real UI request timed out');
 }
 try {
-  await evaluate(`document.querySelector('[aria-label="Show Friday updates"]')?.click()`);
+  await evaluate(`document.querySelector('.presence-heading')?.focus()`);
   await delay(200);
   await evaluate(`document.querySelector('[aria-label="Open settings and history"]').click()`);
   await delay(200);
@@ -104,7 +104,7 @@ try {
   assert.match(second.response, /button|open/i);
   await writeFile(join(stage, 'ui-agent-results.json'), JSON.stringify({ first, second }, null, 2));
   console.log(
-    'PASS: exact user request → fullscreen screenshot → visible caption and drawing → automatic window return → same-parent follow-up → fresh observation → guidance',
+    'PASS: exact user request → fullscreen screenshot → drawing with Friday still visible → guide cleared → same-parent follow-up → fresh observation → guidance',
   );
 } finally {
   close();

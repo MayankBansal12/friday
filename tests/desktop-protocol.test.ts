@@ -97,6 +97,29 @@ describe('desktop coordinate and freshness contract', () => {
     ])
       expect(() => drawing({ ...ids, items: [bad] }, observation())).toThrow();
   });
+  it('treats blank optional titles as absent but still rejects meaningful titles on non-notes', () => {
+    const circle = { id: 'focus', kind: 'circle', x: 100, y: 200, width: 200, height: 60 };
+    for (const title of ['', '   ', '\n\t', null]) {
+      const [item] = drawing({ ...ids, items: [{ ...circle, title }] }, observation()).items;
+      expect(item).toEqual({ ...circle, kind: 'ellipse' });
+      expect(item).not.toHaveProperty('title');
+      // The exact payload GNOME revalidates must stay valid too.
+      expect(drawing({ ...ids, items: [item] }, observation()).items[0]).toEqual(item);
+    }
+    for (const kind of ['circle', 'arrow', 'label', 'step'])
+      expect(() =>
+        drawing({ ...ids, items: [{ ...circle, kind, step: 1, text: 'Here', title: ' Click here ' }] }, observation()),
+      ).toThrow('Only notes have a title');
+    expect(() => drawing({ ...ids, items: [{ ...circle, title: 42 }] }, observation())).toThrow('plain text');
+    const note = drawing(
+      { ...ids, items: [{ id: 'n', kind: 'note', x: 10, y: 10, title: '  ', text: 'Open settings' }] },
+      observation(),
+    ).items[0];
+    expect(note).toEqual({ id: 'n', kind: 'note', x: 10, y: 10, text: 'Open settings' });
+    expect(() =>
+      drawing({ ...ids, items: [{ id: 'n', kind: 'note', x: 10, y: 10, title: '  ' }] }, observation()),
+    ).toThrow('needs text or a title');
+  });
   it('enforces each text limit without rejecting labels at the limit', () => {
     for (const [kind, limit] of Object.entries(annotationTextLimits)) {
       const item = {

@@ -72,6 +72,7 @@ export default class Driver extends Extension {
         const frame = target.meta_window.get_frame_rect();
         const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
         result = {
+          pid: target.meta_window.get_pid(),
           frame: { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
           workArea: { x: area.x, y: area.y, width: area.width, height: area.height },
           clientType: target.meta_window.get_client_type() === Meta.WindowClientType.X11 ? 'x11' : 'wayland',
@@ -89,10 +90,6 @@ export default class Driver extends Extension {
         result = {
           presentation: friday?._presentation(),
           drawingMapped: friday?._area.is_mapped(),
-          captionMapped: friday?._caption?.is_mapped(),
-          captionVisible: friday?._caption?.visible,
-          captionPosition: friday?._caption?.get_transformed_position(),
-          captionSize: friday?._caption?.get_transformed_size(),
           fullscreen: global.display.focus_window?.is_fullscreen(),
         };
       }
@@ -118,7 +115,10 @@ export default class Driver extends Extension {
       }
       if (c.op === 'pick') {
         const actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, c.x, c.y);
+        let owner = actor;
+        while (owner && !owner.meta_window) owner = owner.get_parent();
         result = {
+          windowTitle: owner?.meta_window?.get_title(),
           type: actor?.constructor.name,
           name: actor?.name,
           pointer: global.get_pointer(),

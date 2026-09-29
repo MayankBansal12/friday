@@ -119,9 +119,11 @@ export function drawing(value: unknown, observation?: Observation): Drawing {
     if (a.text !== undefined) {
       item.text = annotationText(a.text, annotationTextLimits[item.kind], `${item.kind} text`);
     }
-    if (a.title !== undefined) {
+    // Models often send a blank optional title; only a meaningful title is note-only.
+    const title = a.title === undefined || a.title === null ? '' : annotationText(a.title, 40, 'Note title');
+    if (title) {
       if (item.kind !== 'note') throw new Error('Only notes have a title');
-      item.title = annotationText(a.title, 40, 'Note title');
+      item.title = title;
     }
     if (item.kind === 'arrow') {
       if (a.toX === undefined && a.toY === undefined) {

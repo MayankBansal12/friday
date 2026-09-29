@@ -97,21 +97,17 @@ try:
     draw_reply = command('draw', **full_obs, items=[{'id': 'fullscreen-circle', 'kind': 'ellipse', 'x': 600, 'y': 400, 'width': 600, 'height': 120, 'color': '#ff0000'}, {'id': 'graph', 'kind': 'rectangle', 'x': 846, 'y': 100, 'width': 846, 'height': 453, 'color': '#facc15'}])
     assert draw_reply['rendered'], 'Drawing acknowledged without painting'
     assert command('status')['presentation']['compositingHeld'], 'Drawing did not inhibit fullscreen bypass'
-    command('caption', text='Friday is looking at your screen…')
     time.sleep(.4)
     fullscreen_state = driver('overlayState')
     capture('00-fullscreen-overlay.png')
     print('Fullscreen overlay:', fullscreen_state, flush=True)
-    assert fullscreen_state['fullscreen'] and fullscreen_state['drawingMapped'] and fullscreen_state['captionMapped'], fullscreen_state
+    assert fullscreen_state['fullscreen'] and fullscreen_state['drawingMapped'], fullscreen_state
     from PIL import Image
     pixels = Image.open(stage / '00-fullscreen-overlay.png').convert('RGB')
     yellow_rows = [y for y in range(92, 109) if (lambda r, g, b: r > 220 and g > 160 and b < 60)(*pixels.getpixel((1400, y)))]
     assert sum(y - 1 not in yellow_rows for y in yellow_rows) == 2, 'Expected two separate yellow pen strokes in fullscreen'
     command('clear')
-    assert command('status')['presentation']['compositingHeld'], 'Clearing the drawing released compositing while caption remained'
-    assert driver('overlayState')['captionMapped']
-    command('finish'); time.sleep(.2)
-    assert driver('overlayState')['captionMapped'], 'Caption disappeared on completion in fullscreen'
+    assert not command('status')['presentation']['compositingHeld'], 'Clearing the drawing leaked fullscreen compositing inhibition'
     command('stop')
     assert not command('status')['presentation']['compositingHeld'], 'Stop leaked fullscreen compositing inhibition'
     command('begin')
@@ -122,7 +118,7 @@ try:
     driver('blockPainting', enabled=False)
     command('stop')
     assert not command('status')['presentation']['compositingHeld']
-    print('PASS: fullscreen graph pixels, paint acknowledgement, caption/drawing compositing lifetime, unpainted draw rejection', flush=True)
+    print('PASS: fullscreen graph pixels, paint acknowledgement, drawing compositing lifetime, unpainted draw rejection', flush=True)
     driver('fullscreen', enabled=False); time.sleep(.6)
     command('begin')
     obs = observe(); capture('01-observe.png')
@@ -189,6 +185,14 @@ try:
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             debug_port = listener.getsockname()[1]
+        # Seed quiet completed updates so the packaged React UI must actually expand
+        # from a 96px circle, rather than only testing direct host layout calls.
+        saved_state = stage / 'config/linux-buddy/tasks.json'
+        saved_state.parent.mkdir(parents=True, exist_ok=True)
+        saved_state.write_text(json.dumps({'version': 3, 'tasks': [], 'parentId': 'native-parent', 'sessions': [
+            {'id': 'native-parent', 'role': 'parent', 'title': 'Friday', 'status': 'idle', 'createdAt': 1, 'updatedAt': 1},
+            *[{'id': f'native-child-{i}', 'role': 'child', 'parentId': 'native-parent', 'title': title, 'status': 'completed', 'summary': 'Ready to discuss', 'createdAt': 1, 'updatedAt': 1} for i, title in enumerate(['Compare train options', 'Summarize release notes', 'Organize project notes'])]
+        ]}))
         with open(stage / 'ui.log', 'w') as ui_log:
             display_env = driver('displayEnvironment')
             assert display_env.get('DISPLAY'), 'Isolated GNOME did not provide an XWayland display'
@@ -221,9 +225,9 @@ try:
                             if (stage / 'ui-drawing-ready').exists():
                                 if not (stage / 'ui-drawing-geometry.json').exists():
                                     assert command('status')['annotations'] >= 1, 'Guidance vanished on task completion'
-                                    assert driver('overlayState')['captionMapped'], 'No visible native caption'
+                                    # One UI: the Electron companion stays on screen while guiding; GNOME only draws.
                                     window_state = driver('fridayWindow')
-                                    assert window_state['minimized'] and not window_state['skipTaskbar'], window_state
+                                    assert not window_state['minimized'] and window_state['showing'] and not window_state['skipTaskbar'], window_state
                                     capture('06-ui-drawing.png')
                                     geometry = driver('drawingGeometry')
                                     (stage / 'ui-drawing-geometry.json').write_text(json.dumps(geometry, indent=2))
@@ -238,16 +242,14 @@ try:
                                         assert any(button['x'] - 20 <= item['toX'] <= button['x'] + button['width'] + 20 and button['y'] - 20 <= item['toY'] <= button['y'] + button['height'] + 20 for item in arrows), f'Arrow misses main button: {geometry}'
                                 if not (stage / 'ui-drawing-captured').exists() and command('status')['annotations'] == 0:
                                     window_state = driver('fridayWindow')
-                                    if not window_state['minimized'] and window_state['showing'] and window_state['focused'] and window_state['mapped'] and window_state['opacity'] == 255 and min(window_state['scale']) > .99:
+                                    if not window_state['minimized'] and window_state['showing'] and window_state['mapped'] and window_state['opacity'] == 255 and min(window_state['scale']) > .99:
                                         time.sleep(.3)
                                         capture('08-ui-returned.png')
                                         (stage / 'ui-returned-state.json').write_text(json.dumps(window_state, indent=2))
-                                        (stage / 'ui-drawing-captured').write_text('returned automatically')
+                                        (stage / 'ui-drawing-captured').write_text('guide cleared with Friday visible')
                             else:
                                 if not (stage / '05b-working-fullscreen.png').exists() and command('status')['active']:
-                                    state = driver('overlayState')
-                                    if state.get('captionMapped') and driver('fridayWindow')['minimized']:
-                                        capture('05b-working-fullscreen.png')
+                                    capture('05b-working-fullscreen.png')
                                 driver('move', x=1050 + int(time.monotonic() * 10) % 100, y=590)
                             time.sleep(.25)
                         assert agent.poll() == 0, (stage / 'ui-agent.log').read_text()[-6000:]

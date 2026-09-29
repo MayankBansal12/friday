@@ -23,7 +23,10 @@ export interface TaskRecord {
   conversationId?: string;
   role?: 'parent' | 'child';
   parentId?: string;
+  /** Speech handled this turn (including mute); prevents final-answer duplication. */
   spoken?: boolean;
+  speechText?: string;
+  speechIssue?: string;
   id: string;
   prompt: string;
   status: RunStatus;
@@ -69,7 +72,7 @@ export interface FridayState {
   presentation: PresentationState;
 }
 
-export type SurfaceLayout = 'orb' | 'bar' | 'panel' | 'details';
+export type SurfaceLayout = 'orb' | 'tasks' | 'quiet' | 'bar' | 'panel' | 'details';
 
 export interface BuddySettings {
   defaultCwd: string;
@@ -79,7 +82,7 @@ export interface BuddySettings {
   autoSpeak?: boolean;
 }
 
-export type ListeningState = 'idle' | 'listening' | 'transcribing' | 'armed' | 'error';
+export type ListeningState = 'idle' | 'paused' | 'starting' | 'listening' | 'transcribing' | 'armed' | 'error';
 
 export interface TranscriptResult {
   text: string;
@@ -92,4 +95,8 @@ export interface TranscriptResult {
     modelWaitMs?: number;
     inferenceMs?: number;
   };
+}
+
+export interface RequestContext {
+  selectedChildId?: string;
 }

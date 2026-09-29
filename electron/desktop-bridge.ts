@@ -16,7 +16,6 @@ interface CompanionWindow {
   isVisible(): boolean;
   hide(): void;
   showInactive(): void;
-  showCompanion?(): void;
 }
 function json(response: ServerResponse, status: number, value: unknown) {
   response.writeHead(status, {
@@ -45,11 +44,15 @@ export class DesktopBridge {
   private active?: Run;
   private heartbeat?: NodeJS.Timeout;
   private hiddenForDesktop = false;
-  private captionRunId?: string;
-  private returnTimer?: NodeJS.Timeout;
   private markTimer?: NodeJS.Timeout;
+  private guidance = false;
+  // Bumped on every guidance transition so late draw/status replies cannot resurrect an old state.
+  private guidanceGeneration = 0;
+  private guidanceTimer?: NodeJS.Timeout;
   onStopped?: (runId: string, error: unknown) => void;
   onMark?: (mark: Record<string, unknown>) => void;
+  /** Fires only on transitions. True means GNOME confirmed a nonempty drawing is on screen. */
+  onGuidanceChanged?: (active: boolean) => void;
 
   constructor(
     private readonly native: NativeDesktop,
@@ -70,9 +73,10 @@ export class DesktopBridge {
   get url() {
     return `http://127.0.0.1:${this.port}`;
   }
+  get guiding() {
+    return this.guidance;
+  }
   beginRun(id: string) {
-    if (this.returnTimer) clearTimeout(this.returnTimer);
-    this.returnTimer = undefined;
     if (this.active) this.revokeRun(this.active.id);
     this.active = { id, token: randomBytes(32).toString('hex'), revoked: false };
     return this.active.token;
@@ -108,32 +112,38 @@ export class DesktopBridge {
     this.markTimer = undefined;
     // Deliberately outside the serialized operation queue so Stop never waits behind a capture.
     void this.native.command({ op: preserveDrawing ? 'finish' : 'stop', runId: id }).catch(() => {});
-    if (!preserveDrawing) this.captionRunId = undefined;
-    if (!preserveDrawing || this.captionRunId !== id || !this.getWindow()?.showCompanion) this.restore();
-    else this.returnAfterDrawing(id, Date.now() + 35_000);
+    // A completed task leaves its guide on screen; status polling ends guidance when it clears or expires.
+    if (!preserveDrawing) this.setGuidance(false);
+    this.restore();
   }
-  private returnAfterDrawing(id: string, deadline: number) {
-    this.returnTimer = setTimeout(() => {
-      this.returnTimer = undefined;
-      if (this.active || this.captionRunId !== id || !this.hiddenForDesktop) return;
-      void this.native
-        .command({ op: 'status' })
-        .then((status) => {
-          if (this.active || this.captionRunId !== id) return;
-          if (Number(status.annotations) > 0 && Date.now() < deadline) {
-            this.returnAfterDrawing(id, deadline);
-            return;
-          }
-          // The guide has cleared/expired: return the answer instead of leaving Friday lost in the tray.
-          void this.native.command({ op: 'stop', runId: id }).catch(() => {});
-          this.captionRunId = undefined;
-          this.restore();
-        })
-        .catch(() => {
-          if (!this.active && this.captionRunId === id) this.restore();
-        });
-    }, 500);
-    this.returnTimer.unref();
+  private setGuidance(active: boolean) {
+    this.guidanceGeneration++;
+    if (this.guidanceTimer) clearTimeout(this.guidanceTimer);
+    this.guidanceTimer = undefined;
+    const changed = this.guidance !== active;
+    this.guidance = active;
+    if (active) this.watchGuidance();
+    if (changed) this.onGuidanceChanged?.(active);
+  }
+  // GNOME clears drawings itself (expiry, clicks, focus/workspace changes, Escape) without telling the app.
+  private watchGuidance(delay = 500) {
+    if (!this.guidance) return;
+    if (this.guidanceTimer) clearTimeout(this.guidanceTimer);
+    const generation = this.guidanceGeneration;
+    this.guidanceTimer = setTimeout(() => {
+      this.guidanceTimer = undefined;
+      void this.native.command({ op: 'status' }).then(
+        (status) => {
+          if (generation !== this.guidanceGeneration) return;
+          if (typeof status.annotations === 'number' && status.annotations > 0) this.watchGuidance();
+          else this.setGuidance(false);
+        },
+        () => {
+          if (generation === this.guidanceGeneration) this.setGuidance(false);
+        },
+      );
+    }, delay);
+    this.guidanceTimer.unref();
   }
   private hide() {
     const window = this.getWindow();
@@ -143,8 +153,6 @@ export class DesktopBridge {
     }
   }
   restore() {
-    if (this.returnTimer) clearTimeout(this.returnTimer);
-    this.returnTimer = undefined;
     if (this.hiddenForDesktop) this.getWindow()?.showInactive();
     this.hiddenForDesktop = false;
   }
@@ -176,14 +184,22 @@ export class DesktopBridge {
           200,
           await this.enqueue(run, async () => {
             const d = drawing(value, run.observation);
-            this.hide();
-            const result = await this.native.command({
-              ...nativeDrawing(d, run.observation!, run.nativeObservation!),
-              op: 'draw',
-              runId: run.id,
-            });
+            let result: Record<string, unknown>;
+            try {
+              result = await this.native.command({
+                ...nativeDrawing(d, run.observation!, run.nativeObservation!),
+                op: 'draw',
+                runId: run.id,
+              });
+            } catch (error) {
+              // GNOME clears everything when a draw fails after touching the overlay; confirm now.
+              this.watchGuidance(0);
+              throw error;
+            }
+            // Stop/revoke fences a confirmation that arrives after the run ended.
+            this.assert(run);
             if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
-            this.getWindow()?.showCompanion?.();
+            this.setGuidance(Array.isArray(result.ids) && result.ids.length > 0);
             return result;
           }),
         );
@@ -191,7 +207,13 @@ export class DesktopBridge {
         return json(
           response,
           200,
-          await this.enqueue(run, () => this.native.command({ op: 'clear', runId: run.id, ids: value.ids })),
+          await this.enqueue(run, async () => {
+            const result = await this.native.command({ op: 'clear', runId: run.id, ids: value.ids });
+            this.assert(run);
+            if (value.ids === undefined) this.setGuidance(false);
+            else this.watchGuidance(0);
+            return result;
+          }),
         );
       return json(response, 404, { error: 'Not found' });
     } catch (error) {
@@ -199,17 +221,17 @@ export class DesktopBridge {
     }
   }
   private async observe(run: Run) {
-    this.captionRunId = run.id;
-    if (this.getWindow()?.showCompanion) {
-      const visible = await this.setCaption(
-        run.id,
-        'Looking at your screen… Friday will return when the highlight clears.',
-      );
-      if (!visible)
-        throw new Error('Could not show Friday’s on-screen controls. The request window has been restored.');
-      this.assert(run);
-    }
+    // GNOME clears any guide before capturing; a screenshot is never guidance.
+    this.setGuidance(false);
+    // Only the capture itself hides the companion, so Friday never appears in its own screenshot.
     this.hide();
+    try {
+      return await this.capture(run);
+    } finally {
+      this.restore();
+    }
+  }
+  private async capture(run: Run) {
     await new Promise((resolve) => setTimeout(resolve, 180));
     this.assert(run);
     const started = performance.now();
@@ -251,28 +273,7 @@ export class DesktopBridge {
       outputBytes: typeof result.data === 'string' ? Buffer.byteLength(result.data, 'base64') : 0,
     };
     run.observation = result as unknown as Observation;
-    this.getWindow()?.showCompanion?.();
     return result;
-  }
-  async setCaption(runId: string, text: string, finished = false) {
-    if (runId !== this.captionRunId) return false;
-    try {
-      const result = await this.native.command({ op: 'caption', runId, text, finished });
-      if (result.visible !== true) throw new Error('Desktop caption did not become visible');
-      return true;
-    } catch (error) {
-      if (runId !== this.captionRunId) return false;
-      const active = this.active?.id === runId;
-      this.restore();
-      if (active) {
-        this.revokeRun(runId);
-        this.onStopped?.(
-          runId,
-          new Error(`Could not display Friday’s on-screen controls: ${desktopErrorMessage(error)}`),
-        );
-      }
-      return false;
-    }
   }
   nativeStopped(runId: string, error: unknown) {
     if (this.active?.id !== runId) return;
@@ -300,15 +301,21 @@ export class DesktopBridge {
     }
   }
   async clear() {
-    if (this.active)
-      return this.enqueue(this.active, () =>
-        this.native.command({ op: 'clear', runId: this.active!.id, forgetMark: true }),
-      );
+    if (this.active) {
+      const run = this.active;
+      return this.enqueue(run, async () => {
+        const result = await this.native.command({ op: 'clear', runId: run.id, forgetMark: true });
+        this.assert(run);
+        this.setGuidance(false);
+        return result;
+      });
+    }
     const id = `clear-${randomUUID()}`;
     this.beginRun(id);
     try {
       await this.enqueue(this.active!, () => this.native.command({ op: 'clear', runId: id, forgetMark: true }));
     } finally {
+      // Revoking this non-preserving run stops/clears GNOME and ends guidance.
       this.revokeRun(id);
     }
   }
@@ -319,6 +326,8 @@ export class DesktopBridge {
     const run = this.active!;
     try {
       await this.enqueue(run, async () => {
+        // Marking replaces any guide with the user's own stroke, which is not Friday guidance.
+        this.setGuidance(false);
         this.hide();
         await new Promise((resolve) => setTimeout(resolve, 180));
         this.assert(run);
@@ -345,9 +354,9 @@ export class DesktopBridge {
     }
   }
   stop() {
-    this.captionRunId = undefined;
     if (this.active) this.revokeRun(this.active.id);
     else void this.native.command({ op: 'stop' }).catch(() => {});
+    this.setGuidance(false);
     this.restore();
   }
   close() {

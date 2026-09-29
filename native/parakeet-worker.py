@@ -2,6 +2,7 @@
 """Local, persistent Parakeet worker. JSONL on stdin/stdout; no microphone access."""
 
 import argparse
+import base64
 import json
 from pathlib import Path
 import sys
@@ -25,6 +26,7 @@ def main():
                 raise ValueError(f"Missing Parakeet file: {args.model_dir / name}")
         if not 1 <= args.threads <= 32:
             raise ValueError("STT threads must be between 1 and 32")
+        import numpy as np
         import onnxruntime as ort
         import onnx_asr
 
@@ -45,20 +47,37 @@ def main():
         return 1
 
     emit({"type": "ready", "loadMs": round((time.perf_counter() - started) * 1000)})
-    for line in sys.stdin:
+    # A 25 s PCM16 snapshot is ~1.07 MB of base64. Bound before JSON parsing.
+    while True:
+        line = sys.stdin.readline(1_100_001)
+        if not line:
+            break
+        if len(line) > 1_100_000 or not line.endswith("\n"):
+            emit({"type": "error", "error": "Oversized or incomplete audio frame"})
+            return 1
         request_id = None
         try:
             request = json.loads(line)
             request_id = request["id"]
-            audio_path = request["path"]
-            with wave.open(audio_path, "rb") as audio:
-                if audio.getnchannels() != 1 or audio.getframerate() != 16000 or audio.getsampwidth() != 2:
-                    raise ValueError("Expected mono 16 kHz PCM16 WAV audio")
-                duration = audio.getnframes() / audio.getframerate()
-                if not 0 < duration <= 30:
-                    raise ValueError("Audio must be between 0 and 30 seconds")
+            if not isinstance(request_id, str) or len(request_id) > 80:
+                raise ValueError("Invalid request ID")
+            if "pcm" in request:
+                if request.get("sampleRate") != 16000 or not isinstance(request["pcm"], str):
+                    raise ValueError("Expected 16 kHz PCM16")
+                raw = base64.b64decode(request["pcm"], validate=True)
+                if not 0 < len(raw) <= 800_000 or len(raw) % 2:
+                    raise ValueError("PCM audio must be between 0 and 25 seconds")
+                audio_input = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            else:
+                audio_input = request["path"]
+                with wave.open(audio_input, "rb") as audio:
+                    if audio.getnchannels() != 1 or audio.getframerate() != 16000 or audio.getsampwidth() != 2:
+                        raise ValueError("Expected mono 16 kHz PCM16 WAV audio")
+                    duration = audio.getnframes() / audio.getframerate()
+                    if not 0 < duration <= 30:
+                        raise ValueError("Audio must be between 0 and 30 seconds")
             started = time.perf_counter()
-            text = model.recognize(audio_path)
+            text = model.recognize(audio_input, sample_rate=16000)
             emit({"id": request_id, "text": text.strip(), "inferenceMs": round((time.perf_counter() - started) * 1000)})
         except Exception as error:
             emit({"id": request_id, "error": str(error)})

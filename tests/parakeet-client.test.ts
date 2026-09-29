@@ -162,3 +162,22 @@ describe('persistent Parakeet worker', () => {
     expect(spawnProcess).toHaveBeenCalledTimes(1);
   });
 });
+
+it('sends bounded PCM16 directly to the resident worker without a path or conversion', async () => {
+  const { client, processes, spawnProcess } = setup();
+  await expect(client.transcribePcm(new ArrayBuffer(800002))).rejects.toThrow('Invalid PCM');
+  await expect(client.transcribePcm(new ArrayBuffer(3))).rejects.toThrow('Invalid PCM');
+  expect(spawnProcess).not.toHaveBeenCalled();
+  const ready = client.prepare();
+  processes[0].send({ type: 'ready' });
+  await ready;
+  const audio = new Int16Array([0, 1000, -1000]).buffer;
+  const pending = client.transcribePcm(audio);
+  await Promise.resolve();
+  const message = processes[0].messages[0] as unknown as { id: string; pcm: string; sampleRate: number; path?: string };
+  expect(message.path).toBeUndefined();
+  expect(message.sampleRate).toBe(16000);
+  expect(Buffer.from(message.pcm, 'base64')).toEqual(Buffer.from(audio));
+  processes[0].send({ id: message.id, text: 'hello', inferenceMs: 10 });
+  await expect(pending).resolves.toEqual({ text: 'hello', inferenceMs: 10 });
+});

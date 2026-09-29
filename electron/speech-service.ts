@@ -1,3 +1,5 @@
+import { validPcmRequest, type PcmRequest, type PcmResult } from './pcm-transcription.js';
+import { detectWakeCommand } from './wake-command.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -36,27 +38,19 @@ function run(command: string, args: string[], timeoutMs: number) {
   });
 }
 
-export function detectWakeCommand(text: string, wakeWord: string, armed: boolean) {
-  if (armed) return { result: { text, wakeDetected: true, command: text } as TranscriptResult, armed: false };
-  const escaped = wakeWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = text.match(new RegExp(`\\b${escaped}\\b[\\s,.:;!?—-]*(.*)$`, 'i'));
-  if (!match) {
-    return {
-      result: { text, wakeDetected: false } as TranscriptResult,
-      armed: false,
-    };
-  }
-  const command = match[1].trim();
-  return {
-    result: { text, wakeDetected: true, command: command || undefined } as TranscriptResult,
-    armed: !command,
-  };
-}
+export { detectWakeCommand } from './wake-command.js';
 
 export class SpeechService {
+  private pcmQueued?: {
+    request: PcmRequest;
+    generation: number;
+    resolve: (v: PcmResult) => void;
+    reject: (e: unknown) => void;
+  };
+  private pcmRunning = false;
   private armed = false;
   private generation = 0;
-  private busy = false;
+  private pending: Promise<unknown> = Promise.resolve();
   private readonly client: ParakeetClient;
 
   constructor(
@@ -81,6 +75,10 @@ export class SpeechService {
   reset() {
     this.armed = false;
     this.generation++;
+    if (this.pcmQueued) {
+      this.pcmQueued.resolve(this.cancelledPcm(this.pcmQueued.request));
+      this.pcmQueued = undefined;
+    }
   }
 
   close() {
@@ -88,11 +86,75 @@ export class SpeechService {
     this.client.close();
   }
 
-  async transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> {
-    if (audio.byteLength < 1000) return { text: '', wakeDetected: false };
-    if (this.busy) throw new Error('A transcription is already in progress.');
-    this.busy = true;
+  private cancelledPcm(request: PcmRequest): PcmResult {
+    return {
+      segment: request.segment,
+      revision: request.revision,
+      coverage: request.coverage,
+      text: '',
+      inferenceMs: 0,
+      cancelled: true,
+    };
+  }
+
+  transcribePcm(input: unknown): Promise<PcmResult> {
+    const request = validPcmRequest(input);
+    // Defensive host bound, including callers other than the renderer scheduler.
+    if (this.pcmQueued) this.pcmQueued.resolve(this.cancelledPcm(this.pcmQueued.request));
+    const result = new Promise<PcmResult>((resolve, reject) => {
+      this.pcmQueued = { request, generation: this.generation, resolve, reject };
+    });
+    this.drainPcm();
+    return result;
+  }
+
+  private drainPcm() {
+    if (this.pcmRunning || !this.pcmQueued) return;
+    const job = this.pcmQueued;
+    this.pcmQueued = undefined;
+    this.pcmRunning = true;
+    // Share the legacy file path's serialization boundary.
+    const operation = this.pending
+      .catch(() => undefined)
+      .then(async () => {
+        if (job.generation !== this.generation) return job.resolve(this.cancelledPcm(job.request));
+        try {
+          const result = await this.client.transcribePcm(job.request.audio);
+          job.resolve(
+            job.generation === this.generation
+              ? {
+                  segment: job.request.segment,
+                  revision: job.request.revision,
+                  coverage: job.request.coverage,
+                  ...result,
+                }
+              : this.cancelledPcm(job.request),
+          );
+        } catch (error) {
+          job.reject(error);
+        }
+      });
+    this.pending = operation;
+    void operation.finally(() => {
+      this.pcmRunning = false;
+      this.drainPcm();
+    });
+  }
+
+  transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> {
     const generation = this.generation;
+    const operation = this.pending
+      .catch(() => undefined)
+      .then(() => {
+        if (generation !== this.generation) return { text: '', wakeDetected: false };
+        return this.transcribeAudio(audio, mimeType, generation);
+      });
+    this.pending = operation;
+    return operation;
+  }
+
+  private async transcribeAudio(audio: ArrayBuffer, mimeType: string, generation: number): Promise<TranscriptResult> {
+    if (audio.byteLength < 1000) return { text: '', wakeDetected: false };
     const started = Date.now();
     let directory: string | undefined;
     const suffix = mimeType.includes('ogg') ? '.ogg' : mimeType.includes('wav') ? '.wav' : '.webm';
@@ -150,7 +212,6 @@ export class SpeechService {
         { cause: error },
       );
     } finally {
-      this.busy = false;
       if (directory) await rm(directory, { recursive: true, force: true });
     }
   }

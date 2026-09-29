@@ -1,11 +1,11 @@
 export const openCodeGoModelOptions = [
+  { value: 'gpt-6-luna', label: 'GPT 6 Luna' },
   { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
   { value: 'glm-5.1', label: 'GLM 5.1' },
   { value: 'glm-5.2', label: 'GLM 5.2' },
   { value: 'glm-5.3', label: 'GLM 5.3' },
   { value: 'glm-5.3-flash', label: 'GLM 5.3 Flash' },
-  { value: 'kimi-k2.6', label: 'Kimi K2.6' },
   { value: 'kimi-k2.7-code', label: 'Kimi K2.7 Code' },
   { value: 'mimo-v2.5', label: 'MiMo V2.5' },
   { value: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
