@@ -63,6 +63,7 @@ try {
   await service.prepare();
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   cdp = await connectRenderer(process.env.CDP_PORT || 9333);
+  await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await cdp.call('Page.navigate', { url: 'http://127.0.0.1:5174/tests/presence-preview.html?state=quiet' });
   await pause(1000);
   assert.equal(await evaluate('fixture.listening'), 'listening');

@@ -55,10 +55,11 @@ async function complete(speaking = false) {
   await pause(250);
 }
 try {
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await open('startup');
   await check('armed', 'bar');
-  assert.equal(await evaluate("document.querySelector('.friday-presence').getBoundingClientRect().top"), 8);
+  assert.equal(await evaluate("document.querySelector('.friday-presence').getBoundingClientRect().top"), 5);
   assert.equal(await evaluate("document.querySelectorAll('.presence-bar button').length"), 2);
   assert.match(await evaluate("document.querySelector('[role=status]').textContent"), /Listening/);
   await shot('01-startup-listening');

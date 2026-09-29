@@ -51,6 +51,7 @@ async function done() {
   await pause();
 }
 try {
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await select();
   await click('[aria-label="Talk to Friday"]');

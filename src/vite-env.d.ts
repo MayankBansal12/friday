@@ -19,7 +19,7 @@ declare global {
       fridayState(): Promise<FridayState>;
       stopChild(id: string): Promise<unknown>;
       stopForeground(): Promise<void>;
-      setSurface(layout: SurfaceLayout, height?: number): Promise<void>;
+      setSurface(layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void>;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;

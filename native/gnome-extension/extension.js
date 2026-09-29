@@ -174,13 +174,14 @@ export default class FridayDesktop extends Extension {
         );
       if (!win) return { placed: false };
       const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
+      const notch = ['quiet', 'bar', 'panel'].includes(c.layout);
       const width = Math.min(Math.max(Number(c.width) || 96, 76), Math.min(800, area.width - 24));
-      const height = Math.min(Math.max(Number(c.height) || 96, 60), Math.min(850, area.height - 24));
+      const height = Math.min(Math.max(Number(c.height) || 96, notch ? 1 : 60), Math.min(850, area.height - 24));
       const x = ['orb', 'tasks'].includes(c.layout)
         ? area.x + area.width - width - 18
         : area.x + Math.round((area.width - width) / 2);
       // The notch surfaces hug the top of the usable screen; the renderer adds no top padding.
-      const y = area.y + (['quiet', 'bar', 'panel'].includes(c.layout) ? 8 : 12);
+      const y = area.y + (notch ? 5 : 12);
       win.move_resize_frame(false, x, y, width, height);
       return { placed: true, layout: c.layout, x, y, width, height };
     }

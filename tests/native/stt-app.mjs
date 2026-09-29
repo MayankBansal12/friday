@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { connectRenderer } from './cdp.mjs';
 const { call, close } = await connectRenderer(process.env.CDP_PORT || 9337);
+await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 async function evaluate(expression) {
   const r = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });

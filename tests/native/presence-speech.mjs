@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { connectRenderer } from './cdp.mjs';
 const { call, close } = await connectRenderer(process.env.CDP_PORT || 9333);
+await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
 const output = process.env.FRIDAY_SCREENSHOTS || '/tmp/friday-speech';
 await mkdir(output, { recursive: true });
 const pause = (ms = 180) => new Promise((r) => setTimeout(r, ms));

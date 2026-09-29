@@ -40,6 +40,7 @@ async function surface(expected) {
   assert.equal(await evaluate('fixture.surface'), expected);
 }
 try {
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   // A restored failure belongs in history, not a new startup alert or foreground surface.
   const oldError = 'The desktop connection timed out. Please try again.';

@@ -72,6 +72,7 @@ export default class Driver extends Extension {
         const frame = target.meta_window.get_frame_rect();
         const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
         result = {
+          pid: target.meta_window.get_pid(),
           frame: { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
           workArea: { x: area.x, y: area.y, width: area.width, height: area.height },
           clientType: target.meta_window.get_client_type() === Meta.WindowClientType.X11 ? 'x11' : 'wayland',

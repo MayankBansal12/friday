@@ -13,19 +13,27 @@ async function evaluate(expression) {
   return result.result.value;
 }
 const wait = () => new Promise((resolve) => setTimeout(resolve, 350));
-function driverCommand(command) {
+function driverCommand(command, desktop = false) {
   return JSON.parse(
     execFileSync(
       'python3',
       [
         '-c',
         `
-import gi,json,sys
+import gi,json,sys,os
 from gi.repository import Gio,GLib
 bus=Gio.bus_get_sync(Gio.BusType.SESSION,None)
-reply=bus.call_sync('org.gnome.Shell','/dev/Friday/Test','dev.Friday.Test','Command',GLib.Variant('(s)',(sys.argv[1],)),GLib.VariantType.new('(s)'),Gio.DBusCallFlags.NONE,5000,None)
+if sys.argv[2]=='desktop':
+    with open(os.path.join(os.environ['XDG_CONFIG_HOME'],'friday-desktop/token')) as f: token=f.read().strip()
+    dest,path,interface='dev.Friday.Desktop','/dev/Friday/Desktop','dev.Friday.Desktop1'
+    params=GLib.Variant('(ss)',(token,sys.argv[1]))
+else:
+    dest,path,interface='org.gnome.Shell','/dev/Friday/Test','dev.Friday.Test'
+    params=GLib.Variant('(s)',(sys.argv[1],))
+reply=bus.call_sync(dest,path,interface,'Command',params,GLib.VariantType.new('(s)'),Gio.DBusCallFlags.NONE,5000,None)
 print(reply.unpack()[0])`,
         JSON.stringify(command),
+        desktop ? 'desktop' : 'test',
       ],
       { encoding: 'utf8' },
     ),
@@ -36,7 +44,7 @@ function inspectWindow(move = false) {
 }
 function assertPlacement(layout) {
   const { frame, workArea, clientType } = inspectWindow();
-  const top = workArea.y + (['quiet', 'bar', 'panel'].includes(layout) ? 8 : 12);
+  const top = workArea.y + (['quiet', 'bar', 'panel'].includes(layout) ? 5 : 12);
   assert.equal(clientType, 'x11', 'Companion must use XWayland for fixed positioning');
   const x = ['orb', 'tasks'].includes(layout)
     ? workArea.x + workArea.width - frame.width - 18
@@ -86,7 +94,13 @@ try {
     inspectWindow(true);
     await wait();
     assertPlacement('tasks');
-    assert(await evaluate('innerHeight > 200'), 'Task panel did not grow beyond the compact window');
+    await evaluate(`(async()=>{
+      for(let i=0;i<40;i++) {
+        if(innerHeight>200)return;
+        await new Promise(r=>setTimeout(r,50));
+      }
+      throw new Error('Task viewport did not grow: '+JSON.stringify({height:innerHeight,width:innerWidth,surface:document.querySelector('[data-surface]')?.dataset.surface,panel:document.querySelector('.task-popover')?.getBoundingClientRect()}));
+    })()`);
     assert(
       await evaluate("document.querySelector('.task-popover').getBoundingClientRect().bottom <= innerHeight"),
       'Expanded task panel is clipped',
@@ -101,15 +115,53 @@ try {
   await evaluate("document.querySelector('.presence-heading')?.focus();document.activeElement?.blur()");
   await new Promise((r) => setTimeout(r, 600));
   assert.equal(await evaluate("document.querySelector('[data-surface]')?.dataset.surface"), 'quiet');
+  await evaluate(`(async()=>{
+    for(let i=0;i<30;i++) {
+      if(Math.abs(document.querySelector('.friday-presence').getBoundingClientRect().width-360)<1) return;
+      await new Promise(r=>setTimeout(r,50));
+    }
+    throw new Error('Rest pill did not finish contracting');
+  })()`);
   assertPlacement('quiet');
+  {
+    const { frame, pid } = inspectWindow();
+    const blank = driverCommand({ op: 'pick', x: frame.x + 20, y: frame.y + 20 });
+    const pill = driverCommand({ op: 'pick', x: frame.x + frame.width / 2, y: frame.y + 20 });
+    assert(!blank.windowTitle?.startsWith('Friday —'), 'Empty space beside the rest pill intercepts desktop input');
+    assert(pill.windowTitle?.startsWith('Friday —'), 'Rest pill cannot receive desktop input');
+    assert(frame.height <= 56, `Rest window did not shrink: ${frame.height}`);
+    if (state !== 'unavailable') {
+      const placed = driverCommand(
+        { op: 'place_companion', pid, layout: 'quiet', width: frame.width, height: 54 },
+        true,
+      );
+      assert.equal(placed.placed, true);
+      assert.equal(placed.height, 54, 'GNOME clamps the rest pill to a conflicting height');
+      assert.equal(placed.y, frame.y, 'GNOME and Electron disagree on the top margin');
+    }
+    console.log('PASS: compact rest pill is clickable and surrounding desktop stays click-through');
+  }
   await capture(`ui-quiet-${state}.png`);
   inspectWindow(true);
   await wait();
   assertPlacement('quiet');
   // Drive real renderer states: the ResizeObserver correctly resists a host layout
   // that disagrees with rendered content, so don't force unrelated IPC layouts.
+  await evaluate(`(()=>{window.notchFrames=[];
+    const until=performance.now()+750;
+    requestAnimationFrame(function frame(){
+      const r=document.querySelector('.friday-presence').getBoundingClientRect();
+      window.notchFrames.push({bottom:r.bottom,canvas:innerHeight});
+      if(performance.now()<until)requestAnimationFrame(frame);
+    });})()`);
   await evaluate("document.querySelector('.presence-heading').focus()");
-  await wait();
+  await new Promise((r) => setTimeout(r, 800));
+  const opening = await evaluate('window.notchFrames');
+  assert(
+    opening.every((f) => f.bottom <= f.canvas),
+    'Native window clips the panel while opening',
+  );
+  assert(new Set(opening.map((f) => f.canvas)).size < 8, 'Native window resizes on every animation frame');
   assert.equal(await evaluate("document.querySelector('[data-surface]').dataset.surface"), 'panel');
   assertPlacement('panel');
   assert(await evaluate('innerHeight > 66'), 'Hover panel did not expand the native window');

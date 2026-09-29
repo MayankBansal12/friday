@@ -5,6 +5,9 @@
   font-family: Inter, system-ui, sans-serif;
   color: #f3f4ef;
 }
+.presence-root:not(.background-root) {
+  pointer-events: none;
+}
 .orb-root {
   display: flex;
   align-items: center;
@@ -110,6 +113,7 @@
   cursor: pointer;
 }
 .friday-presence {
+  pointer-events: auto;
   overflow: hidden;
   border: 1px solid #4b5747;
   border-radius: 21px;
@@ -149,6 +153,9 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.presence-status-copy {
+  display: block;
 }
 .presence-action {
   width: 29px;
@@ -355,12 +362,15 @@
     animation: none !important;
   }
 }
-/* The top pill keeps its width and top edge as content opens below it. */
+/* Animate actual dimensions so text stays crisp and the top edge stays anchored. */
 .friday-presence {
-  border-radius: 999px;
+  width: 500px;
+  max-width: 100%;
+  margin-inline: auto;
 }
-.friday-presence.is-expanded {
-  border-radius: 28px;
+.presence-reveal {
+  min-height: 0;
+  overflow: hidden;
 }
 .presence-action {
   width: 34px;

@@ -135,6 +135,7 @@
         tasks,
         guiding: scenario === 'guidance',
         calls: [],
+        surfaceChanges: [],
         level: 0,
         clock: 0,
         pending: [],
@@ -161,7 +162,8 @@
         },
       });
       const time = performance.now.bind(performance);
-      performance.now = () => time() + fixture.clock;
+      // Motion's native animations share the browser timeline; keep it real for motion probes.
+      if (!new URLSearchParams(location.search).has('motion')) performance.now = () => time() + fixture.clock;
       // Deterministic PCM graph fixture. Real AudioWorklet/resampling is exercised separately.
       window.AudioWorkletNode = class {
         constructor() {
@@ -253,16 +255,18 @@
         listening(s) {
           fixture.listening = s;
         },
-        setSurface: async (layout, height) => {
+        setSurface: async (layout, height, contentWidth) => {
+          fixture.surfaceChanges.push({ layout, height, contentWidth });
           fixture.surface = layout;
           const root = document.querySelector('#root');
           const w = { orb: 96, tasks: 400, quiet: 520, bar: 520, panel: 520, details: 760 }[layout];
           root.style.width = `min(${w}px, calc(100vw - 24px))`;
-          root.style.top = ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '8px';
+          root.style.top = ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '5px';
           root.style.left = ['orb', 'tasks'].includes(layout) ? 'auto' : '50%';
           root.style.right = ['orb', 'tasks'].includes(layout) ? '18px' : 'auto';
           root.style.transform = ['orb', 'tasks'].includes(layout) ? 'none' : 'translateX(-50%)';
           fixture.height = height;
+          fixture.contentWidth = contentWidth;
         },
         submit: async (text, context) => {
           fixture.calls.push(['submit', text, context]);

@@ -37,8 +37,8 @@ contextBridge.exposeInMainWorld('buddy', {
   fridayState: (): Promise<FridayState> => invoke('friday:state', 10_000),
   stopChild: (id: string) => invoke('sessions:stop', 10_000, id),
   stopForeground: (): Promise<void> => invoke('foreground:stop', 15_000),
-  setSurface: (layout: SurfaceLayout, height?: number): Promise<void> =>
-    invoke('window:surface', 10_000, layout, height),
+  setSurface: (layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void> =>
+    invoke('window:surface', 10_000, layout, height, contentWidth),
   onFridayState: (callback: (state: FridayState) => void) => {
     const handler = (_: unknown, state: FridayState) => callback(state);
     ipcRenderer.on('friday:state', handler);

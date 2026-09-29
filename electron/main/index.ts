@@ -40,6 +40,8 @@ const speaker = createSpeakerFromEnvironment();
 let native: GnomeClient;
 let surface: SurfaceLayout = 'quiet';
 let surfaceHeight: number | undefined;
+let surfaceWidth: number | undefined;
+let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
 
 function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
@@ -51,7 +53,7 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
       : layout === 'tasks'
         ? [400, 420]
         : layout === 'quiet'
-          ? [520, 66]
+          ? [520, 54]
           : layout === 'bar'
             ? [520, 66]
             : layout === 'panel'
@@ -59,31 +61,34 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
               : [760, 800];
   const width = Math.min(wantedWidth, area.width - 24);
   const height = Math.min(
-    ['panel', 'tasks'].includes(layout) && contentHeight
-      ? Math.max(96, Math.min(420, Math.ceil(contentHeight)))
+    (notch || layout === 'tasks') && contentHeight
+      ? Math.max(notch ? 1 : 96, Math.min(420, Math.ceil(contentHeight)))
       : wantedHeight,
     area.height - 24,
   );
   const x = ['orb', 'tasks'].includes(layout)
     ? area.x + area.width - width - 18
     : area.x + Math.round((area.width - width) / 2);
-  // Keep the visible edge 8px below the desktop's system panel, outside its input region.
-  const y = area.y + (notch ? 8 : 12);
+  // Keep the visible edge 5px below the desktop's system panel, outside its input region.
+  const y = area.y + (notch ? 5 : 12);
   return { x, y, width, height };
 }
 
-function setSurface(layout: SurfaceLayout, contentHeight?: number) {
+function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?: number) {
   if (!window || window.isDestroyed()) return;
+  const layoutChanged = layout !== surface;
   surface = layout;
   surfaceHeight = contentHeight;
+  surfaceWidth = contentWidth;
   const bounds = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
-  if (Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value))
-    window.setBounds(bounds);
+  const boundsChanged = Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value);
+  if (boundsChanged) window.setBounds(bounds);
   // XWayland input shape leaves the empty space beside the task circle click-through.
   // Keep a small margin for the shadow and the bridge into the hover panel.
   if (process.platform === 'linux') {
     const { width, height } = bounds;
+    const notchWidth = Math.max(1, Math.min(width, Math.ceil((contentWidth ?? (layout === 'quiet' ? 360 : 500)) + 20)));
     const regions =
       layout === 'tasks'
         ? [
@@ -92,12 +97,18 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number) {
           ]
         : layout === 'orb'
           ? [{ x: width - 84, y: 4, width: 80, height: 80 }]
-          : [{ x: 0, y: 0, width, height }];
+          : layout === 'details'
+            ? [{ x: 0, y: 0, width, height }]
+            : [{ x: Math.floor((width - notchWidth) / 2), y: 0, width: notchWidth, height }];
     window.setShape(regions);
   }
-  if (nativeWindowPlacement)
+  const placement = JSON.stringify({ layout, ...bounds });
+  if (nativeWindowPlacement && (layoutChanged || boundsChanged || nativePlacement !== placement))
     void native
       ?.command({ op: 'place_companion', pid: process.pid, layout, width: bounds.width, height: bounds.height })
+      .then((result) => {
+        if (result.placed) nativePlacement = placement;
+      })
       .catch((error) => console.warn('Friday window placement requires the updated GNOME extension:', error.message));
 }
 
@@ -105,7 +116,7 @@ function reanchorSurface() {
   if (placementTimer) clearTimeout(placementTimer);
   placementTimer = setTimeout(() => {
     placementTimer = undefined;
-    setSurface(surface, surfaceHeight);
+    setSurface(surface, surfaceHeight, surfaceWidth);
   }, 60);
 }
 
@@ -178,11 +189,17 @@ function createWindow(openSilently: boolean) {
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
   window.once('ready-to-show', () => {
-    setSurface(surface, surfaceHeight);
+    setSurface(surface, surfaceHeight, surfaceWidth);
     if (!openSilently) activateFriday(false);
   });
-  window.on('show', () => setSurface(surface, surfaceHeight));
-  window.on('restore', reanchorSurface);
+  window.on('show', () => {
+    nativePlacement = undefined;
+    setSurface(surface, surfaceHeight, surfaceWidth);
+  });
+  window.on('restore', () => {
+    nativePlacement = undefined;
+    reanchorSurface();
+  });
   window.on('move', reanchorSurface);
   screen.on('display-metrics-changed', reanchorSurface);
   screen.on('display-added', reanchorSurface);
@@ -317,11 +334,15 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       return service.stopChild(validId(id));
     });
-    ipcMain.handle('window:surface', (event, layout: unknown, height: unknown) => {
+    ipcMain.handle('window:surface', (event, layout: unknown, height: unknown, width: unknown) => {
       fromWindow(event);
       if (!['orb', 'tasks', 'quiet', 'bar', 'panel', 'details'].includes(String(layout)))
         throw new Error('Invalid surface');
-      setSurface(layout as SurfaceLayout, typeof height === 'number' && Number.isFinite(height) ? height : undefined);
+      setSurface(
+        layout as SurfaceLayout,
+        typeof height === 'number' && Number.isFinite(height) ? height : undefined,
+        typeof width === 'number' && Number.isFinite(width) ? width : undefined,
+      );
     });
     ipcMain.handle('foreground:stop', async (event) => {
       fromWindow(event);

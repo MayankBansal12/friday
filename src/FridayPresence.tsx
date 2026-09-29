@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import {
   ArrowUp,
   CircleHelp,
@@ -21,6 +22,37 @@ import {
   type TaskRecord,
 } from '../electron/types';
 import './presence.css';
+
+const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
+
+function NotchBody({
+  children,
+  reducedMotion,
+  onStart,
+  onComplete,
+}: {
+  children: ReactNode;
+  reducedMotion: boolean;
+  onStart(): void;
+  onComplete(): void;
+}) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      className="presence-reveal"
+      inert={!present}
+      aria-hidden={!present}
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: 'auto', opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={reducedMotion ? { duration: 0 } : { ...notchSpring, opacity: { duration: 0.18 } }}
+      onAnimationStart={onStart}
+      onAnimationComplete={onComplete}
+    >
+      <div className="presence-body">{children}</div>
+    </motion.div>
+  );
+}
 
 interface Props {
   state?: FridayState;
@@ -53,6 +85,7 @@ interface Props {
 
 export function FridayPresence(props: Props) {
   const { state, task, listening, speaking } = props;
+  const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
   const { typing, onTypingChange: setTyping } = props;
@@ -80,6 +113,11 @@ export function FridayPresence(props: Props) {
   }, [acknowledged]);
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const panelRef = useRef<HTMLElement>(null);
+  const previousPanel = useRef<HTMLElement | null>(null);
+  const activeMotions = useRef(new Set<string>());
+  const previousExpanded = useRef(false);
+  const transitioning = useRef(false);
+  const syncSurface = useRef<() => void>(() => {});
   const keyboardFocus = useRef(false);
   const busy = task && activeStatuses.has(task.status);
   const listeningToRequest = ['starting', 'armed', 'transcribing'].includes(listening);
@@ -101,6 +139,7 @@ export function FridayPresence(props: Props) {
   const engaged = Boolean(busy || speaking || props.guiding || listeningToRequest || typing || important || selected);
   const background = !engaged && visible.length > 0;
   const expanded = !background && hovered;
+  const resting = !engaged && !expanded;
   const surface: SurfaceLayout = background
     ? hovered
       ? 'tasks'
@@ -132,19 +171,69 @@ export function FridayPresence(props: Props) {
                       ? 'Microphone off'
                       : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
-  useEffect(() => {
+  function motionStarted(part: string) {
+    activeMotions.current.add(part);
+    transitioning.current = true;
+  }
+  function motionCompleted(part: string) {
+    activeMotions.current.delete(part);
+    if (activeMotions.current.size) return;
+    transitioning.current = false;
+    syncSurface.current();
+  }
+
+  useLayoutEffect(() => {
     const panel = panelRef.current;
-    const resize = () =>
+    const mounted = previousPanel.current !== panel;
+    previousPanel.current = panel;
+    let previous = '';
+    const resize = () => {
+      if (transitioning.current && !background) return;
+      const rect = panel?.getBoundingClientRect();
+      const height = rect ? Math.ceil(rect.height) + (background ? 24 : 10) : undefined;
+      const width = rect && !background ? Math.ceil(rect.width) : undefined;
+      const measurement = `${height}:${width}`;
+      if (measurement === previous) return;
+      previous = measurement;
+      void window.buddy.setSurface(surface, height, width);
+    };
+    syncSurface.current = resize;
+    if (background || reducedMotion || mounted) {
+      activeMotions.current.clear();
+      transitioning.current = false;
+    }
+    const rect = panel?.getBoundingClientRect();
+    const targetWidth = Math.min(resting ? 360 : 500, (panel?.parentElement?.clientWidth ?? 520) - 20);
+    const barHeight = panel?.querySelector('.presence-bar')?.getBoundingClientRect().height;
+    const changingSize =
+      !mounted &&
+      rect &&
+      (Math.abs(rect.width - targetWidth) > 0.5 ||
+        Math.abs((barHeight ?? 0) - (resting ? 42 : 54)) > 0.5 ||
+        previousExpanded.current !== expanded);
+    previousExpanded.current = expanded;
+    if (!background && !reducedMotion && (changingSize || activeMotions.current.size)) {
+      // Reserve the canvas before opening. Resizing/shaping a native window every
+      // frame lags behind the spring and clips its edges on XWayland.
+      transitioning.current = true;
       void window.buddy.setSurface(
         surface,
-        panel ? panel.getBoundingClientRect().height + (background ? 24 : 10) : undefined,
+        Math.max(Math.ceil(rect?.height ?? 0) + 10, expanded ? 420 : resting ? 54 : 66),
+        Math.max(Math.ceil(rect?.width ?? 0), resting ? 360 : 500),
       );
-    resize();
-    if (!panel) return;
+    } else {
+      transitioning.current = false;
+      resize();
+    }
+    // Completions shrink to the actual size; content changes are observed only
+    // after motion settles. Initial renders with matching dimensions need no animation.
     const observer = new ResizeObserver(resize);
-    observer.observe(panel);
-    return () => observer.disconnect();
-  }, [surface, background]);
+    if (panel) observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      syncSurface.current = () => {};
+    };
+  }, [surface, background, expanded, resting, reducedMotion]);
   useEffect(
     () => () => {
       if (leaveTimer.current) clearTimeout(leaveTimer.current);
@@ -304,12 +393,24 @@ export function FridayPresence(props: Props) {
           )}
         </section>
       ) : (
-        <section
+        <motion.section
           ref={panelRef}
           className={`friday-presence ${expanded ? 'is-expanded' : ''}`}
           aria-label="Friday companion"
+          initial={false}
+          animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}
+          transition={reducedMotion ? { duration: 0 } : notchSpring}
+          onAnimationStart={() => motionStarted('shell')}
+          onAnimationComplete={() => motionCompleted('shell')}
         >
-          <header className="presence-bar">
+          <motion.header
+            className="presence-bar"
+            initial={false}
+            animate={{ height: resting ? 42 : 54 }}
+            transition={reducedMotion ? { duration: 0 } : notchSpring}
+            onAnimationStart={() => motionStarted('bar')}
+            onAnimationComplete={() => motionCompleted('bar')}
+          >
             {mark}
             <button
               className="presence-heading"
@@ -318,7 +419,17 @@ export function FridayPresence(props: Props) {
               aria-expanded={expanded}
             >
               <strong>Friday</strong>
-              <span role="status">{status}</span>
+              <span role="status">
+                <motion.span
+                  className="presence-status-copy"
+                  key={status}
+                  initial={reducedMotion ? false : { opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: reducedMotion ? 0 : 0.18 }}
+                >
+                  {status}
+                </motion.span>
+              </span>
             </button>
             {listeningToRequest && !typing && (
               <div className="voice-meter" aria-hidden="true">
@@ -352,84 +463,91 @@ export function FridayPresence(props: Props) {
             >
               <CircleStop size={18} />
             </button>
-          </header>
-          {expanded && (
-            <div className="presence-body">
-              {selected && (
-                <div className="task-context">
-                  <span>About: {selected.title}</span>
-                  <button className="presence-action" aria-label="Clear task context" onClick={props.onClearContext}>
-                    <X size={14} />
-                  </button>
-                </div>
-              )}
-              {selected?.question && <p className="selected-question">{selected.question}</p>}
-              <div className="presence-content">
-                {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
-                {detail && (
-                  <p
-                    className={`presence-reply ${props.error || task?.error ? 'is-error' : ''}`}
-                    role={props.error || task?.error ? 'alert' : undefined}
-                  >
-                    {detail}
-                  </p>
-                )}
-                {approvals.map((item) => (
-                  <div className="presence-approval" key={item.id}>
-                    <strong>{item.approval!.title}</strong>
-                    <p>{item.approval!.message}</p>
-                    <button onClick={() => props.onApprove(item.approval!.id, true)}>Allow</button>
-                    <button onClick={() => props.onApprove(item.approval!.id, false)}>Decline</button>
+          </motion.header>
+          <AnimatePresence initial={false}>
+            {expanded && (
+              <NotchBody
+                key="details"
+                reducedMotion={reducedMotion}
+                onStart={() => motionStarted('body')}
+                onComplete={() => motionCompleted('body')}
+              >
+                {selected && (
+                  <div className="task-context">
+                    <span>About: {selected.title}</span>
+                    <button className="presence-action" aria-label="Clear task context" onClick={props.onClearContext}>
+                      <X size={14} />
+                    </button>
                   </div>
-                ))}
-                {visible.length > 0 && !typing && (!selected || showTasks) && taskList}
-              </div>
-              {typing && (
-                <form
-                  className="presence-composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (text.trim()) {
-                      props.onSubmit(text);
-                      setText('');
-                      setTyping(false);
-                    }
-                  }}
-                >
-                  <input
-                    autoFocus
-                    aria-label="Ask Friday"
-                    placeholder="Type a request…"
-                    value={text}
-                    onChange={(e) => setText(e.target.value)}
-                  />
-                  <button aria-label="Send request" disabled={!text.trim()}>
-                    <ArrowUp size={16} />
+                )}
+                {selected?.question && <p className="selected-question">{selected.question}</p>}
+                <div className="presence-content">
+                  {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
+                  {detail && (
+                    <p
+                      className={`presence-reply ${props.error || task?.error ? 'is-error' : ''}`}
+                      role={props.error || task?.error ? 'alert' : undefined}
+                    >
+                      {detail}
+                    </p>
+                  )}
+                  {approvals.map((item) => (
+                    <div className="presence-approval" key={item.id}>
+                      <strong>{item.approval!.title}</strong>
+                      <p>{item.approval!.message}</p>
+                      <button onClick={() => props.onApprove(item.approval!.id, true)}>Allow</button>
+                      <button onClick={() => props.onApprove(item.approval!.id, false)}>Decline</button>
+                    </div>
+                  ))}
+                  {visible.length > 0 && !typing && (!selected || showTasks) && taskList}
+                </div>
+                {typing && (
+                  <form
+                    className="presence-composer"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (text.trim()) {
+                        props.onSubmit(text);
+                        setText('');
+                        setTyping(false);
+                      }
+                    }}
+                  >
+                    <input
+                      autoFocus
+                      aria-label="Ask Friday"
+                      placeholder="Type a request…"
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                    />
+                    <button aria-label="Send request" disabled={!text.trim()}>
+                      <ArrowUp size={16} />
+                    </button>
+                  </form>
+                )}
+                <footer className="presence-footer">
+                  <button onClick={() => setTyping(!typing)} aria-pressed={typing}>
+                    <Keyboard size={14} />
+                    {typing ? 'Close text input' : 'Type instead'}
                   </button>
-                </form>
-              )}
-              <footer className="presence-footer">
-                <button onClick={() => setTyping(!typing)} aria-pressed={typing}>
-                  <Keyboard size={14} />
-                  {typing ? 'Close text input' : 'Type instead'}
-                </button>
-                <button
-                  className="footer-mic"
-                  onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
-                  aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-                  title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-                >
-                  {props.micEnabled ? <Mic size={14} /> : <MicOff size={14} />}
-                  {props.micEnabled ? 'Mic on' : 'Mic off'}
-                </button>
-                <button onClick={props.onDetails} aria-label="Open settings and history">
-                  <Settings size={14} />
-                  Settings & history
-                </button>
-              </footer>
-            </div>
-          )}
-        </section>
+                  <button
+                    className="footer-mic"
+                    onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
+                    aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                    title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                  >
+                    {props.micEnabled ? <Mic size={14} /> : <MicOff size={14} />}
+                    {props.micEnabled ? 'Mic on' : 'Mic off'}
+                  </button>
+                  <button onClick={props.onDetails} aria-label="Open settings and history">
+                    <Settings size={14} />
+                    Settings & history
+                  </button>
+                </footer>
+              </NotchBody>
+            )}
+          </AnimatePresence>
+        </motion.section>
       )}
     </main>
   );
