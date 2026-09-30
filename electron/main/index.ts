@@ -103,7 +103,7 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
     : area.x + Math.round((area.width - width) / 2);
   // Keep the visible edge 5px below the desktop's system panel, outside its input region.
   const y = area.y + (notch ? 5 : 12);
-  if (notch && notchOffset) {
+  if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
     const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
     if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };

@@ -208,6 +208,16 @@ describe('speech detection and endpointing', () => {
     expect(s.starts()).toBe(0);
     expect(s.jobs).toEqual([]);
   });
+  it('endpoints a turn held open only by sub-speech noise instead of overflowing the buffer', async () => {
+    const s = setup();
+    s.feed(1000);
+    s.feed(5000, 70); // RMS ~.0021: above the off threshold, below onset level
+    expect(events(s, 'noise-hold')).toBe(1);
+    expect(events(s, 'endpoint')).toBe(1);
+    expect(s.errors).toEqual([]);
+    while (!s.final.length && s.jobs.length) await s.complete(s.jobs.length - 1, 'Testing');
+    expect(s.final).toEqual(['Testing']);
+  });
   it('holds the endpoint after an unfinished phrase, then submits once when speech resumes', async () => {
     const s = setup();
     s.feed(1200);

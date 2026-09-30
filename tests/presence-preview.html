@@ -329,7 +329,13 @@
         approve: async (id, approved) => {
           fixture.calls.push(['approve', id, approved]);
         },
-        setExpanded: async (v) => callbacks.onExpanded?.(v),
+        setExpanded: async (v) => {
+          if (v) await window.buddy.setSurface('details');
+          document
+            .querySelector('#root')
+            .style.setProperty('height', v ? 'min(800px, calc(100vh - 24px))' : 'auto', 'important');
+          callbacks.onExpanded?.(v);
+        },
         hide: noop,
       };
       for (const name of [

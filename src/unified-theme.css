@@ -1,0 +1,1045 @@
+/*
+ * One material palette across the pill, conversation and workspace.
+ * Loaded after styles.css and presence.css, so equal-specificity rules here win.
+ * Lime is Friday's brand and the single primary action; state colours stay semantic.
+ */
+:root {
+  color-scheme: dark;
+  font-family: Inter, 'Noto Sans', system-ui, sans-serif;
+  color: var(--ink);
+
+  /* Surfaces, darkest to lightest. */
+  --paper-sunken: #111914;
+  --paper: #171e1b;
+  --paper-raised: #1c2420;
+  --paper-bright: #242d27;
+  --paper-deep: #303c32;
+
+  --ink: #f3f4ef;
+  --ink-soft: #c1cabc;
+  --ink-faint: #98a590;
+  --line: #c7dfbd1c;
+  --line-strong: #c7dfbd35;
+
+  --citron: #d9ff91;
+  --citron-deep: #b8d987;
+  --citron-soft: #2c3a28;
+  --on-citron: #1d2a1f;
+
+  /* Semantic states. Each foreground clears 6:1 on --paper and its soft fill. */
+  --success: #a6dd8b;
+  --success-soft: #22331f;
+  --warning: #f2c97a;
+  --warning-soft: #372f1d;
+  --danger: #ff9c8a;
+  --danger-soft: #3a2420;
+  --info: #9ec5f2;
+  --info-soft: #1d2833;
+  --focus: #e6ffb0;
+
+  /* Legacy tokens used throughout styles.css, remapped to their meaning. */
+  --green: var(--success);
+  --red: var(--danger);
+  --amber: var(--warning);
+  --blue: var(--info);
+  --coral: #ff8f7a;
+
+  /* Type scale: nothing readable drops below 11px. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-body: 14px;
+  --text-lg: 16px;
+}
+
+::selection {
+  background: #d9ff9140;
+}
+
+/* ---------- Focus ---------- */
+
+button:focus-visible,
+a:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* Inputs that suppress their outline show focus on their container instead. */
+input:focus-visible,
+textarea:focus-visible {
+  outline-color: var(--focus);
+}
+.switch-row input:focus-visible + .switch-control {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- Window and title bar ---------- */
+
+.friday-window {
+  border-color: var(--line-strong);
+  background: radial-gradient(ellipse at 20% 0%, #34433366, transparent 65%), var(--paper);
+  box-shadow:
+    0 24px 80px #0005,
+    inset 0 1px #ffffff0a;
+  animation: workspace-arrive 240ms var(--ease-out) both;
+}
+
+.titlebar,
+.composer-area {
+  background: #171e1bef;
+  border-color: var(--line);
+}
+.titlebar {
+  height: 60px;
+  flex-basis: 60px;
+  color: var(--ink);
+}
+
+.brand-copy strong {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.brand-copy small,
+.presence {
+  color: var(--ink-faint);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.view-switcher {
+  border-color: var(--line);
+  background: var(--paper-sunken);
+}
+.view-switcher button {
+  height: 32px;
+  padding: 0 12px;
+  color: var(--ink-soft);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.view-switcher button.active {
+  background: var(--citron-soft);
+  color: var(--citron);
+}
+.view-switcher small {
+  font-size: 10px;
+}
+.view-switcher .active small {
+  background: #d9ff911f;
+}
+
+.icon-button {
+  color: var(--ink-soft);
+}
+
+.content-scroll,
+.settings-dialog {
+  scrollbar-color: #53634d transparent;
+}
+.content-scroll > section {
+  max-width: 900px;
+  margin-inline: auto;
+}
+
+/* ---------- Welcome ---------- */
+
+.welcome-simple > .friday-mark {
+  width: 64px;
+  height: 64px;
+}
+.welcome-simple h1 {
+  margin: 20px 0 8px;
+  font-size: clamp(24px, 3.6vw, 30px);
+  font-weight: 620;
+  letter-spacing: -0.025em;
+}
+.welcome-simple > p {
+  max-width: 420px;
+  color: var(--ink-soft);
+  font-size: var(--text-body);
+  line-height: 1.6;
+}
+.starter-ideas {
+  gap: 8px;
+}
+.starter-ideas button {
+  min-height: 52px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 14px;
+  color: var(--ink-soft);
+}
+.starter-ideas button span {
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-align: left;
+}
+
+/* ---------- Surfaces ---------- */
+
+.answer-card,
+.activity-card,
+.history-row,
+.history-search,
+.quiet-button,
+.copy-button,
+.secondary-button,
+.starter-ideas button,
+.stopped-note,
+.history-empty > span,
+.field-label input,
+.field-label select {
+  background: var(--paper-bright);
+  color: var(--ink);
+  border-color: var(--line);
+  box-shadow: none;
+}
+.quiet-button,
+.copy-button {
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 10px;
+  color: var(--ink-soft);
+  font-size: var(--text-sm);
+  font-weight: 560;
+}
+.answer-card {
+  border-left: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 18px 20px 20px;
+}
+.answer-heading {
+  background: transparent;
+  border-color: var(--line);
+}
+.answer-heading strong {
+  font-size: var(--text-md);
+}
+.answer-heading small {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  text-transform: none;
+}
+.answer-copy {
+  color: var(--ink);
+  font-size: var(--text-body);
+  line-height: 1.65;
+}
+.task-hero {
+  background: transparent;
+}
+.task-meta {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.task-title-row h1 {
+  font-size: clamp(19px, 2.6vw, 22px);
+  font-weight: 620;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.working-state strong {
+  font-size: var(--text-md);
+}
+.working-state small {
+  font-size: var(--text-sm);
+}
+.working-signal,
+.approval-icon,
+.error-icon {
+  background: var(--paper-sunken);
+}
+.eyebrow {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* ---------- Status ---------- */
+
+.status-pill,
+.history-status {
+  border-color: transparent;
+  font-size: var(--text-xs);
+}
+.status-pill.completed,
+.history-status.completed {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.status-pill.awaiting_approval,
+.history-status.awaiting_approval {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.status-pill.failed,
+.status-pill.cancelled,
+.history-status.failed,
+.history-status.cancelled {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.approval-card,
+.error-card {
+  border-radius: 18px;
+  box-shadow: none;
+}
+.approval-card {
+  background: var(--warning-soft);
+  border-color: #f2c97a55;
+}
+.approval-icon {
+  color: var(--warning);
+}
+.approval-tag {
+  border-color: #f2c97a55;
+  color: var(--warning);
+  font-size: var(--text-xs);
+}
+.error-card {
+  background: var(--danger-soft);
+  border-color: #ff9c8a55;
+}
+.error-icon {
+  color: var(--danger);
+}
+.error-kicker {
+  font-size: var(--text-xs);
+}
+.approval-card h2,
+.error-card h2 {
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+}
+.approval-card p,
+.error-card p {
+  color: var(--ink-soft);
+  font-size: var(--text-md);
+}
+
+.error-toast {
+  border-color: #ff9c8a66;
+  border-radius: 12px;
+  background: var(--danger-soft);
+  color: #ffd6ce;
+  font-size: var(--text-md);
+  box-shadow: 0 10px 28px #0006;
+}
+
+/* ---------- Actions: one lime primary, everything else tonal ---------- */
+
+.primary-button,
+.retry-button,
+.hero-action,
+.send-button {
+  background: var(--citron);
+  color: var(--on-citron);
+  border-color: transparent;
+  box-shadow: none;
+}
+.hero-action,
+.hero-action.compact {
+  box-shadow: none;
+}
+.hero-action > span {
+  background: var(--on-citron);
+  color: var(--citron);
+}
+.primary-button,
+.retry-button,
+.secondary-button,
+.hero-action {
+  font-size: var(--text-md);
+}
+.secondary-button {
+  border-color: var(--line-strong);
+}
+.send-button:disabled {
+  opacity: 1;
+  background: var(--paper-deep);
+  color: var(--ink-faint);
+}
+
+.mic-button {
+  background: var(--paper-deep);
+  color: var(--ink);
+  border-color: transparent;
+}
+/* "Mic on" is a resting state, not an alarm: tonal lime, not coral. */
+.mic-button.active {
+  background: var(--citron-soft);
+  color: var(--citron);
+}
+.mark-button {
+  color: var(--ink-soft);
+}
+.stop-button {
+  border-color: #ff9c8a55;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.eyebrow span:first-child,
+.settings-section-icon,
+.activity-icon.active,
+.privacy-card-heading > span {
+  background: var(--citron-soft);
+  color: var(--citron);
+  border-color: transparent;
+}
+.settings-section-icon.citron {
+  background: var(--citron-soft);
+}
+.settings-section-icon.warm {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.settings-section-icon.blue {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+/* ---------- Composer ---------- */
+
+.composer-area {
+  padding: 14px 20px 12px;
+}
+.command-bar {
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: var(--paper-bright);
+  box-shadow: none;
+}
+.command-bar:focus-within {
+  border-color: var(--citron-deep);
+  box-shadow: 0 0 0 3px #d9ff911a;
+}
+.command-bar textarea {
+  font-size: var(--text-body);
+  line-height: 1.5;
+}
+.command-bar textarea::placeholder {
+  color: var(--ink-faint);
+}
+.listening-bar {
+  font-size: var(--text-sm);
+}
+.listening-indicator {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.composer-meta {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  text-transform: none;
+}
+.composer-meta kbd {
+  border-color: var(--line);
+  background: var(--paper-bright);
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+/* ---------- History ---------- */
+
+.history-search {
+  border-color: var(--line-strong);
+}
+.history-search:focus-within {
+  border-color: var(--citron-deep);
+  box-shadow: 0 0 0 3px #d9ff911a;
+}
+.history-search input {
+  font-size: var(--text-md);
+}
+.history-row {
+  border-radius: 14px;
+}
+.history-row-copy strong {
+  font-size: var(--text-md);
+  font-weight: 560;
+}
+.history-row-copy small {
+  font-size: var(--text-sm);
+}
+.history-row-meta {
+  font-size: var(--text-xs);
+}
+.history-empty h2 {
+  font-size: var(--text-lg);
+}
+.history-empty p {
+  font-size: var(--text-md);
+}
+.loading-state strong {
+  font-size: var(--text-md);
+}
+.loading-state small {
+  font-size: var(--text-sm);
+}
+
+/* ---------- Activity ---------- */
+
+.activity-title strong {
+  font-size: var(--text-md);
+}
+.activity-title small,
+.activity-count,
+.activity-row small {
+  font-size: var(--text-xs);
+}
+.activity-row strong {
+  font-size: var(--text-sm);
+}
+.stopped-note strong {
+  font-size: var(--text-md);
+}
+.stopped-note small {
+  font-size: var(--text-xs);
+}
+
+/* ---------- Settings ---------- */
+
+.settings-dialog {
+  border: 1px solid var(--line-strong);
+  background: var(--paper-raised);
+  box-shadow: -18px 0 60px #0007;
+}
+.settings-close {
+  border-color: var(--line);
+  background: var(--paper-bright);
+  color: var(--ink);
+}
+.settings-heading h1 {
+  font-size: clamp(24px, 4vw, 30px);
+  font-weight: 620;
+  letter-spacing: -0.025em;
+}
+.settings-heading > div > p:last-child {
+  font-size: var(--text-md);
+}
+.settings-section-title strong,
+.switch-copy strong {
+  font-size: var(--text-md);
+}
+.settings-section-title small,
+.switch-copy small,
+.field-label > small {
+  font-size: var(--text-xs);
+}
+.field-label > span {
+  font-size: var(--text-sm);
+}
+.field-label input,
+.field-label select {
+  border-color: var(--line-strong);
+  font-size: var(--text-md);
+}
+.field-label input:focus,
+.field-label select:focus {
+  border-color: var(--citron-deep);
+  box-shadow: 0 0 0 3px #d9ff911a;
+}
+.switch-control {
+  border-color: var(--line-strong);
+  background: #3a4636;
+}
+.switch-control i {
+  background: var(--ink);
+}
+.switch-row input:checked + .switch-control {
+  border-color: transparent;
+  background: var(--citron);
+}
+.switch-row input:checked + .switch-control i {
+  background: var(--on-citron);
+}
+
+/* Checkbox settings: label copy on the left, a lime native checkbox on the right. */
+.setting-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  cursor: pointer;
+}
+.setting-toggle > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.setting-toggle strong {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.setting-toggle small {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.setting-toggle input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--citron);
+  cursor: pointer;
+}
+.setting-toggle input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.privacy-card {
+  background: var(--paper-sunken);
+  color: var(--ink);
+}
+.privacy-card-heading strong {
+  font-size: var(--text-md);
+}
+.privacy-card-heading small,
+.privacy-facts small {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+.privacy-facts > div > span {
+  color: var(--ink);
+}
+.privacy-facts strong {
+  font-size: var(--text-sm);
+}
+
+/* ---------- Shared conversation transcript ---------- */
+
+.conversation-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.conversation-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.conversation-user {
+  align-self: flex-end;
+  max-width: min(86%, 560px);
+  padding: 9px 13px;
+  border-radius: 16px 16px 5px 16px;
+  background: #ffffff12;
+  color: var(--ink);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.conversation-answer {
+  min-width: 0;
+  color: var(--ink);
+  font-size: var(--text-body);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.conversation-turn > p[role='status'],
+.conversation-turn > p[role='alert'] {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+.conversation-turn > p[role='status'] {
+  color: var(--ink-faint);
+}
+.conversation-turn > p[role='alert'] {
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: var(--danger-soft);
+  color: #ffd6ce;
+}
+.conversation-turn .presence-approval {
+  margin: 0;
+  border-color: #f2c97a55;
+  border-radius: 14px;
+  background: var(--warning-soft);
+  font-size: var(--text-md);
+}
+.conversation-turn .presence-approval strong {
+  color: var(--warning);
+}
+.conversation-turn .presence-approval p {
+  color: var(--ink-soft);
+  margin: 6px 0 12px;
+}
+.conversation-turn .presence-approval button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--paper-bright);
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.conversation-turn .presence-approval button:first-of-type {
+  border-color: transparent;
+  background: var(--citron);
+  color: var(--on-citron);
+}
+
+/* Markdown inside answers, identical at both sizes. */
+.conversation-answer > :first-child {
+  margin-top: 0;
+}
+.conversation-answer > :last-child {
+  margin-bottom: 0;
+}
+.conversation-answer p,
+.conversation-answer ul,
+.conversation-answer ol,
+.conversation-answer pre,
+.conversation-answer blockquote,
+.conversation-answer table {
+  margin: 0 0 0.75em;
+}
+.conversation-answer ul,
+.conversation-answer ol {
+  padding-left: 1.3em;
+}
+.conversation-answer li + li {
+  margin-top: 0.25em;
+}
+.conversation-answer h1,
+.conversation-answer h2,
+.conversation-answer h3,
+.conversation-answer h4 {
+  margin: 1.1em 0 0.4em;
+  font-size: var(--text-body);
+  font-weight: 650;
+  line-height: 1.35;
+}
+.conversation-answer h1 {
+  font-size: var(--text-lg);
+}
+.conversation-answer a {
+  color: var(--citron);
+  text-underline-offset: 3px;
+}
+.conversation-answer code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--paper-sunken);
+  font-family: 'Noto Sans Mono', ui-monospace, monospace;
+  font-size: 0.88em;
+}
+.conversation-answer pre {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper-sunken);
+  line-height: 1.5;
+}
+.conversation-answer pre code {
+  padding: 0;
+  background: none;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+.conversation-answer blockquote {
+  padding-left: 12px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+.conversation-answer table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+.conversation-answer th,
+.conversation-answer td {
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  text-align: left;
+}
+.conversation-answer th {
+  background: var(--paper-bright);
+  font-weight: 600;
+}
+.conversation-answer hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1em 0;
+}
+.conversation-answer img {
+  max-width: 100%;
+  border-radius: 10px;
+}
+
+/* Workspace size: the same transcript with more air. */
+.workspace-conversation {
+  width: min(100%, 720px);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 28px 32px 36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+/* Header pinned to the top; a short transcript settles by the composer. */
+.workspace-conversation > header {
+  align-items: center;
+  /* The active tab already names the view; keep only the action. */
+  justify-content: flex-end;
+  margin: 0 0 auto;
+  padding-bottom: 24px;
+}
+.workspace-conversation > header h2 {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.workspace-conversation .conversation-transcript {
+  gap: 28px;
+}
+.workspace-conversation .conversation-user {
+  font-size: var(--text-body);
+  padding: 10px 14px;
+}
+.workspace-conversation .conversation-answer {
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+/* ---------- Compact companion ---------- */
+
+.presence-root {
+  font-family: inherit;
+  color: var(--ink);
+}
+.friday-presence {
+  border-color: var(--line-strong);
+}
+/* The title receives focus whenever the panel opens; the panel itself shows it's active. */
+.presence-root .presence-heading:focus-visible {
+  outline: none;
+}
+.presence-welcome {
+  display: grid;
+  gap: 6px;
+  padding: 8px 2px 14px;
+}
+.presence-welcome strong {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.presence-welcome p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+/* The idle composer is a button dressed as the input it becomes, same box. */
+.presence-composer {
+  min-height: 44px;
+  margin-top: 12px;
+  border-color: var(--line-strong);
+  border-radius: 14px;
+  background: var(--paper-sunken);
+}
+/* Block, not flex, so a long saved draft ends in an ellipsis on one line. */
+.presence-composer.is-idle {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 0 14px;
+  line-height: 42px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: var(--text-md);
+  text-align: left;
+  cursor: text;
+  transition:
+    border-color 140ms ease,
+    color 140ms ease;
+}
+.presence-composer.is-idle.has-draft {
+  color: var(--ink);
+}
+.presence-root .presence-composer.is-idle:focus-visible {
+  outline: none;
+  border-color: var(--citron-deep);
+  box-shadow: 0 0 0 3px #d9ff911a;
+}
+.friday-presence .presence-footer {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  justify-content: flex-start;
+  padding-top: 12px;
+}
+.friday-presence .presence-footer button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: var(--text-sm);
+}
+/* The collapse control sits apart, at the trailing edge. */
+.friday-presence .presence-footer button:last-child {
+  margin-left: auto;
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+.footer-mic {
+  padding: 0 10px !important;
+}
+.presence-reply,
+.presence-content .conversation-answer {
+  font-size: var(--text-body);
+}
+.background-task-copy small,
+.task-count,
+.presence-approval,
+.heard-text {
+  font-size: var(--text-sm);
+}
+.background-list h2 {
+  font-size: var(--text-xs);
+}
+.background-task-copy strong {
+  font-size: var(--text-md);
+}
+
+/* ---------- Hover ---------- */
+
+@media (hover: hover) {
+  .icon-button:hover,
+  .view-switcher button:not(.active):hover {
+    background: #ffffff0d;
+    color: var(--ink);
+  }
+  .starter-ideas button:hover,
+  .history-row:hover,
+  .quiet-button:hover,
+  .copy-button:hover,
+  .secondary-button:hover,
+  .settings-close:hover,
+  .mark-button:hover:enabled {
+    border-color: var(--line-strong);
+    background: var(--paper-deep);
+    color: var(--ink);
+  }
+  .starter-ideas button:hover svg {
+    color: var(--citron);
+  }
+  .primary-button:hover:enabled,
+  .retry-button:hover:enabled,
+  .hero-action:hover,
+  .send-button:hover:enabled {
+    background: #e6ffb0;
+  }
+  .mic-button:hover:not(.active) {
+    background: #3c4a3d;
+  }
+  .mic-button.active:hover {
+    background: #354631;
+  }
+  .stop-button:hover {
+    background: #4a2c27;
+  }
+  .presence-composer.is-idle:hover {
+    border-color: #c7dfbd55;
+    color: var(--ink-soft);
+  }
+  .friday-presence .presence-footer button:hover {
+    background: #ffffff0d;
+    color: var(--ink);
+  }
+  .conversation-turn .presence-approval button:hover {
+    background: var(--paper-deep);
+  }
+  .conversation-turn .presence-approval button:first-of-type:hover {
+    background: #e6ffb0;
+  }
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 650px) {
+  .workspace-conversation {
+    padding: 22px 20px 28px;
+  }
+  .composer-area {
+    padding: 12px 14px 10px;
+  }
+  .answer-copy,
+  .working-state {
+    margin-left: 0;
+  }
+}
+@media (max-width: 520px) {
+  .welcome-simple {
+    padding: 36px 20px;
+  }
+  .conversation-user {
+    max-width: 92%;
+  }
+  .workspace-conversation .conversation-answer {
+    font-size: var(--text-body);
+  }
+}
+
+/* ---------- Motion ---------- */
+
+/* Arrive from and leave toward the pill at the top edge. */
+.friday-window {
+  transform-origin: top center;
+}
+.friday-window.is-closing {
+  pointer-events: none;
+  animation: workspace-leave 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+@keyframes workspace-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes workspace-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.97);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .friday-window,
+  .friday-window.is-closing {
+    animation: none;
+  }
+}

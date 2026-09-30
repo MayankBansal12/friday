@@ -34,6 +34,9 @@ const endpointQuiet = 13_600; // 850 ms
 const extendedQuiet = 25_600; // 1.6 s when the recognized text stops mid-phrase
 const onsetFrames = 3; // 60 ms above the start threshold
 const resumeFrames = 2;
+// Sub-speech audio that goes this long without one onset-level frame is a fan, hum or burst of
+// room noise, not a pause in speech. It must not hold a turn open until the buffer overflows.
+const noiseHoldLimit = 80_000; // 5 s at 16 kHz
 // Words that do not end a spoken request; a pause after them is usually thinking, not done.
 const dangling = new Set(
   'and or but because the a an my your our their his her its to of for with from if than into um uh uhm er erm'.split(
@@ -107,6 +110,7 @@ export class ProgressiveTranscription {
   private coalesced = 0;
   private peakQueued = 0;
   private inSpeech = false;
+  private lastLoud = 0;
   private run = 0;
   private extended = false;
   private floor: NoiseFloor;
@@ -146,12 +150,14 @@ export class ProgressiveTranscription {
       this.audio.set(this.pre.subarray(this.pre.length - this.preLength));
       this.length = this.preLength;
       this.speechEnd = this.length;
+      this.lastLoud = this.length;
       this.inSpeech = true;
       this.record('speech-start');
     } else {
       this.audio.set(frame.subarray(0, this.audio.length - this.length), this.length);
       this.length = Math.min(this.audio.length, this.length + frame.length);
       const voiced = this.inSpeech ? rms >= off : this.run >= resumeFrames;
+      if (rms >= on) this.lastLoud = this.length;
       if (voiced) {
         this.speechEnd = this.length;
         this.extended = false;
@@ -160,7 +166,19 @@ export class ProgressiveTranscription {
           this.record('endpoint-revoked');
           this.options.endpointRevoked?.();
         }
-      } else if (this.inSpeech) this.record('speech-end');
+      } else if (this.inSpeech) {
+        this.record('speech-end');
+      }
+      this.inSpeech = voiced;
+      // Audio between the off and onset thresholds (fan, hum, clicks) counts as voiced yet
+      // never reaches speech level, so it can hold a turn open through every endpoint check.
+      // Five seconds without a single onset-level frame is not a pause in speech: close the
+      // turn instead of overflowing the buffer.
+      if (this.inSpeech && this.length - this.lastLoud >= noiseHoldLimit) {
+        this.record('noise-hold');
+        this.finish(false);
+        this.inSpeech = false;
+      }
       this.inSpeech = voiced;
     }
     const quiet = this.length - this.speechEnd;
@@ -273,6 +291,7 @@ export class ProgressiveTranscription {
     this.length = this.speechEnd = this.preLength = this.desired = this.requested = this.run = 0;
     this.ended = this.sealed = this.inSpeech = this.extended = false;
     this.result = undefined;
+    this.lastLoud = 0;
     this.id = crypto.randomUUID();
     this.revision = this.decodeCount = this.coalesced = this.peakQueued = 0;
   }
