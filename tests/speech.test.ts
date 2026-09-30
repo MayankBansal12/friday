@@ -1,21 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { detectWakeCommand } from '../electron/speech-service.js';
-import { detectStopCommand } from '../electron/wake-command.js';
-
-it('recognizes addressed stop commands without treating incidental speech as stop', () => {
-  for (const text of ['Friday stop', 'Hey Friday, stop!', 'Friday, please stop.', 'Friday stop please'])
-    expect(detectStopCommand(text, 'Friday')).toBe(true);
-  for (const text of [
-    'stop',
-    'stop on Friday',
-    'Friday stop by the shop',
-    'Say Friday stop to interrupt',
-    'Hey Friday, do not stop',
-  ])
-    expect(detectStopCommand(text, 'Friday')).toBe(false);
-  expect(detectStopCommand('Computer, stop', 'Computer')).toBe(true);
-  expect(detectStopCommand('Friday, stop', 'Computer')).toBe(false);
-});
+import { SpeechService, detectWakeCommand } from '../electron/speech-service.js';
+import { ParakeetClient } from '../electron/parakeet-client.js';
+import { GroqClient } from '../electron/groq-client.js';
+import { fromWakeWord } from '../electron/wake-command.js';
 
 describe('Friday wake word', () => {
   it('accepts Hey Friday with a request in the same utterance', () => {
@@ -133,4 +120,69 @@ it('bounds host PCM work to active plus newest, and reset cannot turn late repli
   await Promise.resolve();
   expect(calls).toHaveLength(1);
   service.close();
+});
+
+describe('local wake transcripts', () => {
+  it('keeps speech from the last wake phrase on', () => {
+    expect(fromWakeWord('so anyway. Hey Friday, open my calendar', 'Friday')).toBe('Hey Friday, open my calendar');
+    expect(fromWakeWord('hey friday. Hey, Friday! what time is it', 'Friday')).toBe('Hey, Friday! what time is it');
+  });
+  it('accepts accented spellings of the name once the detector fired', () => {
+    for (const heard of ['Freddy', 'Fred', 'Fray', 'Friday'])
+      expect(fromWakeWord(`Hey, ${heard}. What time is it?`, 'Friday')).toBe('Hey, Friday. What time is it?');
+    expect(fromWakeWord('uh hey Freddy open my calendar', 'Friday')).toBe('hey Friday open my calendar');
+  });
+  it('rejects a detector false alarm without the phrase', () => {
+    expect(fromWakeWord('see you on Friday', 'Friday')).toBeUndefined();
+    expect(fromWakeWord('Hey, ready?', 'Friday')).toBeUndefined();
+    expect(fromWakeWord('hey there', 'Friday')).toBeUndefined();
+  });
+});
+
+describe('STT provider selection', () => {
+  const restore = () => {
+    delete process.env.GROQ_API_KEY;
+    delete process.env.LINUX_BUDDY_STT_PROVIDER;
+    delete process.env.LINUX_BUDDY_GROQ_STT_MODEL;
+    delete process.env.LINUX_BUDDY_GROQ_STT_LANGUAGE;
+  };
+
+  it('selects hosted Groq when a key is present and unsets it', () => {
+    restore();
+    process.env.GROQ_API_KEY = 'test-groq-key';
+    const service = new SpeechService('Friday');
+    expect(service.client).toBeInstanceOf(GroqClient);
+    expect((service.client as GroqClient).model).toBe('whisper-large-v3-turbo');
+    expect(process.env.GROQ_API_KEY).toBeUndefined();
+    service.close();
+  });
+
+  it('keeps local Parakeet without a key and honors an explicit provider', () => {
+    restore();
+    const local = new SpeechService('Friday');
+    expect(local.client).toBeInstanceOf(ParakeetClient);
+    local.close();
+    process.env.GROQ_API_KEY = 'test-groq-key';
+    process.env.LINUX_BUDDY_STT_PROVIDER = 'parakeet';
+    const forcedLocal = new SpeechService('Friday');
+    expect(forcedLocal.client).toBeInstanceOf(ParakeetClient);
+    forcedLocal.close();
+    restore();
+  });
+
+  it('honors Groq overrides and rejects broken provider configuration', () => {
+    restore();
+    process.env.GROQ_API_KEY = 'test-groq-key';
+    process.env.LINUX_BUDDY_GROQ_STT_MODEL = 'whisper-large-v3';
+    process.env.LINUX_BUDDY_GROQ_STT_LANGUAGE = 'hi';
+    const service = new SpeechService('Friday');
+    expect((service.client as GroqClient).model).toBe('whisper-large-v3');
+    service.close();
+    restore();
+    process.env.LINUX_BUDDY_STT_PROVIDER = 'groq';
+    expect(() => new SpeechService('Friday')).toThrow('GROQ_API_KEY is missing');
+    process.env.LINUX_BUDDY_STT_PROVIDER = 'nope';
+    expect(() => new SpeechService('Friday')).toThrow('Unknown STT provider');
+    restore();
+  });
 });

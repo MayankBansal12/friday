@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import type { PcmRequest, PcmResult } from '../electron/pcm-transcription';
 import type { DesktopStatus } from '../electron/desktop-status';
+import type { TurnDecision, TurnInput } from '../electron/jev-client';
 import type {
   BuddySettings,
   LiveKitSession,
@@ -10,6 +11,7 @@ import type {
   RequestContext,
   TaskRecord,
   TranscriptResult,
+  VoiceGate,
 } from '../electron/types';
 
 declare global {
@@ -37,6 +39,10 @@ declare global {
       onPointer(callback: (pointer: { x: number; y: number }) => void): () => void;
       approve(id: string, approved: boolean): Promise<void>;
       transcribePcm(request: PcmRequest): Promise<PcmResult>;
+      voiceGate(): Promise<VoiceGate>;
+      feedWakeWord(audio: ArrayBuffer): Promise<boolean>;
+      /** Undefined when no decision model is configured or it could not answer. */
+      turnGate(turn: TurnInput): Promise<TurnDecision | undefined>;
       transcribe(audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult>;
       getSettings(): Promise<BuddySettings>;
       updateSettings(value: Partial<BuddySettings>): Promise<BuddySettings>;

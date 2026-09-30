@@ -22,6 +22,8 @@ interface Options {
   trace?(event: SpeechTrace): void;
   now?(): number;
   direct?: boolean;
+  /** Re-decode while the user is still speaking. Off for hosted recognition (per-request cost). */
+  partials?: boolean;
   /** True while Friday's own voice may reach the mic; speech then needs more energy to count. */
   playback?(): boolean;
   /** Shared across segments so a new request starts with a calibrated noise floor. */
@@ -167,7 +169,12 @@ export class ProgressiveTranscription {
     // Decode a complete suffix during silence, once, with 240 ms trailing context.
     const target = Math.min(this.length, this.speechEnd + trailingContext);
     if (quiet >= trailingContext) this.want(target);
-    else if (this.inSpeech && this.now() - this.lastDecodeAt >= this.cadenceMs && this.length >= 9600)
+    else if (
+      this.options.partials !== false &&
+      this.inSpeech &&
+      this.now() - this.lastDecodeAt >= this.cadenceMs &&
+      this.length >= 9600
+    )
       this.want(this.length);
     if (!this.options.direct && quiet >= endpointQuiet) {
       this.finish(false);

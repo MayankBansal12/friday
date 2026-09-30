@@ -43,6 +43,7 @@ import {
   type RunStatus,
   type RequestContext,
   type TaskRecord,
+  type VoiceGate,
 } from '../electron/types';
 import { openCodeGoModelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
@@ -50,11 +51,11 @@ import { PcmCapture, type FrameCapture } from './pcm-capture';
 import { LiveKitLink } from './livekit-link';
 import { NoiseFloor, ProgressiveTranscription } from './progressive-transcription';
 import { VoiceFollowUp } from './voice-follow-up';
-import { detectStopCommand, detectWakeCommand } from '../electron/wake-command';
+import { detectWakeCommand, fromWakeWord } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
 import { FridayMascot } from './FridayMascot';
 import { isEcho, shouldBargeIn } from './echo-guard';
-import { continuation, ignoredFinal, type VoiceSubmission } from './voice-turns';
+import { continuation, ignoredFinal, needsTurnGate, type VoiceSubmission } from './voice-turns';
 
 /** How long the user's submitted words stay in the notch. */
 const transcriptMs = 3000;
@@ -62,6 +63,12 @@ const transcriptMs = 3000;
 const playbackTailMs = 300;
 /** Share of a partial's words that must follow Friday's wording to be held back as echo. */
 const bargeInEchoSimilarity = 0.5;
+/** 100 ms of 16 kHz audio per local wake word check (matches the main-process spotter). */
+const wakeChunkSamples = 1600;
+/** Audio kept before a wake so the detector's ~0.5 s delay never clips the phrase: 2 s. */
+const wakeReplayFrames = 100;
+/** A wake with no speech after it lapses back to local listening. */
+const wakeSilenceMs = 3000;
 
 const starterIdeas = [
   'Look at my screen and explain what I am seeing',
@@ -706,6 +713,9 @@ export default function App() {
   const [prompt, setPrompt] = useState('');
   const [listenState, setListenState] = useState<ListeningState>('idle');
   const [heard, setHeard] = useState('');
+  // Heard while Friday was busy and judged not meant for it; shown dimmed, never submitted.
+  const [ignoredHeard, setIgnoredHeard] = useState('');
+  const ignoredRef = useRef<{ text: string; at: number; childId?: string }>(undefined);
   // The user's own words in the notch: live while they speak, then briefly after submission.
   const [transcript, setTranscript] = useState<{ text: string; final: boolean }>();
   const transcriptTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -753,6 +763,7 @@ export default function App() {
   const [acknowledging, setAcknowledging] = useState(false);
   // Room noise learned across segments, so each new segment starts calibrated.
   const noiseFloorRef = useRef(new NoiseFloor());
+  const voiceGateRef = useRef<VoiceGate>({ localWake: false, partials: true });
   const lastVoiceRef = useRef<VoiceSubmission | undefined>(undefined);
   const taskStatusRef = useRef(new Map<string, string>());
   const childRequestRef = useRef(new Map<string, string>());
@@ -770,12 +781,12 @@ export default function App() {
   const echoRef = useRef<FridayState['presentation']['echo']>(undefined);
   // Thinking, submitting, or speaking: listening continues, but the idle timeout is held.
   const busyRef = useRef(false);
+  const activePromptRef = useRef<string>(undefined);
   const [replayPending, setReplayPending] = useState(false);
   const replayGenerationRef = useRef(0);
   const [guiding, setGuiding] = useState(false);
   const [controlling, setControlling] = useState(false);
   const interruptOnlyRef = useRef(false);
-  const stopFridayRef = useRef<(() => void) | undefined>(undefined);
   const requestEpochRef = useRef(0);
   const stoppingRef = useRef(false);
   const voiceFollowUpRef = useRef(new VoiceFollowUp());
@@ -950,6 +961,14 @@ export default function App() {
       let speechStartedAt = Date.now();
       let startedDuringPlayback = false;
       let bargedIn = false;
+      const gate = voiceGateRef.current;
+      // Local wake gating: until "Hey Friday" is heard, audio goes only to the on-device
+      // detector plus a short replay buffer, and nothing is transcribed.
+      let woken = false;
+      let wokenAt = 0;
+      let replay: Int16Array[] = [];
+      let wakeChunk = new Int16Array(wakeChunkSamples);
+      let wakeFilled = 0;
       // Friday's voice (or its acoustic tail) may be in the microphone right now.
       const playback = () =>
         speakingRef.current ||
@@ -972,6 +991,7 @@ export default function App() {
       };
       const transcription = new ProgressiveTranscription({
         direct: directVoiceRef.current,
+        partials: gate.partials,
         floor: noiseFloorRef.current,
         playback,
         decode: (request) => window.buddy.transcribePcm(request),
@@ -1017,6 +1037,7 @@ export default function App() {
         },
         error: (_error, requireRestart) => {
           if (generation !== generationRef.current) return;
+          woken = false;
           if (requireRestart) {
             // Ambient sound is not an engaged request. The capped controller is
             // already closed, so drop its hypotheses and start a fresh segment
@@ -1038,18 +1059,25 @@ export default function App() {
           updateListening(interruptOnlyRef.current ? 'paused' : conversationOpenRef.current ? 'armed' : 'listening');
           beginSegmentRef.current?.(stream, capture, generation);
         },
-        final: (text) => {
+        final: (heardText) => {
           if (generation !== generationRef.current) return;
           waitingSince = performance.now();
+          const heardWake = woken;
+          woken = false;
+          // The replay buffer may begin with unrelated words; a transcript without the wake
+          // phrase means the detector fired on something else.
+          const text = heardWake ? (fromWakeWord(heardText, currentWakeWord()) ?? '') : heardText;
           const echo = isEcho(echoRef.current, echoCheck(text, speechStartedAt));
-          if (!echo && detectStopCommand(text, currentWakeWord())) {
-            stopFridayRef.current?.();
+          // While typing or stopping, speech is ignored. During work and playback, listening
+          // stays live: Friday's own voice is dropped as echo, and a new request replaces the
+          // unfinished one. Friday decides from the request itself whether to stop its work.
+          if (typingRef.current || stoppingRef.current) return;
+          // After a typed request, only speech addressed to Friday is a request.
+          if (
+            interruptOnlyRef.current &&
+            (echo || !detectWakeCommand(text, currentWakeWord(), false).result.wakeDetected)
+          )
             return;
-          }
-          // While typing or stopping, only an addressed stop is actionable. During work and
-          // playback, listening stays live: Friday's own voice is dropped as echo, and a new
-          // request replaces the unfinished one.
-          if (interruptOnlyRef.current || typingRef.current || stoppingRef.current) return;
           const resume = () => {
             dropPartialTranscript();
             if (directVoiceRef.current) stopListening();
@@ -1089,9 +1117,46 @@ export default function App() {
             );
             command = merged ?? command.trim();
             const childId = merged ? previous?.childId : wake.wakeDetected ? undefined : spokenChildId;
-            lastVoiceRef.current = { text: command, at: Date.now(), childId };
-            showTranscript({ text: command, final: true });
-            void runPrompt(command, true, { selectedChildId: childId });
+            const submit = (request: string) => {
+              lastVoiceRef.current = { text: request, at: Date.now(), childId };
+              showTranscript({ text: request, final: true });
+              void runPrompt(request, true, { selectedChildId: childId });
+            };
+            // Unaddressed speech while Friday works or talks may be someone else, media or
+            // filler. A decision model judges it before it can cancel the current turn; a
+            // correction ("no, wait…") or repeating ignored speech skips the round trip.
+            if (
+              !needsTurnGate({
+                text: command,
+                addressed: wake.wakeDetected,
+                continued: Boolean(merged),
+                direct: directVoiceRef.current,
+                busy: busyRef.current,
+                ignored: ignoredRef.current,
+                now: Date.now(),
+              })
+            ) {
+              ignoredRef.current = undefined;
+              submit(command);
+              return;
+            }
+            const request = command;
+            void window.buddy
+              .turnGate({
+                heard: request,
+                task: activePromptRef.current,
+                speaking: speakingRef.current,
+                lastSaid: echoRef.current?.at(-1)?.text,
+              })
+              .catch(() => undefined)
+              .then((decision) => {
+                if (generation !== generationRef.current || typingRef.current || stoppingRef.current) return;
+                if (decision && !decision.interrupt) {
+                  ignoredRef.current = { text: request, at: Date.now(), childId };
+                  setIgnoredHeard(request);
+                  resume();
+                } else submit(request);
+              });
             return;
           }
           dropPartialTranscript();
@@ -1108,6 +1173,50 @@ export default function App() {
         let sum = 0;
         for (const value of frame) sum += (value / 32768) ** 2;
         setVoiceLevel(Math.min(1, Math.sqrt(sum / frame.length) * 9));
+        if (voiceGateRef.current.localWake && (typingRef.current || stoppingRef.current)) return;
+        const gated =
+          voiceGateRef.current.localWake &&
+          !woken &&
+          !transcription.hasSpeech &&
+          !directVoiceRef.current &&
+          !conversationOpenRef.current;
+        if (gated) {
+          noiseFloorRef.current.add(sum / frame.length, true);
+          replay.push(frame.slice());
+          if (replay.length > wakeReplayFrames) replay.shift();
+          wakeChunk.set(frame, wakeFilled);
+          wakeFilled += frame.length;
+          if (wakeFilled < wakeChunkSamples) return;
+          const chunk = wakeChunk;
+          wakeChunk = new Int16Array(wakeChunkSamples);
+          wakeFilled = 0;
+          void window.buddy.feedWakeWord(chunk.buffer).then(
+            (detected) => {
+              if (
+                !detected ||
+                woken ||
+                generation !== generationRef.current ||
+                transcriptionRef.current !== transcription
+              )
+                return;
+              woken = true;
+              wokenAt = performance.now();
+              // Replay the wake phrase and whatever followed it while the detector decided.
+              const frames = replay;
+              replay = [];
+              for (const item of frames) transcription.push(item);
+              if (!conversationOpenRef.current && !typingRef.current) updateListening('armed');
+            },
+            () => undefined,
+          );
+          return;
+        }
+        // A wake that never turned into speech (a knock, a cough) returns to local gating.
+        if (woken && !transcription.hasSpeech && performance.now() - wokenAt > wakeSilenceMs) {
+          woken = false;
+          updateListening(interruptOnlyRef.current ? 'paused' : 'listening');
+          return;
+        }
         transcription.push(frame);
         if (transcription.hasSpeech || directVoiceRef.current || interruptOnlyRef.current || stoppingRef.current)
           return;
@@ -1264,9 +1373,15 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
-    void Promise.all([window.buddy.listTasks(), window.buddy.getSettings(), window.buddy.fridayState()])
-      .then(([history, config, runtime]) => {
+    void Promise.all([
+      window.buddy.listTasks(),
+      window.buddy.getSettings(),
+      window.buddy.fridayState(),
+      window.buddy.voiceGate(),
+    ])
+      .then(([history, config, runtime, gate]) => {
         if (disposed) return;
+        voiceGateRef.current = gate;
         setTasks(history);
         persistedSettingsRef.current = config;
         setSettings(config);
@@ -1346,14 +1461,12 @@ export default function App() {
         else updateListening('idle');
       });
   }, [selectChild, startListening, stopCapture, updateListening, showTranscript]);
-  useEffect(() => {
-    stopFridayRef.current = stopFriday;
-  }, [stopFriday]);
 
   useEffect(() => {
     // Listening stays live through work and playback on the same capture graph (engaged
     // listening). Busy time only holds the conversation's idle timeout.
     busyRef.current = Boolean(activeTask || speaking || submitting || replayPending);
+    activePromptRef.current = activeTask?.prompt;
     if (busyRef.current) return;
     if (followUpPendingRef.current) {
       followUpPendingRef.current = false;
@@ -1472,6 +1585,8 @@ export default function App() {
       const updated = await window.buddy.updateSettings(next);
       persistedSettingsRef.current = updated;
       setSettings(updated);
+      // A wake word the local detector cannot spell falls back to transcript matching.
+      if (next.wakeWord !== undefined) voiceGateRef.current = await window.buddy.voiceGate();
     } catch (error) {
       setSettings(previous);
       setActionError(errorMessage(error, 'Settings could not be saved.'));
@@ -1744,6 +1859,16 @@ export default function App() {
         notchOffset={notchDrag ?? settings?.notchOffset}
         level={voiceLevel}
         heard={heard}
+        heardIgnored={Boolean(heard) && heard === ignoredHeard}
+        onSendIgnored={() => {
+          const ignored = ignoredRef.current;
+          if (!ignored) return;
+          ignoredRef.current = undefined;
+          setIgnoredHeard('');
+          lastVoiceRef.current = { text: ignored.text, at: Date.now(), childId: ignored.childId };
+          showTranscript({ text: ignored.text, final: true });
+          void runPrompt(ignored.text, true, { selectedChildId: ignored.childId });
+        }}
         error={actionError}
         selectedChildId={selectedChildId}
         reportedChildren={reportedChildren}

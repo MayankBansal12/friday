@@ -1,6 +1,7 @@
 import type { PcmRequest, PcmResult } from './pcm-transcription.js';
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopStatus } from './desktop-status.js';
+import type { TurnDecision, TurnInput } from './jev-client.js';
 import type {
   BuddySettings,
   LiveKitSession,
@@ -10,6 +11,7 @@ import type {
   RequestContext,
   TaskRecord,
   TranscriptResult,
+  VoiceGate,
 } from './types.js';
 
 function invoke<T>(channel: string, timeoutMs: number, ...args: unknown[]): Promise<T> {
@@ -72,6 +74,9 @@ contextBridge.exposeInMainWorld('buddy', {
   },
   approve: (id: string, approved: boolean): Promise<void> => invoke('tasks:approve', 15_000, id, approved),
   transcribePcm: (request: PcmRequest): Promise<PcmResult> => invoke('voice:pcm', 130_000, request),
+  voiceGate: (): Promise<VoiceGate> => invoke('voice:wake-status', 10_000),
+  feedWakeWord: (audio: ArrayBuffer): Promise<boolean> => invoke('voice:wake-feed', 10_000, audio),
+  turnGate: (turn: TurnInput): Promise<TurnDecision | undefined> => invoke('voice:turn-gate', 5_000, turn),
   transcribe: (audio: ArrayBuffer, mimeType: string): Promise<TranscriptResult> =>
     invoke('voice:transcribe', 160_000, audio, mimeType),
   getSettings: (): Promise<BuddySettings> => invoke('settings:get', 10_000),

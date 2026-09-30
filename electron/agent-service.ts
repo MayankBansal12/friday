@@ -27,7 +27,7 @@ import { validSettings } from './validation.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions`;
+const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -317,6 +317,15 @@ export class AgentService extends EventEmitter {
     await this.persist();
     this.publish();
     return structuredClone(session);
+  }
+  /** Stop every unfinished background task. The calling parent turn keeps running to confirm it. */
+  async stopAllChildren() {
+    const active = this.sessions.filter(
+      (s) => s.role === 'child' && (s.status === 'running' || s.status === 'needs_input'),
+    );
+    const stopped = [];
+    for (const session of active) stopped.push(await this.stopChild(session.id));
+    return { stopped: stopped.map(({ id, title }) => ({ id, title })) };
   }
   async readSession(id: string, offset = 0) {
     return {
@@ -1380,6 +1389,9 @@ export class AgentService extends EventEmitter {
           break;
         case '/tools/session_stop':
           result = await this.stopChild(shortText(data.id, 'session ID', 128));
+          break;
+        case '/tools/stop_all':
+          result = await this.stopAllChildren();
           break;
         case '/tools/interact':
           result = await this.interact(worker, task, data);
