@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   computerBatch,
+  batchFocus,
+  drawingFocus,
   nativeBatch,
   drawing,
   nativeDrawing,
@@ -9,6 +11,7 @@ import {
   record,
   type Drawing,
   type Observation,
+  type Point,
 } from './desktop-protocol.js';
 import { CodexComputerRunner, type ComputerRunner, type ComputerFrame } from './computer-runner.js';
 import type { NativeDesktop } from './gnome-client.js';
@@ -74,6 +77,8 @@ export class DesktopBridge {
   onControlChanged?: (active: boolean) => void;
   /** Fires only on transitions. True means GNOME confirmed a nonempty drawing is on screen. */
   onGuidanceChanged?: (active: boolean) => void;
+  /** Screen point (GNOME coordinates) Friday is looking at: her newest mark or cursor; null when none. */
+  onFocus?: (point: Point | null) => void;
 
   constructor(
     private readonly native: NativeDesktop,
@@ -104,6 +109,7 @@ export class DesktopBridge {
   private setControlling(active: boolean) {
     if (active === this.controlVisible) return;
     this.controlVisible = active;
+    if (!active) this.onFocus?.(null);
     this.getWindow()?.setControlling?.(active);
     this.onControlChanged?.(active);
   }
@@ -160,6 +166,7 @@ export class DesktopBridge {
     this.guidanceTimer = undefined;
     const changed = this.guidance !== active;
     this.guidance = active;
+    if (!active && !this.controlVisible) this.onFocus?.(null);
     if (active) this.watchGuidance();
     if (changed) this.onGuidanceChanged?.(active);
   }
@@ -223,13 +230,10 @@ export class DesktopBridge {
       if (!run.observation || run.observation.id !== value.observationId)
         throw new Error('Observe again: a newer screenshot replaced the one this drawing used');
       const d = drawing(value, run.observation);
+      const target = nativeDrawing(d, run.observation, run.nativeObservation!);
       let result: Record<string, unknown>;
       try {
-        result = await this.native.command({
-          ...nativeDrawing(d, run.observation, run.nativeObservation!),
-          op: 'draw',
-          runId: run.id,
-        });
+        result = await this.native.command({ ...target, op: 'draw', runId: run.id });
       } catch (error) {
         this.watchGuidance(0);
         throw new Error(desktopErrorMessage(error), { cause: error });
@@ -238,6 +242,7 @@ export class DesktopBridge {
       if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
       const ids = Array.isArray(result.ids) ? result.ids.filter((id): id is string => typeof id === 'string') : [];
       this.setGuidance(ids.length > 0);
+      if (ids.length) this.onFocus?.(drawingFocus(target) ?? null);
       return { ids: ids.length ? ids : d.items.map((item) => item.id) };
     });
   }
@@ -267,13 +272,10 @@ export class DesktopBridge {
           200,
           await this.enqueue(run, async () => {
             const d = drawing(value, run.observation);
+            const target = nativeDrawing(d, run.observation!, run.nativeObservation!);
             let result: Record<string, unknown>;
             try {
-              result = await this.native.command({
-                ...nativeDrawing(d, run.observation!, run.nativeObservation!),
-                op: 'draw',
-                runId: run.id,
-              });
+              result = await this.native.command({ ...target, op: 'draw', runId: run.id });
             } catch (error) {
               // GNOME clears everything when a draw fails after touching the overlay; confirm now.
               this.watchGuidance(0);
@@ -283,6 +285,7 @@ export class DesktopBridge {
             this.assert(run);
             if (result.rendered !== true) throw new Error('GNOME did not confirm that the drawing rendered');
             this.setGuidance(Array.isArray(result.ids) && result.ids.length > 0);
+            if (this.guidance) this.onFocus?.(drawingFocus(target) ?? null);
             return result;
           }),
         );
@@ -338,6 +341,13 @@ export class DesktopBridge {
           height: bounds.height * sy,
         };
       }
+      if (result.pointer && typeof result.pointer === 'object') {
+        const pointer = result.pointer as { x: number; y: number };
+        result.pointer = {
+          x: (pointer.x * prepared.width) / run.nativeObservation.width,
+          y: (pointer.y * prepared.height) / run.nativeObservation.height,
+        };
+      }
       if (result.lastMark && typeof result.lastMark === 'object') {
         const mark = result.lastMark as Record<string, unknown>;
         if (Array.isArray(mark.points))
@@ -390,6 +400,8 @@ export class DesktopBridge {
             const result = await this.native.command({ ...native, op: 'act', runId: run.id });
             this.assert(run);
             this.setGuidance(false);
+            const focus = batchFocus(native);
+            if (focus) this.onFocus?.(focus);
             return result;
           },
           draw: async (value) => {
@@ -400,14 +412,12 @@ export class DesktopBridge {
             } catch (error) {
               throw new DesktopError(desktopErrorMessage(error), 'invalid_action');
             }
-            const result = await this.native.command({
-              ...nativeDrawing(d, run.observation!, run.nativeObservation!),
-              op: 'draw',
-              runId: run.id,
-            });
+            const target = nativeDrawing(d, run.observation!, run.nativeObservation!);
+            const result = await this.native.command({ ...target, op: 'draw', runId: run.id });
             this.assert(run);
             if (result.rendered !== true) throw new Error('GNOME did not confirm the drawing');
             this.setGuidance(Array.isArray(result.ids) && result.ids.length > 0);
+            if (this.guidance) this.onFocus?.(drawingFocus(target) ?? null);
             return result;
           },
           progress: (text, speech) => {

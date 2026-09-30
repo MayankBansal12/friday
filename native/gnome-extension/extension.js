@@ -142,6 +142,17 @@ export default class FridayDesktop extends Extension {
     return { id: 'eDP-1:1920x1080:1', x: 0, y: 0, width: 1920, height: 1080, scale: 1 };
   }
 
+  _companionWindow(pid) {
+    return global
+      .get_window_actors()
+      .map((actor) => actor.meta_window)
+      .find(
+        (candidate) =>
+          candidate.get_pid() === pid &&
+          /linux.buddy|friday|electron/i.test(candidate.get_wm_class() || candidate.get_title() || ''),
+      );
+  }
+
   _focus() {
     const win = global.display.focus_window;
     if (!win) return '';
@@ -170,14 +181,7 @@ export default class FridayDesktop extends Extension {
     if (c.op === 'place_companion') {
       if (!Number.isInteger(c.pid) || !['orb', 'tasks', 'quiet', 'bar', 'panel', 'details'].includes(c.layout))
         throw new Error('Invalid companion placement');
-      const win = global
-        .get_window_actors()
-        .map((actor) => actor.meta_window)
-        .find(
-          (candidate) =>
-            candidate.get_pid() === c.pid &&
-            /linux.buddy|friday|electron/i.test(candidate.get_wm_class() || candidate.get_title() || ''),
-        );
+      const win = this._companionWindow(c.pid);
       if (!win) return { placed: false };
       const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
       const notch = ['quiet', 'bar', 'panel'].includes(c.layout);
@@ -195,6 +199,12 @@ export default class FridayDesktop extends Extension {
       }
       win.move_resize_frame(false, x, y, width, height);
       return { placed: true, layout: c.layout, x, y, width, height };
+    }
+    // The companion's eyes follow the pointer; frame coordinates let the app place it relative to itself.
+    if (c.op === 'pointer') {
+      const [x, y] = global.get_pointer();
+      const frame = Number.isInteger(c.pid) ? this._companionWindow(c.pid)?.get_frame_rect() : null;
+      return { x, y, window: frame ? { x: frame.x, y: frame.y, width: frame.width, height: frame.height } : null };
     }
     if (c.op === 'status')
       return {
@@ -430,13 +440,15 @@ export default class FridayDesktop extends Extension {
     const scene = this._scene;
     const focus = this._focus();
     const stream = Gio.MemoryOutputStream.new_resizable();
+    // Outside computer control the pointer is the user's: capture it so "this one" can be resolved.
+    const pointer = this._control ? null : global.get_pointer();
     try {
       const shooter = new Shell.Screenshot();
       this._area.hide();
       companion?.hide();
       let capture;
       try {
-        capture = shooter.screenshot(false, stream);
+        capture = shooter.screenshot(Boolean(pointer), stream);
       } finally {
         if (areaVisible) this._area.show();
         if (companionVisible) companion.show();
@@ -461,6 +473,7 @@ export default class FridayDesktop extends Extension {
         ...this._observation,
         windowTitle: global.display.focus_window?.get_title() ?? '',
         windowBounds: frame ? { x: frame.x, y: frame.y, width: frame.width, height: frame.height } : null,
+        pointer: pointer ? { x: pointer[0], y: pointer[1] } : null,
         data: GLib.base64_encode(stream.steal_as_bytes().get_data()),
         lastMark:
           this._lastMark && Date.now() - this._lastMark.createdAt < 300000

@@ -80,6 +80,36 @@ let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
 let notchOffset: { x: number; y: number } | undefined;
 let notchPersistTimer: NodeJS.Timeout | undefined;
+let pointerTimer: NodeJS.Timeout | undefined;
+let lastPointer = '';
+/** Friday's own mark or cursor, in screen coordinates; her eyes prefer it over the user's pointer. */
+let gazeTarget: { x: number; y: number } | null = null;
+
+// Friday's eyes follow the pointer. Wayland hides it from apps, so ask the GNOME
+// extension; an older extension without the command backs off quietly.
+function watchPointer(delay = 0) {
+  pointerTimer = setTimeout(async () => {
+    let next = 1000;
+    if (window && !window.isDestroyed() && window.isVisible() && !window.isMinimized()) {
+      try {
+        const result = await native.command({ op: 'pointer', pid: process.pid });
+        const frame = result.window as { x: number; y: number } | null;
+        if (typeof result.x === 'number' && typeof result.y === 'number' && frame) {
+          const target = gazeTarget ?? { x: result.x, y: result.y };
+          const pointer = { x: target.x - frame.x, y: target.y - frame.y };
+          const key = `${pointer.x},${pointer.y}`;
+          if (key !== lastPointer && window && !window.isDestroyed())
+            window.webContents.send('desktop:pointer', pointer);
+          lastPointer = key;
+        }
+        next = 66;
+      } catch {
+        next = 15_000;
+      }
+    }
+    if (!quitting) watchPointer(next);
+  }, delay);
+}
 
 function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const area = screen.getPrimaryDisplay().workArea;
@@ -328,6 +358,7 @@ if (hasSingleInstanceLock)
       app.isPackaged ? join(process.resourcesPath, 'desktop-client.py') : join(root, 'native/desktop-client.py'),
     );
     native.onReveal = () => activateFriday(true);
+    watchPointer();
     native.onStopped = (id, error) => bridge.nativeStopped(id, error);
     bridge = new DesktopBridge(
       native,
@@ -407,6 +438,9 @@ if (hasSingleInstanceLock)
 
     bridge.onGuidanceChanged = (guiding) => {
       if (window && !window.isDestroyed()) window.webContents.send('desktop:guidance', guiding);
+    };
+    bridge.onFocus = (point) => {
+      gazeTarget = point;
     };
     bridge.onControlChanged = (active) => {
       if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
@@ -659,6 +693,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (placementTimer) clearTimeout(placementTimer);
   if (notchPersistTimer) clearTimeout(notchPersistTimer);
+  if (pointerTimer) clearTimeout(pointerTimer);
   globalShortcut.unregisterAll();
   bridge?.close();
 });

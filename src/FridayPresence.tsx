@@ -23,6 +23,7 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
+import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
@@ -151,7 +152,23 @@ export function FridayPresence(props: Props) {
   const transitioning = useRef(false);
   const syncSurface = useRef<() => void>(() => {});
   const keyboardFocus = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   const busy = task && activeStatuses.has(task.status);
+  // A brief pleased squint once a task she was working on finishes and she has stopped talking.
+  const [pleased, setPleased] = useState(false);
+  const workedOn = useRef(new Set<string>());
+  useEffect(() => {
+    if (!task) return;
+    if (activeStatuses.has(task.status)) workedOn.current.add(task.id);
+    if (task.status !== 'completed' || speaking || !workedOn.current.delete(task.id)) return;
+    const start = setTimeout(() => setPleased(true), 0);
+    const end = setTimeout(() => setPleased(false), 700);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(end);
+      setPleased(false);
+    };
+  }, [task, speaking]);
   const listeningToRequest = ['starting', 'armed', 'transcribing'].includes(listening);
   const children = (state?.sessions ?? []).filter((s) => s.role === 'child').sort((a, b) => b.updatedAt - a.updatedAt);
   const visible = children.filter(
@@ -201,6 +218,12 @@ export function FridayPresence(props: Props) {
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
   const resting = !engaged && !expanded;
+  // The expanded panel's own scroll stays at the newest content instead of a mid-scroll position.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || !expanded) return;
+    content.scrollTop = content.scrollHeight;
+  }, [expanded, detail, conversation.length, approvals.length, props.heard, listeningToRequest]);
   const surface: SurfaceLayout = background
     ? hovered
       ? 'tasks'
@@ -399,13 +422,28 @@ export function FridayPresence(props: Props) {
     setDismissed(contentKey);
     props.onDismiss();
   }
-  const mark = (
-    <span className={`presence-mark ${busy ? 'working' : ''} ${speaking ? 'speaking' : ''}`} aria-hidden="true">
-      <i />
-      <i />
-      <i />
-    </span>
-  );
+  const mood: FridayMood =
+    approvals.length || props.error || task?.error || listening === 'error'
+      ? 'worried'
+      : speaking
+        ? 'speaking'
+        : pleased
+          ? 'pleased'
+          : // Guiding and controlling look at her own mark or cursor instead of thinking.
+            props.controlling || props.guiding
+            ? 'idle'
+            : busy || listening === 'transcribing'
+              ? 'thinking'
+              : listeningToRequest || typing
+                ? 'listening'
+                : !props.micEnabled
+                  ? 'muted'
+                  : resting
+                    ? 'sleepy'
+                    : !engaged
+                      ? 'peeking'
+                      : 'idle';
+  const mark = <FridayMascot mood={mood} className="presence-mark" />;
   const taskList = (
     <section className="background-list" aria-label="Background tasks">
       <h2>
@@ -621,7 +659,7 @@ export function FridayPresence(props: Props) {
                   </div>
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
-                <div className="presence-content">
+                <div className="presence-content" ref={contentRef}>
                   {props.heard &&
                     listeningToRequest &&
                     (props.heardIgnored ? (

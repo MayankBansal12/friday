@@ -7,6 +7,8 @@ import {
   type Observation,
   computerBatch,
   nativeBatch,
+  drawingFocus,
+  batchFocus,
 } from '../electron/desktop-protocol.js';
 const observation = (): Observation => ({
   id: 'obs-1',
@@ -215,5 +217,40 @@ describe('desktop coordinate and freshness contract', () => {
       expect(drawing(mapped, native)).toEqual(mapped);
     }
     expect(() => drawing({ ...ids, items: [{ id: 'bad', kind: 'arrow', x: 0, y: 0, toX: 50 }] }, small)).toThrow();
+  });
+});
+
+describe('Friday gaze focus', () => {
+  it('looks at the first mark: box center, arrow tip, or its point', () => {
+    const focus = (item: Record<string, unknown>) => drawingFocus(drawing({ ...ids, items: [item] }, observation()));
+    expect(focus({ id: 'a', kind: 'rectangle', x: 100, y: 200, width: 40, height: 20 })).toEqual({ x: 120, y: 210 });
+    expect(focus({ id: 'a', kind: 'arrow', x: 10, y: 20 })).toEqual({ x: 10, y: 20 });
+    expect(focus({ id: 'a', kind: 'arrow', x: 10, y: 20, toX: 300, toY: 400 })).toEqual({ x: 300, y: 400 });
+    expect(focus({ id: 'a', kind: 'step', x: 50, y: 60, step: 1 })).toEqual({ x: 50, y: 60 });
+  });
+  it('follows the last pointed action of a batch', () => {
+    const batch = (actions: unknown[]) => computerBatch({ ...ids, actions }, observation());
+    expect(
+      batchFocus(
+        batch([
+          { type: 'click', x: 10, y: 20 },
+          { type: 'type', text: 'hi' },
+        ]),
+      ),
+    ).toEqual({ x: 10, y: 20 });
+    expect(
+      batchFocus(
+        batch([
+          {
+            type: 'drag',
+            path: [
+              { x: 1, y: 2 },
+              { x: 30, y: 40 },
+            ],
+          },
+        ]),
+      ),
+    ).toEqual({ x: 30, y: 40 });
+    expect(batchFocus(batch([{ type: 'keypress', keys: ['Enter'] }]))).toBeUndefined();
   });
 });

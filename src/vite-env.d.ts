@@ -35,6 +35,8 @@ declare global {
       clearDrawing(): Promise<void>;
       stop(): Promise<void>;
       onMark(callback: (mark: Record<string, unknown>) => void): () => void;
+      /** Pointer position relative to the window's top-left, while the window is visible. */
+      onPointer(callback: (pointer: { x: number; y: number }) => void): () => void;
       approve(id: string, approved: boolean): Promise<void>;
       transcribePcm(request: PcmRequest): Promise<PcmResult>;
       voiceGate(): Promise<VoiceGate>;

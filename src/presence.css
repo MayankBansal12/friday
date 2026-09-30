@@ -34,43 +34,9 @@
   transform: scale(1.04);
   border-color: #b8d987;
 }
-.presence-mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-}
-.presence-mark i {
-  display: block;
-  width: 4px;
-  height: 12px;
-  background: #d9ff91;
-  border-radius: 9px;
-}
-.presence-mark i:nth-child(2) {
-  height: 23px;
-}
-.presence-mark i:nth-child(3) {
-  height: 16px;
-}
-.presence-mark.working i,
-.presence-mark.speaking i {
-  animation: friday-breathe 1.4s ease-in-out infinite;
-}
-.presence-mark i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-.presence-mark i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-@keyframes friday-breathe {
-  50% {
-    transform: scaleY(0.55);
-    opacity: 0.6;
-  }
+.friday-orb .presence-mark {
+  width: 42px;
+  height: 42px;
 }
 .orb-badge {
   position: absolute;
@@ -413,11 +379,6 @@
   background: #35422d;
   cursor: pointer;
 }
-@media (prefers-reduced-motion: reduce) {
-  .presence-mark i {
-    animation: none !important;
-  }
-}
 /* Animate actual dimensions so text stays crisp and the top edge stays anchored. */
 .friday-presence {
   width: 500px;
@@ -500,9 +461,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.presence-mark.speaking i {
-  animation-duration: 0.65s;
 }
 .presence-footer button {
   min-height: 34px;

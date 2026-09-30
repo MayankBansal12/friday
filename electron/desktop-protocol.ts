@@ -76,6 +76,23 @@ export function nativeDrawing(value: Drawing, observed: Observation, native: Obs
     })),
   };
 }
+/** Where a drawing points: the first mark's target, for Friday's eyes to look at. */
+export function drawingFocus(value: Drawing): Point | undefined {
+  const item = value.items[0];
+  if (!item) return undefined;
+  if (item.kind === 'arrow') return item.toX === undefined ? item : { x: item.toX, y: item.toY ?? item.y };
+  if (item.width !== undefined && item.height !== undefined)
+    return { x: item.x + item.width / 2, y: item.y + item.height / 2 };
+  return item.points?.[0] ?? { x: item.x, y: item.y };
+}
+/** Where a batch leaves Friday's cursor: its last pointed action. */
+export function batchFocus(batch: ComputerBatch): Point | undefined {
+  for (const action of [...batch.actions].reverse()) {
+    if (action.type === 'drag') return action.path.at(-1);
+    if ('x' in action) return { x: action.x, y: action.y };
+  }
+  return undefined;
+}
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an object');
   return value as Record<string, unknown>;

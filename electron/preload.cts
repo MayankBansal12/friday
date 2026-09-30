@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld('buddy', {
     ipcRenderer.on('desktop:marked', handler);
     return () => ipcRenderer.removeListener('desktop:marked', handler);
   },
+  onPointer: (callback: (pointer: { x: number; y: number }) => void) => {
+    const handler = (_: unknown, pointer: { x: number; y: number }) => callback(pointer);
+    ipcRenderer.on('desktop:pointer', handler);
+    return () => ipcRenderer.removeListener('desktop:pointer', handler);
+  },
   approve: (id: string, approved: boolean): Promise<void> => invoke('tasks:approve', 15_000, id, approved),
   transcribePcm: (request: PcmRequest): Promise<PcmResult> => invoke('voice:pcm', 130_000, request),
   voiceGate: (): Promise<VoiceGate> => invoke('voice:wake-status', 10_000),

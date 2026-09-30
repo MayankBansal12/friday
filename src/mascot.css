@@ -1,0 +1,140 @@
+.friday-mascot {
+  display: block;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.friday-mascot svg {
+  display: block;
+  overflow: visible;
+}
+.friday-mascot .mascot-shape,
+.friday-mascot .mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    fill 0.3s;
+}
+.friday-mascot .mascot-shape {
+  fill: #d9ff91;
+}
+.friday-mascot .mascot-eyes {
+  fill: #1d1f1b;
+  animation: mascot-blink 6s infinite;
+}
+
+/* Pointer following while awake (her own mark or cursor when guiding or controlling);
+   thinking looks straight ahead and sleep closes the eyes. */
+.friday-mascot .mascot-gaze {
+  transform: translate(var(--gaze-x, 0), var(--gaze-y, 0));
+  transition: transform 0.18s ease-out;
+}
+.friday-mascot.mood-thinking .mascot-gaze,
+.friday-mascot.mood-sleepy .mascot-gaze,
+.friday-mascot.mood-muted .mascot-gaze {
+  transform: none;
+}
+
+.friday-mascot.mood-listening .mascot-eyes {
+  transform: scaleY(1.12);
+}
+/* Waking up: a quick startled widen, then attentive. */
+.friday-mascot.mood-listening.startled .mascot-eyes {
+  animation:
+    mascot-startle 0.45s ease-out,
+    mascot-blink 6s 0.45s infinite;
+}
+.friday-mascot.mood-speaking .mascot-shape {
+  animation: mascot-pulse 0.9s ease-in-out infinite;
+}
+.friday-mascot.mood-muted .mascot-shape {
+  fill: #8f9c78;
+}
+.friday-mascot.mood-pleased .mascot-shape {
+  animation: mascot-bounce 0.6s ease-out;
+}
+/* Pleased: wide happy squint that hops up and settles. */
+.friday-mascot.mood-pleased .mascot-eyes {
+  animation: mascot-hop 0.7s ease-out;
+  transform: scale(1.15, 0.45);
+}
+/* Hovered while resting: still asleep, one eye opens a little to see who it is. */
+.friday-mascot .mascot-eyes rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.friday-mascot.mood-peeking .mascot-eyes {
+  animation: none;
+}
+.friday-mascot.mood-peeking .mascot-eyes rect:first-child {
+  transform: translateY(1px) scaleY(0.2);
+}
+.friday-mascot.mood-peeking .mascot-eyes rect:last-child {
+  transform: translateY(0.3px) scaleY(0.72);
+}
+/* Dozes off: half-closed for a few seconds after she goes quiet, then asleep. */
+.friday-mascot.mood-sleepy .mascot-eyes {
+  animation: mascot-doze 5s ease-in-out;
+  transform: translateY(1px) scaleY(0.2);
+}
+.friday-mascot.mood-muted .mascot-eyes {
+  animation: none;
+  transform: translateY(1px) scaleY(0.2);
+}
+.friday-mascot.mood-worried .mascot-shape {
+  fill: #ffb09f;
+}
+
+@keyframes mascot-blink {
+  0%,
+  94%,
+  100% {
+    scale: 1 1;
+  }
+  96% {
+    scale: 1 0.1;
+  }
+}
+@keyframes mascot-startle {
+  30% {
+    scale: 1.1 1.35;
+  }
+}
+@keyframes mascot-hop {
+  35% {
+    translate: 0 -2px;
+  }
+  65% {
+    translate: 0 0.3px;
+  }
+  82% {
+    translate: 0 -0.6px;
+  }
+}
+@keyframes mascot-bounce {
+  35% {
+    scale: 1.07;
+  }
+}
+@keyframes mascot-doze {
+  0% {
+    transform: none;
+  }
+  12%,
+  80% {
+    transform: translateY(0.6px) scaleY(0.5);
+  }
+}
+@keyframes mascot-pulse {
+  50% {
+    scale: 0.94;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .friday-mascot * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

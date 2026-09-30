@@ -576,34 +576,13 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
   border-radius: 8px;
   background: var(--ink);
 }
 
-.working-signal i {
-  width: 3px;
-  height: 12px;
-  border-radius: 3px;
-  background: var(--citron);
-  animation: working-bar 650ms var(--ease-in-out) infinite alternate;
-}
-
-.working-signal i:nth-child(2) {
-  animation-delay: -220ms;
-}
-
-.working-signal i:nth-child(3) {
-  animation-delay: -420ms;
-}
-
-@keyframes working-bar {
-  from {
-    transform: scaleY(0.35);
-  }
-  to {
-    transform: scaleY(1);
-  }
+.working-signal .friday-mascot {
+  width: 24px;
+  height: 24px;
 }
 
 .approval-card,
