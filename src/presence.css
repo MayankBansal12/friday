@@ -260,6 +260,19 @@
   font-size: 12px;
   margin: 0 0 12px;
 }
+.heard-text.ignored {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: rgba(216, 230, 196, 0.45);
+  font-style: italic;
+  text-align: left;
+  cursor: pointer;
+}
+.heard-text.ignored:hover {
+  color: #d8e6c4;
+}
 .background-list {
   margin-top: 18px;
 }

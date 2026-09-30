@@ -204,6 +204,12 @@ export default function fridayExtension(pi: ExtensionAPI) {
     { id: text(128) },
     ['id'],
   );
+  runtimeTool(
+    'stop_all',
+    'Stop all background tasks at once. Use only when the user clearly asks Friday to stop, cancel or drop everything; for one named task use a session_actions stop. Your own previous request was already interrupted. Confirm what was stopped with interact.',
+    {},
+    [],
+  );
   const drawItem = {
     type: 'object',
     additionalProperties: false,

@@ -18,6 +18,8 @@ import {
 } from '../livekit.js';
 import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
+import { WakeWordSpotter } from '../wake-word.js';
+import { JevClient, validTurn } from '../jev-client.js';
 import { TaskStore } from '../store.js';
 import { stageRuntimeExtension } from '../runtime-extension.js';
 import {
@@ -26,6 +28,7 @@ import {
   type ListeningState,
   type SurfaceLayout,
   type TaskRecord,
+  type VoiceGate,
 } from '../types.js';
 import {
   validAudio,
@@ -51,6 +54,8 @@ let quitting = false;
 let shutdownComplete = false;
 let service: AgentService;
 let speech: SpeechService;
+let wake: WakeWordSpotter;
+let turnGate: JevClient | undefined;
 let bridge: DesktopBridge;
 const speaker = createSpeakerFromEnvironment();
 // Bundled clips (app.asar when packaged); they follow Friday's voice route, LiveKit or pw-cat.
@@ -312,6 +317,13 @@ if (hasSingleInstanceLock)
         ? join(process.resourcesPath, 'parakeet-worker.py')
         : join(root, 'native/parakeet-worker.py'),
     });
+    wake = new WakeWordSpotter(settings.wakeWord);
+    // Jev judges speech heard while Friday is busy when a TypeSafe key is set, unless
+    // LINUX_BUDDY_TURN_GATE=off. The credential is removed before agents spawn.
+    const typesafeKey = process.env.TYPESAFE_API_KEY ?? '';
+    delete process.env.TYPESAFE_API_KEY;
+    if (typesafeKey && process.env.LINUX_BUDDY_TURN_GATE !== 'off')
+      turnGate = new JevClient({ apiKey: typesafeKey, model: process.env.LINUX_BUDDY_JEV_MODEL });
     native = new GnomeClient(
       app.isPackaged ? join(process.resourcesPath, 'desktop-client.py') : join(root, 'native/desktop-client.py'),
     );
@@ -380,6 +392,8 @@ if (hasSingleInstanceLock)
     const persistedSettings = service.getSettings();
     notchOffset = persistedSettings.notchOffset;
     speech.setWakeWord(persistedSettings.wakeWord);
+    wake.setWakeWord(persistedSettings.wakeWord);
+    if (wake.unavailable) console.warn(`Wake word runs on transcripts: ${wake.unavailable}`);
     app.setLoginItemSettings({ openAtLogin: persistedSettings.launchAtLogin });
     createWindow(openedAtLogin);
     createTray();
@@ -526,6 +540,18 @@ if (hasSingleInstanceLock)
       fromWindow(event);
       return speech.transcribePcm(request);
     });
+    ipcMain.handle('voice:wake-status', (event): VoiceGate => {
+      fromWindow(event);
+      return { localWake: !wake.unavailable, partials: speech.provider !== 'groq' };
+    });
+    ipcMain.handle('voice:wake-feed', (event, audio: unknown) => {
+      fromWindow(event);
+      return wake.feed(audio as ArrayBuffer);
+    });
+    ipcMain.handle('voice:turn-gate', (event, turn: unknown) => {
+      fromWindow(event);
+      return turnGate?.decide(validTurn(turn));
+    });
     ipcMain.handle('voice:transcribe', (event, audio: unknown, mimeType: unknown) => {
       fromWindow(event);
       const valid = validAudio(audio, mimeType);
@@ -544,7 +570,10 @@ if (hasSingleInstanceLock)
       }
       const updated = await service.updateSettings(next);
       if (typeof next.launchAtLogin === 'boolean') app.setLoginItemSettings({ openAtLogin: next.launchAtLogin });
-      if (typeof next.wakeWord === 'string') speech.setWakeWord(next.wakeWord);
+      if (typeof next.wakeWord === 'string') {
+        speech.setWakeWord(next.wakeWord);
+        wake.setWakeWord(next.wakeWord);
+      }
       return updated;
     });
     ipcMain.handle('window:expand', async (event, value: unknown) => {
@@ -604,6 +633,7 @@ if (hasSingleInstanceLock)
         if (next === 'listening' || next === 'armed')
           void speech.prepare().catch((error) => console.error('Local STT preparation failed', error.message));
         if (next === 'idle' || next === 'paused' || next === 'error' || next === 'listening') speech.reset();
+        if (next === 'listening') wake.reset();
       } catch {
         /* Ignore forged one-way renderer messages. */
       }

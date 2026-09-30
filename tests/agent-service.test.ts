@@ -462,6 +462,30 @@ describe('parent and child runtime boundary', () => {
     expect(service.state().sessions.find((s) => s.id === child.id)?.status).toBe('cancelled');
   });
 
+  it('stops every unfinished background task from one tool call and keeps the parent turn', async () => {
+    const { service, children, tool } = await fixture({ maxChildren: 3 });
+    const parent = await service.submit('Delegate');
+    const done = await service.startChild('Done', 'Finish quickly');
+    children[1].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Finished.' }] });
+    children[1].rpc({ type: 'agent_settled' });
+    await settle();
+    const running = await service.startChild('Running', 'Keep going');
+    const waiting = await service.startChild('Waiting', 'Ask first');
+    await tool(3, '/tools/task_report', { status: 'needs_input', text: 'Which folder?' });
+    children[3].rpc({ type: 'agent_settled' });
+    await settle();
+    const result = await tool(0, '/tools/stop_all', {});
+    expect(result.status).toBe(200);
+    expect(result.data.stopped.map((s: { id: string }) => s.id).sort()).toEqual([running.id, waiting.id].sort());
+    const status = (id: string) => service.state().sessions.find((s) => s.id === id)?.status;
+    expect(status(running.id)).toBe('cancelled');
+    expect(status(waiting.id)).toBe('cancelled');
+    expect(status(done.id)).toBe('completed');
+    expect(service.list().find((t) => t.id === parent.id)?.status).not.toBe('cancelled');
+    expect((await tool(0, '/tools/stop_all', {})).data.stopped).toEqual([]);
+    await service.shutdown();
+  });
+
   it('keeps a child question resumable and caps active background tasks', async () => {
     const { service, children, tool } = await fixture({ maxChildren: 1 });
     await service.submit('Delegate');

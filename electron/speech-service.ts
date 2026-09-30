@@ -61,6 +61,8 @@ export class SpeechService {
   private generation = 0;
   private pending: Promise<unknown> = Promise.resolve();
   private readonly client: Transcriber;
+  /** Hosted recognition is billed per request, so the renderer skips interim re-decodes. */
+  readonly provider: 'groq' | 'parakeet';
 
   constructor(
     private wakeWord: string,
@@ -71,6 +73,7 @@ export class SpeechService {
     const apiKey = process.env.GROQ_API_KEY ?? '';
     const provider = process.env.LINUX_BUDDY_STT_PROVIDER || (apiKey ? 'groq' : 'parakeet');
     if (provider === 'groq') {
+      this.provider = 'groq';
       if (!apiKey)
         throw new Error(
           'LINUX_BUDDY_STT_PROVIDER is groq but GROQ_API_KEY is missing. Set the key or choose parakeet.',
@@ -83,6 +86,7 @@ export class SpeechService {
         language: process.env.LINUX_BUDDY_GROQ_STT_LANGUAGE,
       });
     } else if (provider === 'parakeet') {
+      this.provider = 'parakeet';
       this.client = new ParakeetClient({
         workerPath: fileURLToPath(new URL('../native/parakeet-worker.py', import.meta.url)),
         ...options,

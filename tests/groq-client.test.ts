@@ -47,7 +47,7 @@ describe('Groq transcription', () => {
     expect(calls[0].init.method).toBe('POST');
     const form = calls[0].init.body as FormData;
     expect(form.get('model')).toBe('whisper-large-v3-turbo');
-    expect(form.get('response_format')).toBe('json');
+    expect(form.get('response_format')).toBe('verbose_json');
     expect(form.get('temperature')).toBe('0');
     expect(form.get('language')).toBeNull();
     const file = form.get('file') as File;
@@ -142,6 +142,28 @@ describe('Groq transcription', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
+  it('drops what Whisper invents for noise, keeping real speech', async () => {
+    const replies = [
+      { text: ' Thank you.', segments: [{ text: ' Thank you.', avg_logprob: -0.4 }] },
+      { text: ' you', segments: [{ text: ' you', avg_logprob: -0.72 }] },
+      { text: ' .', segments: [{ text: ' .', avg_logprob: -0.8 }] },
+      {
+        text: ' Hey Friday, open my calendar. Thank you.',
+        segments: [
+          { text: ' Hey Friday, open my calendar.', avg_logprob: -0.1 },
+          { text: ' Thank you.', avg_logprob: -1.4 },
+        ],
+      },
+      { text: ' Thank you, that is all.', segments: [{ text: ' Thank you, that is all.', avg_logprob: -0.2 }] },
+    ];
+    const tracked = trackFetch(() => jsonResponse(replies.shift()));
+    const client = new GroqClient({ apiKey: 'k', fetch: tracked.fetchFn });
+    clients.push(client);
+    const heard = [];
+    for (let i = 0; i < 5; i++) heard.push((await client.transcribePcm(new Int16Array([1, -1]).buffer)).text);
+    expect(heard).toEqual(['', '', '', 'Hey Friday, open my calendar.', 'Thank you, that is all.']);
+  });
+
   it('rejects invalid and oversized responses', async () => {
     const invalid = trackFetch(() => jsonResponse({ segments: [] }));
     const client = new GroqClient({ apiKey: 'k', fetch: invalid.fetchFn });
@@ -150,7 +172,7 @@ describe('Groq transcription', () => {
       'invalid transcription response',
     );
     expect(invalid.calls).toHaveLength(1);
-    const oversized = trackFetch(() => Promise.resolve(new Response('x'.repeat(5000), { status: 200 })));
+    const oversized = trackFetch(() => Promise.resolve(new Response('x'.repeat(70_000), { status: 200 })));
     const client2 = new GroqClient({ apiKey: 'k', fetch: oversized.fetchFn });
     clients.push(client2);
     await expect(client2.transcribePcm(new Int16Array([1, -1]).buffer)).rejects.toThrow('oversized');

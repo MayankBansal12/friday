@@ -2,6 +2,47 @@ import { readFile } from 'node:fs/promises';
 
 const endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const maxPcmBytes = 800_000; // 400,000 samples: the segmenter's 25 s limit.
+const maxResponseBytes = 65_536; // verbose_json carries per-segment scores.
+/** Below this mean token log-probability a segment is Whisper guessing, not hearing. */
+const minSegmentLogprob = -1;
+// Whisper's stock output for audio without speech (room noise, breath, a knock). Groq's
+// no_speech_prob is always 0, so a whole utterance that is only one of these is dropped.
+const silencePhrases = new Set([
+  'you',
+  'thank you',
+  'thanks',
+  'thank you very much',
+  'thank you so much',
+  'thanks for watching',
+  'thank you for watching',
+  'thank you so much for watching',
+  'thanks for listening',
+  'please subscribe',
+  'bye',
+  'bye bye',
+]);
+
+interface Segment {
+  text?: unknown;
+  avg_logprob?: unknown;
+}
+
+/** Text Whisper actually heard: unsure segments and silence hallucinations are removed. */
+export function heardText(text: string, segments?: Segment[]) {
+  const kept = Array.isArray(segments)
+    ? segments
+        .filter((segment) => typeof segment.text === 'string')
+        .filter((segment) => typeof segment.avg_logprob !== 'number' || segment.avg_logprob >= minSegmentLogprob)
+        .map((segment) => segment.text as string)
+        .join('')
+    : text;
+  const normalized = kept
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}' ]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return !normalized || silencePhrases.has(normalized) ? '' : kept.trim();
+}
 
 export interface GroqOptions {
   apiKey: string;
@@ -73,7 +114,7 @@ export class GroqClient {
       const data = new FormData();
       data.append('file', new Blob([new Uint8Array(buffer)], { type: 'audio/wav' }), 'utterance.wav');
       data.append('model', this.model);
-      data.append('response_format', 'json');
+      data.append('response_format', 'verbose_json');
       data.append('temperature', '0');
       const language = this.options.language?.trim();
       if (language) data.append('language', language);
@@ -110,15 +151,15 @@ export class GroqClient {
       clearTimeout(deadline);
       if (response.ok) {
         const raw = await response.text();
-        if (raw.length > 4096) throw new Error('Groq returned an oversized transcription response.');
-        let text: unknown;
+        if (raw.length > maxResponseBytes) throw new Error('Groq returned an oversized transcription response.');
+        let body: { text?: unknown; segments?: Segment[] };
         try {
-          text = (JSON.parse(raw) as { text?: unknown }).text;
+          body = JSON.parse(raw) as typeof body;
         } catch (error) {
           throw new Error('Groq returned an invalid transcription response.', { cause: error });
         }
-        if (typeof text !== 'string') throw new Error('Groq returned an invalid transcription response.');
-        return { text, inferenceMs: Date.now() - started };
+        if (typeof body.text !== 'string') throw new Error('Groq returned an invalid transcription response.');
+        return { text: heardText(body.text, body.segments), inferenceMs: Date.now() - started };
       }
       void response.body?.cancel().catch(() => {});
       if (response.status === 429 || response.status >= 500) {

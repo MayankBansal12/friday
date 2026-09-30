@@ -7,7 +7,7 @@ import {
 } from '../src/progressive-transcription';
 import type { PcmRequest, PcmResult } from '../electron/pcm-transcription';
 import { validPcmRequest } from '../electron/pcm-transcription';
-function setup(direct = false, playing = () => false, floor = new NoiseFloor()) {
+function setup(direct = false, playing = () => false, floor = new NoiseFloor(), interim?: boolean) {
   let time = 0;
   const jobs: { request: PcmRequest; resolve: (r: PcmResult) => void }[] = [];
   const final: string[] = [],
@@ -18,6 +18,7 @@ function setup(direct = false, playing = () => false, floor = new NoiseFloor()) 
     revocations = 0;
   const stt = new ProgressiveTranscription({
     direct,
+    partials: interim,
     floor,
     playback: playing,
     now: () => time,
@@ -68,6 +69,16 @@ describe('progressive batch coverage', () => {
     expect(s.final).toEqual(['Wait, not that one.']);
     // Results after the endpoint are finals, not interim text.
     expect(s.partials).toEqual(['Wait']);
+  });
+  it('decodes only at the endpoint when interim decodes are off', async () => {
+    const s = setup(false, () => false, new NoiseFloor(), false);
+    s.feed(3000);
+    expect(s.jobs).toHaveLength(0);
+    s.feed(860, false);
+    expect(s.jobs).toHaveLength(1);
+    await s.complete(0, 'Open my calendar.');
+    expect(s.final).toEqual(['Open my calendar.']);
+    expect(s.partials).toEqual([]);
   });
   it('reuses a complete silence-window result without decoding at the endpoint', async () => {
     const s = setup();

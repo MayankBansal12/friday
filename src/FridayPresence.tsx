@@ -66,6 +66,10 @@ interface Props {
   controlling: boolean;
   level: number;
   heard: string;
+  /** The heard words were judged not meant for Friday and did not interrupt it. */
+  heardIgnored?: boolean;
+  /** Submit ignored speech after all. */
+  onSendIgnored?: () => void;
   /** The user's recognized words: live while they speak, final briefly after submission. */
   transcript?: { text: string; final: boolean };
   error?: string;
@@ -618,7 +622,19 @@ export function FridayPresence(props: Props) {
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
                 <div className="presence-content">
-                  {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
+                  {props.heard &&
+                    listeningToRequest &&
+                    (props.heardIgnored ? (
+                      <button
+                        className="heard-text ignored"
+                        title="Friday thought this wasn’t meant for it. Send it anyway."
+                        onClick={props.onSendIgnored}
+                      >
+                        Ignored: “{props.heard}” · Send
+                      </button>
+                    ) : (
+                      <p className="heard-text">{props.heard}</p>
+                    ))}
                   {conversation.length > 0 && (
                     <div className="presence-conversation" aria-label="Conversation transcript">
                       {conversation.map((item) => {

@@ -103,6 +103,14 @@ export interface BuddySettings {
 
 export type ListeningState = 'idle' | 'paused' | 'starting' | 'listening' | 'transcribing' | 'armed' | 'error';
 
+/** How the renderer gates the microphone before audio reaches speech recognition. */
+export interface VoiceGate {
+  /** A local wake word detector hears "Hey Friday"; other speech is never transcribed. */
+  localWake: boolean;
+  /** Interim re-decodes while speaking; off for hosted recognition, billed per request. */
+  partials: boolean;
+}
+
 export interface TranscriptResult {
   text: string;
   wakeDetected: boolean;
