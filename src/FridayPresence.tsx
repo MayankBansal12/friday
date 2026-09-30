@@ -150,6 +150,21 @@ export function FridayPresence(props: Props) {
   const keyboardFocus = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const busy = task && activeStatuses.has(task.status);
+  // A brief pleased squint once a task she was working on finishes and she has stopped talking.
+  const [pleased, setPleased] = useState(false);
+  const workedOn = useRef(new Set<string>());
+  useEffect(() => {
+    if (!task) return;
+    if (activeStatuses.has(task.status)) workedOn.current.add(task.id);
+    if (task.status !== 'completed' || speaking || !workedOn.current.delete(task.id)) return;
+    const start = setTimeout(() => setPleased(true), 0);
+    const end = setTimeout(() => setPleased(false), 700);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(end);
+      setPleased(false);
+    };
+  }, [task, speaking]);
   const listeningToRequest = ['starting', 'armed', 'transcribing'].includes(listening);
   const children = (state?.sessions ?? []).filter((s) => s.role === 'child').sort((a, b) => b.updatedAt - a.updatedAt);
   const visible = children.filter(
@@ -408,13 +423,22 @@ export function FridayPresence(props: Props) {
       ? 'worried'
       : speaking
         ? 'speaking'
-        : busy || props.controlling || listening === 'transcribing'
-          ? 'thinking'
-          : listeningToRequest || typing
-            ? 'listening'
-            : !props.micEnabled
-              ? 'sleepy'
-              : 'idle';
+        : pleased
+          ? 'pleased'
+          : // Guiding and controlling look at her own mark or cursor instead of thinking.
+            props.controlling || props.guiding
+            ? 'idle'
+            : busy || listening === 'transcribing'
+              ? 'thinking'
+              : listeningToRequest || typing
+                ? 'listening'
+                : !props.micEnabled
+                  ? 'muted'
+                  : resting
+                    ? 'sleepy'
+                    : !engaged
+                      ? 'peeking'
+                      : 'idle';
   const mark = <FridayMascot mood={mood} className="presence-mark" />;
   const taskList = (
     <section className="background-list" aria-label="Background tasks">

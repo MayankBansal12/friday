@@ -330,7 +330,7 @@ The whole call is validated first: status "rejected" means nothing ran; fix the 
         content: [
           {
             type: 'text',
-            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. Metadata: ${JSON.stringify({ windowTitle: result.windowTitle, windowBounds: result.windowBounds, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
+            text: `Current desktop screenshot: ${result.width} pixels wide × ${result.height} pixels high. All drawing coordinates refer to THIS image, with (0,0) at its top-left. Locate the target's actual edges within the image before choosing its bounding box. pointer is where the user's mouse cursor is (also drawn in the image); when they say "this", "that", "here" or "what I'm pointing at", start with what is under it. Metadata: ${JSON.stringify({ windowTitle: result.windowTitle, windowBounds: result.windowBounds, pointer: result.pointer ?? null, lastMark: mark ? { points: mark.points, current: mark.current, createdAt: mark.createdAt } : null, capturedAt: result.capturedAt })}`,
           },
           { type: 'image', data: String(result.data), mimeType: String(result.mimeType || 'image/png') },
         ],
