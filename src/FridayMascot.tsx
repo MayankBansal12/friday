@@ -10,7 +10,7 @@ const gazeReach = { x: 1.8, y: 1.4 };
 const wakesFrom = new Set<FridayMood>(['sleepy', 'peeking', 'muted', 'idle']);
 
 /**
- * Friday's mark: a flat squircle with two eye slits that follow the pointer while she is
+ * Friday's mark: a flat squircle with two eyes that follow the pointer while she is
  * awake. State is shown only through the eyes, a slow pulse and color; motion is CSS so
  * the notch stays cheap.
  */
@@ -48,8 +48,12 @@ export function FridayMascot({ mood = 'idle', className = '' }: { mood?: FridayM
         <rect className="mascot-shape" x="3" y="3" width="26" height="26" rx="9" />
         <g className="mascot-gaze">
           <g className="mascot-eyes">
-            <rect x="11.4" y="12.7" width="2.4" height="6.6" rx="1.2" />
-            <rect x="18.2" y="12.7" width="2.4" height="6.6" rx="1.2" />
+            <rect x="10.7" y="12" width="3.2" height="8" rx="1.6" />
+            <rect x="18.1" y="12" width="3.2" height="8" rx="1.6" />
+          </g>
+          <g className="mascot-closed">
+            <path d="M9.9 17.2q2.4 2.6 4.8 0" />
+            <path d="M17.3 17.2q2.4 2.6 4.8 0" />
           </g>
         </g>
       </svg>
