@@ -21,6 +21,7 @@ import { SpeechService } from '../speech-service.js';
 import { WakeWordSpotter } from '../wake-word.js';
 import { JevClient, validTurn } from '../jev-client.js';
 import { TaskStore } from '../store.js';
+import { configureDebugLog, debugEnabled, debugId, debugLog, debugUrl, installDebugFetch } from '../debug-log.js';
 import { stageRuntimeExtension } from '../runtime-extension.js';
 import {
   activeStatuses,
@@ -41,6 +42,53 @@ import {
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 loadEnvironment({ path: join(process.cwd(), '.env'), quiet: true });
+installDebugFetch();
+if (debugEnabled()) {
+  // Generic timing only; domain events (transcripts, Jev, approvals) are logged by their handlers.
+  const register = ipcMain.handle.bind(ipcMain);
+  const quiet = new Set([
+    'voice:pcm',
+    'voice:wake-feed',
+    'voice:wake-status',
+    'desktop:status',
+    'desktop:guidance',
+    'desktop:controlling',
+    'friday:state',
+    'tasks:list',
+    'window:surface',
+    'window:notch-offset',
+  ]);
+  ipcMain.handle = (channel, listener) =>
+    register(channel, async (event, ...args) => {
+      const id = debugId();
+      const started = Date.now();
+      if (!quiet.has(channel)) debugLog('IPC', 'started', { id, channel });
+      try {
+        const result = await listener(event, ...args);
+        if (!quiet.has(channel)) debugLog('IPC', 'completed', { id, channel, ms: Date.now() - started });
+        return result;
+      } catch (error) {
+        debugLog('IPC', 'failed', {
+          id,
+          channel,
+          ms: Date.now() - started,
+          error: error instanceof Error ? error.name : 'UnknownError',
+        });
+        throw error;
+      }
+    });
+  process.on('uncaughtExceptionMonitor', (error) => debugLog('APP', 'uncaught exception', { error: error.name }));
+  process.on('exit', (code) => debugLog('APP', 'process exit', { code }));
+  // No SIGTERM/SIGINT listeners: they would replace Electron's own signal handling and
+  // make shutdown behave differently with debugging on. 'quit requested' marks the start.
+  app.on('child-process-gone', (_event, details) =>
+    debugLog('APP', 'child process gone', {
+      type: details.type,
+      reason: details.reason,
+      exitCode: details.exitCode,
+    }),
+  );
+}
 // The companion needs absolute positioning and always-on-top support. Electron
 // cannot provide those on native Wayland; use XWayland when an X display exists.
 if (process.platform === 'linux' && process.env.DISPLAY && !app.commandLine.hasSwitch('ozone-platform'))
@@ -274,7 +322,10 @@ function createWindow(openSilently: boolean) {
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   // A reloaded or crashed renderer is no longer listening; never route voice to it.
   window.webContents.on('did-start-loading', () => liveKit?.listener(false));
-  window.webContents.on('render-process-gone', () => liveKit?.listener(false));
+  window.webContents.on('render-process-gone', (_event, details) => {
+    debugLog('APP', 'renderer gone', { reason: details.reason, exitCode: details.exitCode });
+    liveKit?.listener(false);
+  });
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
@@ -318,6 +369,9 @@ function createTray() {
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
+// After the lock, so a second launch that only hands off to the running Friday does not
+// create a newer log file and pull the follower away from the live one.
+else configureDebugLog(join(app.getPath('userData'), 'debug', `friday-${Date.now()}.jsonl`));
 
 app.commandLine.appendSwitch('enable-features', 'GlobalShortcutsPortal');
 if (hasSingleInstanceLock)
@@ -326,6 +380,46 @@ if (hasSingleInstanceLock)
     session.defaultSession.setPermissionCheckHandler((webContents, permission, _origin, details) => {
       return webContents === window?.webContents && permission === 'media' && details.mediaType === 'audio';
     });
+    if (debugEnabled()) {
+      const pending = new Map<number, number>();
+      const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] };
+      // Vite serves hundreds of modules in dev; they are not Friday's network traffic.
+      const devOrigin = process.env.VITE_DEV_SERVER_URL ? new URL(process.env.VITE_DEV_SERVER_URL).origin : undefined;
+      session.defaultSession.webRequest.onBeforeRequest(filter, (details, callback) => {
+        if (!devOrigin || !details.url.startsWith(devOrigin)) {
+          pending.set(details.id, Date.now());
+          debugLog('NETWORK', 'request', {
+            id: `web${details.id}`,
+            url: debugUrl(details.url),
+            method: details.method,
+            transport: 'chromium',
+            type: details.resourceType,
+          });
+        }
+        callback({});
+      });
+      session.defaultSession.webRequest.onCompleted(filter, (details) => {
+        const started = pending.get(details.id);
+        if (started === undefined) return;
+        pending.delete(details.id);
+        debugLog('NETWORK', 'completed', {
+          id: `web${details.id}`,
+          status: details.statusCode,
+          ms: Date.now() - started,
+        });
+      });
+      session.defaultSession.webRequest.onErrorOccurred(filter, (details) => {
+        const started = pending.get(details.id);
+        if (started === undefined) return;
+        pending.delete(details.id);
+        debugLog('NETWORK', 'failed', {
+          id: `web${details.id}`,
+          url: debugUrl(details.url),
+          error: details.error,
+          ms: Date.now() - started,
+        });
+      });
+    }
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
       const mediaTypes = 'mediaTypes' in details && Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
       callback(
@@ -420,6 +514,12 @@ if (hasSingleInstanceLock)
     bridge.onMark = (mark) => window?.webContents.send('desktop:marked', mark);
     bridge.onControlProgress = (id, text, spoken) => service.controlProgress(id, text, spoken);
     await service.init();
+    debugLog('SESSION', 'started', {
+      session: service.state().parentId,
+      stt: speech.provider,
+      jev: Boolean(turnGate),
+      localWake: !wake.unavailable,
+    });
     const persistedSettings = service.getSettings();
     notchOffset = persistedSettings.notchOffset;
     speech.setWakeWord(persistedSettings.wakeWord);
@@ -445,8 +545,36 @@ if (hasSingleInstanceLock)
     bridge.onControlChanged = (active) => {
       if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
     };
-    service.on('state', (state) => window?.webContents.send('friday:state', state));
+    let lastDebugPresentation = '';
+    service.on('state', (state) => {
+      const summary = debugEnabled()
+        ? `${state.parentId}:${state.presentation.speaking}:${Boolean(state.presentation.acknowledging)}`
+        : '';
+      if (summary !== lastDebugPresentation) {
+        lastDebugPresentation = summary;
+        debugLog('PLAYBACK', 'state', {
+          session: state.parentId,
+          speaking: state.presentation.speaking,
+          acknowledging: Boolean(state.presentation.acknowledging),
+        });
+      }
+      window?.webContents.send('friday:state', state);
+    });
+    const debugTasks = new Map<string, string>();
     service.on('task', (task: TaskRecord) => {
+      const signature = debugEnabled() ? `${task.status}:${Boolean(task.approval)}:${task.steps.length}` : undefined;
+      if (signature && debugTasks.get(task.id) !== signature) {
+        // Finished tasks rarely change again; dropping them keeps the map bounded.
+        if (!activeStatuses.has(task.status)) debugTasks.delete(task.id);
+        else debugTasks.set(task.id, signature);
+        debugLog('TASK', 'changed', {
+          task: task.id,
+          status: task.status,
+          approval: Boolean(task.approval),
+          steps: task.steps.length,
+          hasError: Boolean(task.error),
+        });
+      }
       window?.webContents.send('task:changed', task);
     });
 
@@ -494,7 +622,9 @@ if (hasSingleInstanceLock)
     ipcMain.handle('tasks:approve', (event, id: unknown, approved: unknown) => {
       fromWindow(event);
       if (typeof approved !== 'boolean') throw new Error('Invalid approval response.');
-      return service.resolveApproval(validId(id), approved);
+      const task = validId(id);
+      debugLog('APPROVAL', 'answer', { task, approved });
+      return service.resolveApproval(task, approved);
     });
     ipcMain.handle('conversation:new', async (event) => {
       fromWindow(event);
@@ -570,9 +700,18 @@ if (hasSingleInstanceLock)
         /* Ignore forged one-way renderer messages. */
       }
     });
-    ipcMain.handle('voice:pcm', (event, request: unknown) => {
+    ipcMain.handle('voice:pcm', async (event, request: unknown) => {
       fromWindow(event);
-      return speech.transcribePcm(request);
+      const result = await speech.transcribePcm(request);
+      // Partials superseded by a newer revision are not empty transcripts; skip them.
+      if (!result.cancelled)
+        debugLog('VOICE', 'transcription result', {
+          segment: result.segment,
+          revision: result.revision,
+          characters: result.text.length,
+          ms: result.inferenceMs,
+        });
+      return result;
     });
     ipcMain.handle('voice:wake-status', (event): VoiceGate => {
       fromWindow(event);
@@ -580,16 +719,34 @@ if (hasSingleInstanceLock)
     });
     ipcMain.handle('voice:wake-feed', (event, audio: unknown) => {
       fromWindow(event);
-      return wake.feed(audio as ArrayBuffer);
+      const detected = wake.feed(audio as ArrayBuffer);
+      if (detected) debugLog('VOICE', 'wake detected');
+      return detected;
     });
-    ipcMain.handle('voice:turn-gate', (event, turn: unknown) => {
+    ipcMain.handle('voice:turn-gate', async (event, turn: unknown) => {
       fromWindow(event);
-      return turnGate?.decide(validTurn(turn));
+      if (!turnGate) return undefined;
+      const decision = await turnGate.decide(validTurn(turn));
+      // undefined from a configured client means the call failed or answered invalidly.
+      debugLog(
+        'JEV',
+        'decision',
+        decision
+          ? { interrupt: decision.interrupt, confidence: decision.confidence, ms: decision.ms }
+          : { fallback: true },
+      );
+      return decision;
     });
-    ipcMain.handle('voice:transcribe', (event, audio: unknown, mimeType: unknown) => {
+    ipcMain.handle('voice:transcribe', async (event, audio: unknown, mimeType: unknown) => {
       fromWindow(event);
       const valid = validAudio(audio, mimeType);
-      return speech.transcribe(valid.audio, valid.mimeType);
+      const result = await speech.transcribe(valid.audio, valid.mimeType);
+      debugLog('VOICE', 'transcription result', {
+        characters: result.text.length,
+        wake: result.wakeDetected,
+        ms: result.timings?.totalMs,
+      });
+      return result;
     });
     ipcMain.handle('settings:get', (event) => {
       fromWindow(event);
@@ -651,6 +808,7 @@ if (hasSingleInstanceLock)
       try {
         fromWindow(event);
         const next = validListeningState(state);
+        debugLog('VOICE', 'state', { state: next });
         tray?.setToolTip(
           `Friday — ${
             {
@@ -676,6 +834,7 @@ if (hasSingleInstanceLock)
 
 app.on('second-instance', () => activateFriday(false));
 app.on('before-quit', (event) => {
+  debugLog('APP', 'quit requested', { shutdownComplete });
   if (shutdownComplete) return;
   event.preventDefault();
   quitting = true;

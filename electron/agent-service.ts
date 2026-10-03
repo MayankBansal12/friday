@@ -24,6 +24,7 @@ import { SpeechChannel } from './speech-channel.js';
 import type { Utterance, VoiceOutput } from './speech-output.js';
 import { validateSpeech } from './speech-policy.js';
 import { validSettings } from './validation.js';
+import { debugEnabled, debugId, debugLog } from './debug-log.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
@@ -1313,6 +1314,20 @@ export class AgentService extends EventEmitter {
     return { ok: true, effects: 'applied', results };
   }
 
+  private debugToolRequest(request: IncomingMessage, response: ServerResponse, task: string, session: string) {
+    const id = debugId();
+    const started = Date.now();
+    const route = (request.url ?? '').split('?')[0];
+    const tool = /^\/(?:tools|desktop)\/[a-z_-]+$/.test(route) ? route : 'other';
+    debugLog('TOOL', 'started', { id, task, session, tool });
+    response.once('finish', () =>
+      debugLog('TOOL', 'completed', { id, task, tool, status: response.statusCode, ms: Date.now() - started }),
+    );
+    response.once('close', () => {
+      if (!response.writableFinished) debugLog('TOOL', 'connection closed before reply', { id, tool });
+    });
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const reply = (status: number, data: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -1321,6 +1336,7 @@ export class AgentService extends EventEmitter {
     const worker = [...this.workers.values()].find((w) => request.headers.authorization === `Bearer ${w.token}`);
     const task = worker?.task;
     if (!worker || !task || terminal.has(task.status)) return reply(401, { error: 'Session is not active' });
+    if (debugEnabled()) this.debugToolRequest(request, response, task.id, worker.session.id);
     try {
       let size = 0;
       const chunks: Buffer[] = [];
