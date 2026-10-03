@@ -14,7 +14,8 @@
   transform-origin: center;
   transition:
     transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
-    fill 0.3s;
+    fill 0.3s,
+    opacity 0.25s;
 }
 .friday-mascot .mascot-shape {
   fill: #d9ff91;
@@ -22,6 +23,19 @@
 .friday-mascot .mascot-eyes {
   fill: #1d1f1b;
   animation: mascot-blink 6s infinite;
+}
+/* Asleep: the slits swap for curved closed lids, which still read as eyes at notch size. */
+.friday-mascot .mascot-closed {
+  fill: none;
+  stroke: #1d1f1b;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+.friday-mascot.mood-sleepy .mascot-closed,
+.friday-mascot.mood-muted .mascot-closed {
+  opacity: 1;
 }
 
 /* Pointer following while awake (her own mark or cursor when guiding or controlling);
@@ -78,10 +92,15 @@
 .friday-mascot.mood-sleepy .mascot-eyes {
   animation: mascot-doze 5s ease-in-out;
   transform: translateY(1px) scaleY(0.2);
+  opacity: 0;
+}
+.friday-mascot.mood-sleepy .mascot-closed {
+  animation: mascot-nod-off 5s ease-in-out;
 }
 .friday-mascot.mood-muted .mascot-eyes {
   animation: none;
   transform: translateY(1px) scaleY(0.2);
+  opacity: 0;
 }
 .friday-mascot.mood-worried .mascot-shape {
   fill: #ffb09f;
@@ -121,10 +140,18 @@
 @keyframes mascot-doze {
   0% {
     transform: none;
+    opacity: 1;
   }
   12%,
   80% {
     transform: translateY(0.6px) scaleY(0.5);
+    opacity: 1;
+  }
+}
+@keyframes mascot-nod-off {
+  0%,
+  80% {
+    opacity: 0;
   }
 }
 @keyframes mascot-pulse {

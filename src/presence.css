@@ -34,6 +34,10 @@
   transform: scale(1.04);
   border-color: #b8d987;
 }
+.presence-bar .presence-mark {
+  width: 34px;
+  height: 34px;
+}
 .friday-orb .presence-mark {
   width: 42px;
   height: 42px;
