@@ -10,6 +10,7 @@ import {
 import {
   Archive,
   ArrowRight,
+  ArrowUp,
   Check,
   ChevronDown,
   CircleStop,
@@ -21,12 +22,11 @@ import {
   Laptop,
   LoaderCircle,
   Mic,
+  MicOff,
   Minimize2,
-  Minus,
   Plus,
   RotateCcw,
   Search,
-  Send,
   Scan,
   Volume2,
   Settings,
@@ -1723,118 +1723,126 @@ export default function App() {
 
   const composer = (
     <footer className="composer-area">
-      {desktopState && !desktopState.ready && (
-        <div className="desktop-notice" role="status">
-          <span>{desktopState.error}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setCheckingDesktop(true);
-              void refreshDesktop();
-            }}
-            disabled={checkingDesktop}
-          >
-            {checkingDesktop ? 'Checking…' : 'Check again'}
-          </button>
-        </div>
-      )}
-      {(marked || (desktopState?.annotations ?? 0) > 0) && (
-        <div className="drawing-context">
-          <span>{marked ? 'Screen mark attached' : 'Drawing on screen'}</span>
-          <button type="button" onClick={() => void clearDrawing()}>
-            Clear <X size={12} />
-          </button>
-        </div>
-      )}
-      {listenState !== 'idle' && (
-        <div className={`listening-bar ${listenState}`} aria-live="polite">
-          <span className="listening-indicator">
-            <i style={{ transform: `scale(${1 + voiceLevel})` }} />
-            {directVoice && listenState === 'listening' ? 'Listening' : voiceCopy(listenState, wakeWord).eyebrow}
-          </span>
-          <span>
-            {heard
-              ? `“${heard}”`
-              : directVoice && listenState === 'listening'
-                ? 'Release the microphone to send.'
-                : voiceCopy(listenState, wakeWord).detail}
-          </span>
-        </div>
-      )}
-      <form
-        className="command-bar"
-        onSubmit={(event: FormEvent) => {
-          event.preventDefault();
-          void runPrompt(prompt);
-          changeTyping(false);
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          autoFocus
-          rows={1}
-          value={prompt}
-          aria-label="Ask Friday"
-          placeholder={
-            view === 'history'
-              ? 'Start a new task…'
-              : activeTask
-                ? 'Give Friday another task…'
-                : 'Ask Friday to do something…'
-          }
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            changeTyping(Boolean(event.target.value.trim()));
-          }}
-          onFocus={() => {
-            if (prompt.trim()) changeTyping(true);
-          }}
-          onBlur={() => changeTyping(false)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-        />
-        <button
-          className="mark-button pressable"
-          type="button"
-          aria-label="Mark screen"
-          title={desktopState?.ready ? 'Mark something on screen' : desktopState?.error || 'Checking screen access…'}
-          disabled={!desktopState?.ready || Boolean(activeTask) || marking}
-          onClick={() => void markScreen()}
-        >
-          {marking ? <LoaderCircle className="spin" size={18} /> : <Scan size={18} />}
-        </button>
-        <button
-          className={`mic-button pressable ${micEnabled ? 'active' : ''}`}
-          type="button"
-          aria-label={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-          aria-pressed={micEnabled}
-          title={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-          onClick={() => (micEnabled ? disableMicrophone() : void startListening(false, false))}
-        >
-          <Mic size={18} />
-        </button>
-
-        {(activeTask || listeningActive || answering) && (
-          <button className="stop-button pressable" type="button" onClick={() => void stopAll()}>
-            <CircleStop size={15} /> <span>Stop</span>
-          </button>
+      <div className="composer-column">
+        {desktopState && !desktopState.ready && (
+          <div className="desktop-notice" role="status">
+            <span>{desktopState.error}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setCheckingDesktop(true);
+                void refreshDesktop();
+              }}
+              disabled={checkingDesktop}
+            >
+              {checkingDesktop ? 'Checking…' : 'Check again'}
+            </button>
+          </div>
         )}
-        <button
-          className="send-button pressable"
-          type="submit"
-          disabled={!prompt.trim() || submitting}
-          aria-label="Send request"
+        {(marked || (desktopState?.annotations ?? 0) > 0) && (
+          <div className="drawing-context">
+            <span>{marked ? 'Screen mark attached' : 'Drawing on screen'}</span>
+            <button type="button" onClick={() => void clearDrawing()}>
+              Clear <X size={12} />
+            </button>
+          </div>
+        )}
+        {(['armed', 'transcribing', 'error'].includes(listenState) || heard) && (
+          <div className={`listening-bar ${listenState}`} aria-live="polite">
+            <span className="listening-indicator">
+              <i style={{ transform: `scale(${1 + voiceLevel})` }} />
+              {directVoice && listenState === 'listening' ? 'Listening' : voiceCopy(listenState, wakeWord).eyebrow}
+            </span>
+            <span>
+              {heard
+                ? `“${heard}”`
+                : directVoice && listenState === 'listening'
+                  ? 'Listening to your request…'
+                  : voiceCopy(listenState, wakeWord).detail}
+            </span>
+          </div>
+        )}
+        <form
+          className="command-bar"
+          onSubmit={(event: FormEvent) => {
+            event.preventDefault();
+            void runPrompt(prompt);
+            changeTyping(false);
+          }}
         >
-          {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
-        </button>
-      </form>
-      <div className="composer-meta">
-        <span>{micEnabled ? `Say “hey ${wakeWord.toLowerCase()}” to talk` : 'Microphone off'}</span>
-        <span>Enter to send · Shift+Enter for a new line</span>
+          <textarea
+            ref={inputRef}
+            autoFocus
+            rows={1}
+            value={prompt}
+            aria-label="Ask Friday"
+            placeholder={
+              view === 'history' ? 'Start a conversation…' : activeTask ? 'Add to your request…' : 'Message Friday…'
+            }
+            onChange={(event) => {
+              setPrompt(event.target.value);
+              changeTyping(Boolean(event.target.value.trim()));
+            }}
+            onFocus={() => {
+              if (prompt.trim()) changeTyping(true);
+            }}
+            onBlur={() => changeTyping(false)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
+          <div className="composer-toolbar">
+            <div className="composer-tools">
+              <button
+                className="mark-button pressable"
+                type="button"
+                aria-label="Mark screen"
+                title={desktopState?.ready ? 'Mark screen' : desktopState?.error || 'Checking screen access…'}
+                disabled={!desktopState?.ready || Boolean(activeTask) || marking}
+                onClick={() => void markScreen()}
+              >
+                {marking ? <LoaderCircle className="spin" size={15} /> : <Scan size={15} strokeWidth={1.5} />}
+              </button>
+              <button
+                className={`mic-button pressable ${micEnabled ? 'active' : ''}`}
+                type="button"
+                aria-label={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                aria-pressed={micEnabled}
+                title={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                onClick={() => (micEnabled ? disableMicrophone() : void startListening(false, false))}
+              >
+                {micEnabled ? <Mic size={15} strokeWidth={1.5} /> : <MicOff size={15} strokeWidth={1.5} />}
+              </button>
+              {(activeTask ||
+                answering ||
+                controlling ||
+                guiding ||
+                friday?.sessions.some((session) => session.status === 'running') ||
+                listenState === 'transcribing') && (
+                <button
+                  className="stop-button pressable"
+                  type="button"
+                  onClick={() => void stopAll()}
+                  title="Stop speech and all tasks"
+                >
+                  <CircleStop size={15} strokeWidth={1.5} /> <span>Stop</span>
+                </button>
+              )}
+            </div>
+            <button
+              className="send-button pressable"
+              type="submit"
+              disabled={!prompt.trim() || submitting}
+              aria-label="Send request"
+              title="Send · Enter"
+            >
+              {submitting ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={16} />}
+            </button>
+          </div>
+        </form>
       </div>
     </footer>
   );
@@ -1939,17 +1947,16 @@ export default function App() {
             />
             <span className="brand-copy">
               <strong>Friday</strong>
-              <small>workspace</small>
+              <small aria-live="polite">{presence.label}</small>
             </span>
           </button>
 
           <nav className="view-switcher" aria-label="Friday views">
             <button type="button" className={view === 'now' ? 'active' : ''} onClick={() => setView('now')}>
-              <Sparkles size={14} /> <span>Conversation</span>
+              <span>Conversation</span>
             </button>
             <button type="button" className={view !== 'now' ? 'active' : ''} onClick={() => setView('history')}>
-              <Archive size={14} /> <span>History</span>
-              {tasks.length > 0 && <small>{tasks.length}</small>}
+              <span>History</span>
             </button>
           </nav>
 
@@ -1957,15 +1964,12 @@ export default function App() {
             <button
               className="icon-button pressable"
               type="button"
-              aria-label="Back to pill"
-              title="Back to pill — keep Friday close"
-              onClick={closeWorkspace}
+              aria-label="New conversation"
+              title="New conversation"
+              onClick={() => void newTask()}
             >
-              <Minimize2 size={17} />
+              <Plus size={15} strokeWidth={1.5} />
             </button>
-            <span className={`presence ${presence.tone}`} aria-live="polite">
-              <i /> {presence.label}
-            </span>
             <button
               className="icon-button pressable"
               type="button"
@@ -1973,16 +1977,16 @@ export default function App() {
               title="Settings"
               onClick={() => setShowSettings(true)}
             >
-              <Settings size={17} />
+              <Settings size={15} strokeWidth={1.5} />
             </button>
             <button
               className="icon-button pressable"
               type="button"
-              aria-label="Minimize Friday"
-              title="Minimize Friday"
-              onClick={() => window.buddy.hide()}
+              aria-label="Back to pill"
+              title="Back to pill"
+              onClick={closeWorkspace}
             >
-              <Minus size={18} />
+              <Minimize2 size={15} strokeWidth={1.5} />
             </button>
           </div>
         </header>
@@ -2034,12 +2038,6 @@ export default function App() {
             />
           ) : tasks.some((item) => item.role !== 'child' && item.conversationId === friday?.parentId) ? (
             <section className="workspace-conversation">
-              <header className="task-title-row">
-                <h2 className="sr-only">Conversation</h2>
-                <button type="button" className="quiet-button pressable" onClick={() => void newTask()}>
-                  New conversation
-                </button>
-              </header>
               <Conversation
                 tasks={tasks
                   .filter((item) => item.role !== 'child' && item.conversationId === friday?.parentId)

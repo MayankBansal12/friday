@@ -78,7 +78,7 @@ textarea:focus-visible {
 
 .friday-window {
   border-color: var(--line-strong);
-  background: radial-gradient(ellipse at 20% 0%, #34433366, transparent 65%), var(--paper);
+  background: var(--paper);
   box-shadow:
     0 24px 80px #0005,
     inset 0 1px #ffffff0a;
@@ -91,11 +91,23 @@ textarea:focus-visible {
   border-color: var(--line);
 }
 .titlebar {
-  height: 60px;
-  flex-basis: 60px;
+  height: 56px;
+  flex-basis: 56px;
+  grid-template-columns: auto 1fr auto;
+  gap: 16px;
+  padding: 0 18px;
   color: var(--ink);
 }
 
+.brand-button .friday-mark {
+  width: 30px;
+  height: 30px;
+}
+.title-actions .icon-button {
+  width: 28px;
+  height: 28px;
+  color: var(--ink-faint);
+}
 .brand-copy strong {
   font-size: 15px;
   font-weight: 650;
@@ -112,31 +124,34 @@ textarea:focus-visible {
 }
 
 .view-switcher {
-  border-color: var(--line);
-  background: var(--paper-sunken);
+  justify-self: center;
+  border: 0;
+  background: none;
+  padding: 0;
+  gap: 12px;
 }
 .view-switcher button {
-  height: 32px;
-  padding: 0 12px;
-  color: var(--ink-soft);
+  height: 34px;
+  padding: 0 2px;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-faint);
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: 500;
 }
 .view-switcher button.active {
-  background: var(--citron-soft);
-  color: var(--citron);
-}
-.view-switcher small {
-  font-size: 10px;
-}
-.view-switcher .active small {
-  background: #d9ff911f;
+  background: transparent;
+  border-bottom-color: var(--citron-deep);
+  color: var(--ink);
 }
 
 .icon-button {
   color: var(--ink-soft);
 }
 
+.content-scroll {
+  padding: 0 24px;
+}
 .content-scroll,
 .settings-dialog {
   scrollbar-color: #53634d transparent;
@@ -413,19 +428,69 @@ textarea:focus-visible {
 /* ---------- Composer ---------- */
 
 .composer-area {
-  padding: 14px 20px 12px;
+  padding: 0 24px 22px;
+  border-top: 0;
+  background: var(--paper);
+}
+.composer-column {
+  width: min(100%, 640px);
+  margin: 0 auto;
 }
 .command-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid var(--line-strong);
   border-radius: 18px;
-  background: var(--paper-bright);
+  background: var(--paper-raised);
   box-shadow: none;
+}
+.composer-toolbar,
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.composer-toolbar {
+  justify-content: space-between;
+}
+.composer-tools .mark-button,
+.composer-tools .mic-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-faint);
+}
+.composer-tools .mic-button.active {
+  background: transparent;
+  color: var(--ink-soft);
+}
+.composer-tools .stop-button {
+  height: 28px;
+  border: 0;
+  background: transparent;
+  font-weight: 500;
+}
+.composer-toolbar .send-button {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
 }
 .command-bar:focus-within {
   border-color: var(--citron-deep);
   box-shadow: 0 0 0 3px #d9ff911a;
 }
 .command-bar textarea {
+  width: 100%;
+  flex: none;
+  padding: 2px 4px 6px;
   font-size: var(--text-body);
   line-height: 1.5;
 }
@@ -794,31 +859,17 @@ textarea:focus-visible {
 }
 
 /* Workspace size: the same transcript with more air. */
-.workspace-conversation {
-  width: min(100%, 720px);
+.content-scroll > .workspace-conversation {
+  width: min(100%, 640px);
   min-height: 100%;
   margin: 0 auto;
-  padding: 28px 32px 36px;
+  padding: 24px 0;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
 }
-/* Header pinned to the top; a short transcript settles by the composer. */
-.workspace-conversation > header {
-  align-items: center;
-  /* The active tab already names the view; keep only the action. */
-  justify-content: flex-end;
-  margin: 0 0 auto;
-  padding-bottom: 24px;
-}
-.workspace-conversation > header h2 {
-  margin: 0;
-  color: var(--ink-soft);
-  font-size: var(--text-md);
-  font-weight: 600;
-}
 .workspace-conversation .conversation-transcript {
-  gap: 28px;
+  gap: 20px;
 }
 .workspace-conversation .conversation-user {
   font-size: var(--text-body);
@@ -1015,11 +1066,11 @@ textarea:focus-visible {
 /* ---------- Responsive ---------- */
 
 @media (max-width: 650px) {
-  .workspace-conversation {
-    padding: 22px 20px 28px;
-  }
   .composer-area {
-    padding: 12px 14px 10px;
+    padding: 0 16px 16px;
+  }
+  .content-scroll {
+    padding: 0 16px;
   }
   .answer-copy,
   .working-state {
@@ -1027,6 +1078,13 @@ textarea:focus-visible {
   }
 }
 @media (max-width: 520px) {
+  .view-switcher button span {
+    display: inline;
+  }
+  .titlebar {
+    gap: 8px;
+    padding: 0 10px;
+  }
   .welcome-simple {
     padding: 36px 20px;
   }
