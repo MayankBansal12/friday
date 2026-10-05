@@ -647,17 +647,36 @@ export function FridayPresence(props: Props) {
                 <span> tasks</span>
               </button>
             )}
-            <button
-              className="presence-action"
-              aria-label="Stop Friday"
-              title="Stop speech and all tasks"
-              onClick={() => {
-                setDismissed(contentKey);
-                props.onStop();
-              }}
-            >
-              <CircleStop size={18} />
-            </button>
+            <div className="presence-controls">
+              <button
+                className={`presence-action ${props.micEnabled ? 'lit' : ''}`}
+                onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
+                aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                aria-pressed={props.micEnabled}
+                title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+              >
+                {props.micEnabled ? <Mic size={18} /> : <MicOff size={18} />}
+              </button>
+              <button
+                className="presence-action"
+                onClick={props.onDetails}
+                aria-label="Open workspace"
+                title="Open workspace"
+              >
+                <Maximize2 size={18} />
+              </button>
+              <button
+                className="presence-action"
+                aria-label="Stop Friday"
+                title="Stop speech and all tasks"
+                onClick={() => {
+                  setDismissed(contentKey);
+                  props.onStop();
+                }}
+              >
+                <CircleStop size={18} />
+              </button>
+            </div>
           </motion.header>
           <AnimatePresence initial={false}>
             {expanded && (
@@ -726,52 +745,44 @@ export function FridayPresence(props: Props) {
                   ))}
                   {visible.length > 0 && !typing && (!selected || showTasks) && taskList}
                 </div>
-                {typing ? (
-                  <form
-                    className="presence-composer"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (text.trim()) {
-                        props.onSubmit(text);
-                        setTyping(false);
-                      }
-                    }}
-                  >
-                    <input
-                      autoFocus
-                      aria-label="Ask Friday"
-                      placeholder="Type a request…"
-                      value={text}
-                      onChange={(e) => setText(e.target.value)}
-                    />
-                    <button aria-label="Send request" disabled={!text.trim()}>
-                      <ArrowUp size={16} />
+                <footer className="presence-input-row">
+                  {typing ? (
+                    <form
+                      className="presence-composer"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (text.trim()) {
+                          props.onSubmit(text);
+                          setTyping(false);
+                        }
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        aria-label="Ask Friday"
+                        placeholder="Type a request…"
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                      />
+                      <button aria-label="Send request" disabled={!text.trim()}>
+                        <ArrowUp size={16} />
+                      </button>
+                    </form>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`presence-composer is-idle${text ? ' has-draft' : ''}`}
+                      onClick={() => setTyping(true)}
+                    >
+                      {text || 'Type a message…'}
                     </button>
-                  </form>
-                ) : (
+                  )}
                   <button
-                    type="button"
-                    className={`presence-composer is-idle${text ? ' has-draft' : ''}`}
-                    onClick={() => setTyping(true)}
+                    className="presence-action"
+                    onClick={collapse}
+                    aria-label="Collapse to pill"
+                    title="Collapse to pill"
                   >
-                    {text || 'Type a message…'}
-                  </button>
-                )}
-                <footer className="presence-footer">
-                  <button
-                    className="footer-mic"
-                    onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
-                    aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-                    title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-                  >
-                    {props.micEnabled ? <Mic size={14} /> : <MicOff size={14} />}
-                    {props.micEnabled ? 'Mic on' : 'Mic off'}
-                  </button>
-                  <button onClick={props.onDetails} aria-label="Open workspace">
-                    <Maximize2 size={14} />
-                    Open workspace
-                  </button>
-                  <button onClick={collapse} aria-label="Collapse to pill" title="Collapse to pill">
                     <ChevronUp size={14} />
                   </button>
                 </footer>

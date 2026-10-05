@@ -857,6 +857,24 @@ textarea:focus-visible {
   font-size: var(--text-md);
   line-height: 1.6;
 }
+.presence-controls {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.presence-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  flex-shrink: 0;
+}
+.presence-input-row .presence-composer {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
 /* The idle composer is a button dressed as the input it becomes, same box. */
 .presence-composer {
   min-height: 44px;
