@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,11 +9,11 @@ import {
   Square,
   Check,
   CircleStop,
-  Keyboard,
   LoaderCircle,
   Mic,
   MicOff,
-  Settings,
+  Maximize2,
+  ChevronUp,
   X,
 } from 'lucide-react';
 import {
@@ -25,6 +25,7 @@ import {
 } from '../electron/types';
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
+import { Conversation } from './Conversation';
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -83,11 +84,12 @@ interface Props {
   onMicOff(): void;
   typing: boolean;
   onTypingChange(value: boolean): void;
+  draft: string;
+  onDraftChange(value: string): void;
   onTalk(): void;
   onContinue(): void;
   onMicOn(): void;
   onStop(): void;
-  onDismiss(): void;
   onSubmit(text: string): void;
   onDetails(): void;
   onStopChild(id: string): void;
@@ -121,7 +123,7 @@ export function FridayPresence(props: Props) {
   const [hovered, setHovered] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
   const { typing, onTypingChange: setTyping } = props;
-  const [text, setText] = useState('');
+  const { draft: text, onDraftChange: setText } = props;
   const [dismissed, setDismissed] = useState<string>();
   const [autoOpen, setAutoOpen] = useState(false);
   const [acknowledged, setAcknowledged] = useState<Record<string, number>>(() => {
@@ -153,6 +155,7 @@ export function FridayPresence(props: Props) {
   const syncSurface = useRef<() => void>(() => {});
   const keyboardFocus = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const busy = task && activeStatuses.has(task.status);
   // A brief pleased squint once a task she was working on finishes and she has stopped talking.
   const [pleased, setPleased] = useState(false);
@@ -179,6 +182,9 @@ export function FridayPresence(props: Props) {
         (props.reportedChildren?.[s.id] ?? 0) < s.updatedAt),
   );
   const running = children.filter((s) => s.status === 'running');
+  const canStop = Boolean(
+    busy || speaking || props.controlling || props.guiding || running.length || listening === 'transcribing',
+  );
   const attention = visible.filter((s) => ['needs_input', 'failed', 'interrupted'].includes(s.status)).length;
   const selected = children.find((s) => s.id === props.selectedChildId);
   const detail = props.error || task?.error || state?.presentation.text || '';
@@ -213,15 +219,18 @@ export function FridayPresence(props: Props) {
     userWords,
   );
   const background = !engaged && visible.length > 0;
-  const expanded = !props.controlling && !background && (hovered || (autoOpen && dismissed !== contentKey));
+  const expanded = !props.controlling && !background && (typing || hovered || (autoOpen && dismissed !== contentKey));
   const conversation = props.tasks
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
   const resting = !engaged && !expanded;
+  useEffect(() => {
+    if (expanded) followLatest.current = true;
+  }, [expanded]);
   // The expanded panel's own scroll stays at the newest content instead of a mid-scroll position.
   useEffect(() => {
     const content = contentRef.current;
-    if (!content || !expanded) return;
+    if (!content || !expanded || !followLatest.current) return;
     content.scrollTop = content.scrollHeight;
   }, [expanded, detail, conversation.length, approvals.length, props.heard, listeningToRequest]);
   const surface: SurfaceLayout = background
@@ -410,18 +419,35 @@ export function FridayPresence(props: Props) {
     leaveTimer.current = setTimeout(() => {
       if (!keyboardFocus.current || !panelRef.current?.contains(document.activeElement)) {
         setHovered(false);
-        if (typing) setTyping(false);
-        if (panelRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+        if (!typing && panelRef.current?.contains(document.activeElement))
+          (document.activeElement as HTMLElement).blur();
       }
     }, 450);
   }
-  function collapse() {
+  const collapse = useCallback(() => {
     setHovered(false);
     setAutoOpen(false);
     setTyping(false);
     setDismissed(contentKey);
-    props.onDismiss();
-  }
+  }, [contentKey, setTyping]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') collapse();
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, [collapse]);
+  useEffect(() => {
+    const blur = () => {
+      keyboardFocus.current = false;
+      setDismissed(contentKey);
+      setHovered(false);
+      setAutoOpen(false);
+      setTyping(false);
+    };
+    window.addEventListener('blur', blur);
+    return () => window.removeEventListener('blur', blur);
+  }, [contentKey, setTyping]);
   const mood: FridayMood =
     approvals.length || props.error || task?.error || listening === 'error'
       ? 'worried'
@@ -531,12 +557,6 @@ export function FridayPresence(props: Props) {
           leave();
         }
       }}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          collapse();
-        }
-      }}
     >
       {background ? (
         <section ref={panelRef} className="background-group">
@@ -630,17 +650,40 @@ export function FridayPresence(props: Props) {
                 <span> tasks</span>
               </button>
             )}
-            <button
-              className="presence-action"
-              aria-label="Stop Friday"
-              title="Stop speech and all tasks"
-              onClick={() => {
-                setDismissed(contentKey);
-                props.onStop();
-              }}
-            >
-              <CircleStop size={18} />
-            </button>
+            <div className="presence-controls">
+              <button
+                className="presence-action"
+                onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
+                aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                aria-pressed={props.micEnabled}
+                title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+              >
+                {props.micEnabled ? <Mic size={14} strokeWidth={1.5} /> : <MicOff size={14} strokeWidth={1.5} />}
+              </button>
+              {hovered && (
+                <button
+                  className="presence-action"
+                  onClick={props.onDetails}
+                  aria-label="Open workspace"
+                  title="Open workspace"
+                >
+                  <Maximize2 size={14} strokeWidth={1.5} />
+                </button>
+              )}
+              {canStop && (
+                <button
+                  className="presence-action"
+                  aria-label="Stop Friday"
+                  title="Stop speech and all tasks"
+                  onClick={() => {
+                    setDismissed(contentKey);
+                    props.onStop();
+                  }}
+                >
+                  <CircleStop size={14} strokeWidth={1.5} />
+                </button>
+              )}
+            </div>
           </motion.header>
           <AnimatePresence initial={false}>
             {expanded && (
@@ -659,7 +702,20 @@ export function FridayPresence(props: Props) {
                   </div>
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
-                <div className="presence-content" ref={contentRef}>
+                <div
+                  className="presence-content"
+                  ref={contentRef}
+                  onScroll={(event) => {
+                    const el = event.currentTarget;
+                    followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                  }}
+                >
+                  {!conversation.length && !detail && !approvals.length && !visible.length && (
+                    <div className="presence-welcome">
+                      <strong>What can I help with?</strong>
+                      <p>Ask a question or tell me what you’d like done.</p>
+                    </div>
+                  )}
                   {props.heard &&
                     listeningToRequest &&
                     (props.heardIgnored ? (
@@ -673,35 +729,12 @@ export function FridayPresence(props: Props) {
                     ) : (
                       <p className="heard-text">{props.heard}</p>
                     ))}
-                  {conversation.length > 0 && (
-                    <div className="presence-conversation" aria-label="Conversation transcript">
-                      {conversation.map((item) => {
-                        const reply =
-                          item.interactions
-                            ?.flatMap((interaction) => interaction.actions)
-                            .filter((action) => action.tool === 'show_text_tool' && action.status === 'completed')
-                            .map((action) => action.text)
-                            .filter(Boolean)
-                            .join('\n\n') ||
-                          item.response ||
-                          (state?.presentation.taskId === item.id ? state.presentation.text : '');
-                        return (
-                          <div className="presence-turn" key={item.id}>
-                            <div className="presence-turn-user">{item.prompt}</div>
-                            {reply && (
-                              <div className="presence-reply presence-markdown">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{reply}</ReactMarkdown>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <Conversation tasks={conversation} state={state} />
                   {detail &&
                     (props.error ||
-                      task?.error ||
-                      !conversation.some((item) => item.id === state?.presentation.taskId)) && (
+                      (task?.error
+                        ? !conversation.some((item) => item.id === task.id)
+                        : !conversation.some((item) => item.id === state?.presentation.taskId))) && (
                       <div
                         className={`presence-reply presence-markdown ${props.error || task?.error ? 'is-error' : ''}`}
                         role={props.error || task?.error ? 'alert' : undefined}
@@ -719,47 +752,45 @@ export function FridayPresence(props: Props) {
                   ))}
                   {visible.length > 0 && !typing && (!selected || showTasks) && taskList}
                 </div>
-                {typing && (
-                  <form
-                    className="presence-composer"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (text.trim()) {
-                        props.onSubmit(text);
-                        setText('');
-                        setTyping(false);
-                      }
-                    }}
-                  >
-                    <input
-                      autoFocus
-                      aria-label="Ask Friday"
-                      placeholder="Type a request…"
-                      value={text}
-                      onChange={(e) => setText(e.target.value)}
-                    />
-                    <button aria-label="Send request" disabled={!text.trim()}>
-                      <ArrowUp size={16} />
+                <footer className="presence-input-row">
+                  {typing ? (
+                    <form
+                      className="presence-composer"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (text.trim()) {
+                          props.onSubmit(text);
+                          setTyping(false);
+                        }
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        aria-label="Ask Friday"
+                        placeholder="Type a request…"
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                      />
+                      <button aria-label="Send request" disabled={!text.trim()}>
+                        <ArrowUp size={16} />
+                      </button>
+                    </form>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`presence-composer is-idle${text ? ' has-draft' : ''}`}
+                      onClick={() => setTyping(true)}
+                    >
+                      {text || 'Type a message…'}
                     </button>
-                  </form>
-                )}
-                <footer className="presence-footer">
-                  <button onClick={() => setTyping(!typing)} aria-pressed={typing}>
-                    <Keyboard size={14} />
-                    {typing ? 'Close text input' : 'Type instead'}
-                  </button>
+                  )}
                   <button
-                    className="footer-mic"
-                    onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
-                    aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
-                    title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                    className="presence-action"
+                    onClick={collapse}
+                    aria-label="Collapse to pill"
+                    title="Collapse to pill"
                   >
-                    {props.micEnabled ? <Mic size={14} /> : <MicOff size={14} />}
-                    {props.micEnabled ? 'Mic on' : 'Mic off'}
-                  </button>
-                  <button onClick={props.onDetails} aria-label="Open settings and history">
-                    <Settings size={14} />
-                    Settings & history
+                    <ChevronUp size={14} />
                   </button>
                 </footer>
               </NotchBody>

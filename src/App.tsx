@@ -10,6 +10,7 @@ import {
 import {
   Archive,
   ArrowRight,
+  ArrowUp,
   Check,
   ChevronDown,
   CircleStop,
@@ -21,12 +22,11 @@ import {
   Laptop,
   LoaderCircle,
   Mic,
+  MicOff,
   Minimize2,
-  Minus,
   Plus,
   RotateCcw,
   Search,
-  Send,
   Scan,
   Volume2,
   Settings,
@@ -45,7 +45,7 @@ import {
   type TaskRecord,
   type VoiceGate,
 } from '../electron/types';
-import { openCodeGoModelOptions } from './model-options';
+import { modelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { PcmCapture, type FrameCapture } from './pcm-capture';
 import { LiveKitLink } from './livekit-link';
@@ -53,7 +53,9 @@ import { NoiseFloor, ProgressiveTranscription } from './progressive-transcriptio
 import { VoiceFollowUp } from './voice-follow-up';
 import { detectWakeCommand, fromWakeWord } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
-import { FridayMascot } from './FridayMascot';
+import { Conversation } from './Conversation';
+import { FridayMascot, type FridayMood } from './FridayMascot';
+import { fridayMood } from './friday-mood';
 import { isEcho, shouldBargeIn } from './echo-guard';
 import { continuation, ignoredFinal, needsTurnGate, type VoiceSubmission } from './voice-turns';
 
@@ -76,7 +78,7 @@ const starterIdeas = [
   'Show me where to click with an arrow',
 ];
 
-type ProductView = 'now' | 'history';
+type ProductView = 'now' | 'history' | 'detail';
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? desktopErrorMessage(error) : fallback;
@@ -139,15 +141,8 @@ function voiceCopy(state: ListeningState, wakeWord: string) {
   };
 }
 
-function FridayMark({ compact = false }: { compact?: boolean }) {
-  return (
-    <svg className={compact ? 'friday-mark compact' : 'friday-mark'} viewBox="0 0 42 42" fill="none" aria-hidden="true">
-      <rect x="1" y="1" width="40" height="40" rx="13" fill="currentColor" />
-      <path d="M13 30V12H29" stroke="var(--mark-ink, #1d1f1b)" strokeWidth="3.6" strokeLinecap="round" />
-      <path d="M13 21H24" stroke="var(--mark-ink, #1d1f1b)" strokeWidth="3.6" strokeLinecap="round" />
-      <circle cx="29" cy="12" r="3.2" fill="var(--mark-pop, #ff6f59)" />
-    </svg>
-  );
+function FridayMark({ compact = false, mood = 'idle' }: { compact?: boolean; mood?: FridayMood }) {
+  return <FridayMascot mood={mood} className={compact ? 'friday-mark compact' : 'friday-mark'} />;
 }
 
 function StatusIcon({ status }: { status: RunStatus }) {
@@ -163,7 +158,7 @@ function WelcomeView({ onTryIdea }: { onTryIdea: (value: string) => void }) {
     <section className="welcome-simple">
       <FridayMark />
       <h1>What can I help with?</h1>
-      <p>Ask a question, point something out, or tell me what you want done.</p>
+      <p>Ask a question, explore an idea, or tell me what you’d like done.</p>
       <div className="starter-ideas" aria-label="Example requests">
         {starterIdeas.map((idea) => (
           <button type="button" key={idea} onClick={() => onTryIdea(idea)}>
@@ -411,15 +406,7 @@ function TaskView({
   );
 }
 
-function HistoryView({
-  tasks,
-  onOpenTask,
-  onNewTask,
-}: {
-  tasks: TaskRecord[];
-  onOpenTask: (id: string) => void;
-  onNewTask: () => void;
-}) {
+function HistoryView({ tasks, onOpenTask }: { tasks: TaskRecord[]; onOpenTask: (id: string) => void }) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -430,28 +417,16 @@ function HistoryView({
   return (
     <section className="history-view">
       <header className="history-heading">
-        <div>
-          <p className="eyebrow">Local task history</p>
-          <h1>The archive</h1>
-          <p>
-            {tasks.length
-              ? `${tasks.length} task${tasks.length === 1 ? '' : 's'}, kept on this computer.`
-              : 'Your work will collect here.'}
-          </p>
-        </div>
-        <button className="hero-action compact pressable" type="button" onClick={onNewTask}>
-          <Plus size={17} /> New task
-        </button>
+        <h1>History</h1>
+        <span>
+          {tasks.length} {tasks.length === 1 ? 'request' : 'requests'}
+        </span>
       </header>
 
       <label className="history-search">
-        <Search size={17} />
+        <Search size={15} strokeWidth={1.5} />
         <span className="sr-only">Search task history</span>
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search tasks and answers…"
-        />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search history…" />
         {query && (
           <button type="button" aria-label="Clear search" onClick={() => setQuery('')}>
             <X size={14} />
@@ -468,13 +443,13 @@ function HistoryView({
               </span>
               <span className="history-row-copy">
                 <strong>{item.prompt}</strong>
-                <small>{item.response || item.error || item.steps.at(-1)?.title || 'No result recorded yet.'}</small>
+                {item.response && <small>{item.response}</small>}
               </span>
               <span className="history-row-meta">
                 <time dateTime={new Date(item.createdAt).toISOString()}>{formatRelativeTime(item.createdAt)}</time>
                 <span>{statusLabel(item.status)}</span>
               </span>
-              <ArrowRight className="history-arrow" size={16} />
+              <ArrowRight className="history-arrow" size={14} strokeWidth={1.5} />
             </button>
           ))}
         </div>
@@ -483,8 +458,8 @@ function HistoryView({
           <span>
             <Archive size={22} />
           </span>
-          <h2>{tasks.length ? 'No matching tasks' : 'Nothing in the archive yet'}</h2>
-          <p>{tasks.length ? 'Try a different search.' : 'Give Friday a job and its outcome will show up here.'}</p>
+          <h2>{tasks.length ? 'No matching tasks' : 'No history yet'}</h2>
+          <p>{tasks.length ? 'Try a different search.' : 'Your requests will appear here.'}</p>
         </div>
       )}
     </section>
@@ -624,22 +599,22 @@ function SettingsDialog({
             <small>Friday can still work elsewhere when you ask.</small>
           </label>
           <label className="field-label">
-            <span>OpenCode Go model ID</span>
+            <span>Model</span>
             <input
-              list="opencode-models"
+              list="friday-models"
               value={settings.model}
               spellCheck={false}
-              placeholder="provider/model"
+              placeholder="gpt-6.1-sol"
               onChange={(event) => onChange({ ...settings, model: event.target.value })}
               onBlur={(event) => onSave({ model: event.target.value })}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
-            <datalist id="opencode-models">
-              {openCodeGoModelOptions.map((option) => (
+            <datalist id="friday-models">
+              {modelOptions.map((option) => (
                 <option value={option.value} label={option.label} key={option.value} />
               ))}
             </datalist>
-            <small>Any valid model ID accepted by your OpenCode Go account.</small>
+            <small>GPT 6.1 Sol uses Codex. Other choices use OpenCode Go.</small>
           </label>
         </div>
 
@@ -685,7 +660,7 @@ function SettingsDialog({
               <Cloud size={15} />
               <span>
                 <strong>Requests &amp; vision</strong>
-                <small>Commands—and screenshots only when needed—go to your selected OpenCode Go model.</small>
+                <small>Commands—and screenshots only when needed—go to your selected model.</small>
               </span>
             </div>
             <div>
@@ -709,6 +684,19 @@ export default function App() {
   const [foregroundTaskId, setForegroundTaskId] = useState<string>();
   const [view, setView] = useState<ProductView>('now');
   const [expanded, setExpanded] = useState(false);
+  const [closingWorkspace, setClosingWorkspace] = useState(false);
+  const closeWorkspace = useCallback(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      void window.buddy.setExpanded(false);
+    } else setClosingWorkspace(true);
+  }, []);
+  useEffect(() => {
+    if (!closingWorkspace) return;
+    const timer = setTimeout(() => {
+      void window.buddy.setExpanded(false).catch(() => setClosingWorkspace(false));
+    }, 160);
+    return () => clearTimeout(timer);
+  }, [closingWorkspace]);
   const [settings, setSettings] = useState<BuddySettings>();
   const [prompt, setPrompt] = useState('');
   const [listenState, setListenState] = useState<ListeningState>('idle');
@@ -726,6 +714,7 @@ export default function App() {
   const typingRef = useRef(false);
   const typingTransitionRef = useRef<((value: boolean) => void) | undefined>(undefined);
   const changeTyping = useCallback((value: boolean) => {
+    if (typingRef.current === value) return;
     typingRef.current = value;
     setTyping(value);
     typingTransitionRef.current?.(value);
@@ -749,6 +738,7 @@ export default function App() {
   >(undefined);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const [desktopState, setDesktopState] = useState<DesktopStatus>();
   const [checkingDesktop, setCheckingDesktop] = useState(true);
   const [marking, setMarking] = useState(false);
@@ -933,12 +923,12 @@ export default function App() {
         setMarked(false);
         setView('now');
         setShowActivity(false);
-        setPrompt('');
+        if (!resumeVoice) setPrompt((draft) => (draft.trim() === cleaned ? '' : draft));
       } catch (error) {
         if (epoch !== requestEpochRef.current) return;
         voiceFollowUpRef.current.cancel();
         if (resumeMic && micEnabledRef.current) void startListeningRef.current?.(false, true);
-        setPrompt(cleaned);
+        if (!resumeVoice) setPrompt((draft) => draft || cleaned);
         setActionError(
           error instanceof Error && /Unknown session|background child/.test(error.message)
             ? 'That task is no longer available. Choose another task.'
@@ -1493,7 +1483,15 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => window.buddy.onExpanded(setExpanded), []);
+  useEffect(
+    () =>
+      window.buddy.onExpanded((value) => {
+        changeTyping(false);
+        setExpanded(value);
+        setClosingWorkspace(false);
+      }),
+    [changeTyping],
+  );
   useEffect(() => {
     let disposed = false;
     let received = false;
@@ -1547,9 +1545,13 @@ export default function App() {
   }, [selectedStatus, refreshDesktop]);
 
   useEffect(() => {
-    if (!contentRef.current || view !== 'now') return;
+    if (view === 'now' && expanded) followLatest.current = true;
+  }, [view, expanded]);
+
+  useEffect(() => {
+    if (!contentRef.current || view !== 'now' || !followLatest.current) return;
     contentRef.current.scrollTop = contentRef.current.scrollHeight;
-  }, [task?.response, task?.steps.length, task?.status, view]);
+  }, [tasks, friday?.presentation.text, view, expanded]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -1562,8 +1564,7 @@ export default function App() {
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (showSettings) setShowSettings(false);
-        else if (listenState !== 'idle') stopListening();
-        else void window.buddy.hide();
+        else if (expanded) closeWorkspace();
         return;
       }
       if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey) {
@@ -1575,7 +1576,7 @@ export default function App() {
     };
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
-  }, [listenState, showSettings, stopListening]);
+  }, [expanded, showSettings, closeWorkspace]);
 
   async function saveSettings(next: Partial<BuddySettings>) {
     if (!settings) return;
@@ -1702,137 +1703,127 @@ export default function App() {
 
   const composer = (
     <footer className="composer-area">
-      {desktopState && !desktopState.ready && (
-        <div className="desktop-notice" role="status">
-          <span>{desktopState.error}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setCheckingDesktop(true);
-              void refreshDesktop();
-            }}
-            disabled={checkingDesktop}
-          >
-            {checkingDesktop ? 'Checking…' : 'Check again'}
-          </button>
-        </div>
-      )}
-      {(marked || (desktopState?.annotations ?? 0) > 0) && (
-        <div className="drawing-context">
-          <span>{marked ? 'Screen mark attached' : 'Drawing on screen'}</span>
-          <button type="button" onClick={() => void clearDrawing()}>
-            Clear <X size={12} />
-          </button>
-        </div>
-      )}
-      {listenState !== 'idle' && (
-        <div className={`listening-bar ${listenState}`} aria-live="polite">
-          <span className="listening-indicator">
-            <i style={{ transform: `scale(${1 + voiceLevel})` }} />
-            {directVoice && listenState === 'listening' ? 'Listening' : voiceCopy(listenState, wakeWord).eyebrow}
-          </span>
-          <span>
-            {heard
-              ? `“${heard}”`
-              : directVoice && listenState === 'listening'
-                ? 'Release the microphone to send.'
-                : voiceCopy(listenState, wakeWord).detail}
-          </span>
-        </div>
-      )}
-      <form
-        className="command-bar"
-        onSubmit={(event: FormEvent) => {
-          event.preventDefault();
-          void runPrompt(prompt);
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          autoFocus
-          rows={1}
-          value={prompt}
-          aria-label="Ask Friday"
-          placeholder={
-            view === 'history'
-              ? 'Start a new task…'
-              : activeTask
-                ? 'Give Friday another task…'
-                : 'Ask Friday to do something…'
-          }
-          onChange={(event) => setPrompt(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-        />
-        <button
-          className="mark-button pressable"
-          type="button"
-          aria-label="Mark screen"
-          title={desktopState?.ready ? 'Mark something on screen' : desktopState?.error || 'Checking screen access…'}
-          disabled={!desktopState?.ready || Boolean(activeTask) || marking}
-          onClick={() => void markScreen()}
-        >
-          {marking ? <LoaderCircle className="spin" size={18} /> : <Scan size={18} />}
-        </button>
-        <button
-          className={`mic-button pressable ${listeningActive ? 'active' : ''}`}
-          type="button"
-          aria-label="Hold to talk"
-          title="Hold to talk · release to send"
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            pttHeldRef.current = true;
-            stopListening();
-            void startListening(true);
-          }}
-          onPointerUp={() => {
-            pttHeldRef.current = false;
-            captureRef.current?.flush(() => transcriptionRef.current?.finish());
-          }}
-          onPointerCancel={() => {
-            pttHeldRef.current = false;
-            stopListening();
-          }}
-          onKeyDown={(event) => {
-            if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) {
-              event.preventDefault();
-              pttHeldRef.current = true;
-              stopListening();
-              void startListening(true);
-            }
-          }}
-          onKeyUp={(event) => {
-            if (event.key === ' ' || event.key === 'Enter') {
-              event.preventDefault();
-              pttHeldRef.current = false;
-              captureRef.current?.flush(() => transcriptionRef.current?.finish());
-            }
-          }}
-        >
-          <Mic size={18} />
-        </button>
-
-        {(activeTask || listeningActive || answering) && (
-          <button className="stop-button pressable" type="button" onClick={() => void stopAll()}>
-            <CircleStop size={15} /> <span>Stop</span>
-          </button>
+      <div className="composer-column">
+        {desktopState && !desktopState.ready && (
+          <div className="desktop-notice" role="status">
+            <span>{desktopState.error}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setCheckingDesktop(true);
+                void refreshDesktop();
+              }}
+              disabled={checkingDesktop}
+            >
+              {checkingDesktop ? 'Checking…' : 'Check again'}
+            </button>
+          </div>
         )}
-        <button
-          className="send-button pressable"
-          type="submit"
-          disabled={!prompt.trim() || submitting}
-          aria-label="Send request"
+        {(marked || (desktopState?.annotations ?? 0) > 0) && (
+          <div className="drawing-context">
+            <span>{marked ? 'Screen mark attached' : 'Drawing on screen'}</span>
+            <button type="button" onClick={() => void clearDrawing()}>
+              Clear <X size={12} />
+            </button>
+          </div>
+        )}
+        {(['armed', 'transcribing', 'error'].includes(listenState) || heard) && (
+          <div className={`listening-bar ${listenState}`} aria-live="polite">
+            <span className="listening-indicator">
+              <i style={{ transform: `scale(${1 + voiceLevel})` }} />
+              {directVoice && listenState === 'listening' ? 'Listening' : voiceCopy(listenState, wakeWord).eyebrow}
+            </span>
+            <span>
+              {heard
+                ? `“${heard}”`
+                : directVoice && listenState === 'listening'
+                  ? 'Listening to your request…'
+                  : voiceCopy(listenState, wakeWord).detail}
+            </span>
+          </div>
+        )}
+        <form
+          className="command-bar"
+          onSubmit={(event: FormEvent) => {
+            event.preventDefault();
+            void runPrompt(prompt);
+            changeTyping(false);
+          }}
         >
-          {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
-        </button>
-      </form>
-      <div className="composer-meta">
-        <span>Hold the microphone to talk</span>
-        <span>Enter to send · Shift+Enter for a new line</span>
+          <textarea
+            ref={inputRef}
+            autoFocus
+            rows={1}
+            value={prompt}
+            aria-label="Ask Friday"
+            placeholder={
+              view === 'history' ? 'Start a conversation…' : activeTask ? 'Add to your request…' : 'Message Friday…'
+            }
+            onChange={(event) => {
+              setPrompt(event.target.value);
+              changeTyping(Boolean(event.target.value.trim()));
+            }}
+            onFocus={() => {
+              if (prompt.trim()) changeTyping(true);
+            }}
+            onBlur={() => changeTyping(false)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
+          <div className="composer-toolbar">
+            <div className="composer-tools">
+              <button
+                className="mark-button pressable"
+                type="button"
+                aria-label="Mark screen"
+                title={desktopState?.ready ? 'Mark screen' : desktopState?.error || 'Checking screen access…'}
+                disabled={!desktopState?.ready || Boolean(activeTask) || marking}
+                onClick={() => void markScreen()}
+              >
+                {marking ? <LoaderCircle className="spin" size={15} /> : <Scan size={15} strokeWidth={1.5} />}
+              </button>
+              <button
+                className={`mic-button pressable ${micEnabled ? 'active' : ''}`}
+                type="button"
+                aria-label={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                aria-pressed={micEnabled}
+                title={micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
+                onClick={() => (micEnabled ? disableMicrophone() : void startListening(false, false))}
+              >
+                {micEnabled ? <Mic size={15} strokeWidth={1.5} /> : <MicOff size={15} strokeWidth={1.5} />}
+              </button>
+              {(activeTask ||
+                answering ||
+                controlling ||
+                guiding ||
+                friday?.sessions.some((session) => session.status === 'running') ||
+                listenState === 'transcribing') && (
+                <button
+                  className="stop-button pressable"
+                  type="button"
+                  onClick={() => void stopAll()}
+                  title="Stop speech and all tasks"
+                  aria-label="Stop Friday"
+                >
+                  <CircleStop size={15} strokeWidth={1.5} />
+                </button>
+              )}
+            </div>
+            <button
+              className="send-button pressable"
+              type="submit"
+              disabled={!prompt.trim() || submitting}
+              aria-label="Send request"
+              title="Send · Enter"
+            >
+              {submitting ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={16} />}
+            </button>
+          </div>
+        </form>
       </div>
     </footer>
   );
@@ -1873,6 +1864,8 @@ export default function App() {
         selectedChildId={selectedChildId}
         reportedChildren={reportedChildren}
         typing={typing}
+        draft={prompt}
+        onDraftChange={setPrompt}
         onTypingChange={changeTyping}
         micEnabled={micEnabled}
         wakeWord={wakeWord}
@@ -1902,13 +1895,10 @@ export default function App() {
           void runPrompt(value);
         }}
         onStop={stopFriday}
-        onDismiss={() => {
-          selectChild();
-          if (micEnabledRef.current) void startListening(false, false);
-          else stopListening();
-        }}
         onDetails={() => {
           changeTyping(false);
+          followLatest.current = true;
+          setView('now');
           void window.buddy.setExpanded(true);
         }}
         onStopChild={(id) => {
@@ -1923,23 +1913,31 @@ export default function App() {
     );
   return (
     <main className="shell">
-      <section className="friday-window" aria-label="Friday desktop agent">
+      <section className={`friday-window ${closingWorkspace ? 'is-closing' : ''}`} aria-label="Friday desktop agent">
         <header className="titlebar">
           <button className="brand-button" type="button" onClick={() => setView('now')} aria-label="Open Friday now">
-            <FridayMark />
+            <FridayMark
+              mood={fridayMood({
+                attention: Boolean(actionError || activeTask?.approval || activeTask?.error),
+                speaking: answering,
+                working: Boolean(activeTask || controlling),
+                listening: listenState,
+                typing,
+                micEnabled,
+              })}
+            />
             <span className="brand-copy">
-              <strong>friday</strong>
-              <small>desktop agent</small>
+              <strong>Friday</strong>
+              <small aria-live="polite">{presence.label}</small>
             </span>
           </button>
 
           <nav className="view-switcher" aria-label="Friday views">
             <button type="button" className={view === 'now' ? 'active' : ''} onClick={() => setView('now')}>
-              <Sparkles size={14} /> <span>Now</span>
+              <span>Conversation</span>
             </button>
-            <button type="button" className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>
-              <Archive size={14} /> <span>Archive</span>
-              {tasks.length > 0 && <small>{tasks.length}</small>}
+            <button type="button" className={view !== 'now' ? 'active' : ''} onClick={() => setView('history')}>
+              <span>History</span>
             </button>
           </nav>
 
@@ -1947,15 +1945,12 @@ export default function App() {
             <button
               className="icon-button pressable"
               type="button"
-              aria-label="Small companion"
-              title="Small companion"
-              onClick={() => void window.buddy.setExpanded(false)}
+              aria-label="New conversation"
+              title="New conversation"
+              onClick={() => void newTask()}
             >
-              <Minimize2 size={17} />
+              <Plus size={15} strokeWidth={1.5} />
             </button>
-            <span className={`presence ${presence.tone}`} aria-live="polite">
-              <i /> {presence.label}
-            </span>
             <button
               className="icon-button pressable"
               type="button"
@@ -1963,21 +1958,28 @@ export default function App() {
               title="Settings"
               onClick={() => setShowSettings(true)}
             >
-              <Settings size={17} />
+              <Settings size={15} strokeWidth={1.5} />
             </button>
             <button
               className="icon-button pressable"
               type="button"
-              aria-label="Minimize Friday"
-              title="Minimize Friday"
-              onClick={() => window.buddy.hide()}
+              aria-label="Back to pill"
+              title="Back to pill"
+              onClick={closeWorkspace}
             >
-              <Minus size={18} />
+              <Minimize2 size={15} strokeWidth={1.5} />
             </button>
           </div>
         </header>
 
-        <div className="content-scroll" ref={contentRef}>
+        <div
+          className="content-scroll"
+          ref={contentRef}
+          onScroll={(event) => {
+            const el = event.currentTarget;
+            followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          }}
+        >
           {loading ? (
             <div className="loading-state">
               <FridayMark />
@@ -1991,12 +1993,11 @@ export default function App() {
               tasks={tasks}
               onOpenTask={(id) => {
                 setSelected(id);
-                setView('now');
+                setView('detail');
                 setShowActivity(false);
               }}
-              onNewTask={newTask}
             />
-          ) : task ? (
+          ) : view === 'detail' && task ? (
             <TaskView
               task={task}
               showActivity={showActivity}
@@ -2015,6 +2016,20 @@ export default function App() {
               }
               onSpeak={() => void speakResponse()}
             />
+          ) : tasks.some((item) => item.role !== 'child' && item.conversationId === friday?.parentId) ? (
+            <section className="workspace-conversation">
+              <Conversation
+                tasks={tasks
+                  .filter((item) => item.role !== 'child' && item.conversationId === friday?.parentId)
+                  .sort((a, b) => a.createdAt - b.createdAt)}
+                state={friday}
+                onApprove={(id, approved) => {
+                  void window.buddy
+                    .approve(id, approved)
+                    .catch(() => setActionError('That approval is no longer available.'));
+                }}
+              />
+            </section>
           ) : (
             <WelcomeView onTryIdea={tryIdea} />
           )}

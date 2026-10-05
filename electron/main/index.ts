@@ -186,7 +186,7 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
     : area.x + Math.round((area.width - width) / 2);
   // Keep the visible edge 5px below the desktop's system panel, outside its input region.
   const y = area.y + (notch ? 5 : 12);
-  if (notch && notchOffset) {
+  if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
     const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
     if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
@@ -433,7 +433,7 @@ if (hasSingleInstanceLock)
       defaultCwd: process.env.HOME || process.cwd(),
       launchAtLogin: app.getLoginItemSettings().openAtLogin,
       wakeWord: process.env.LINUX_BUDDY_WAKE_WORD || 'Friday',
-      model: process.env.LINUX_BUDDY_MODEL || 'gpt-6-luna',
+      model: process.env.LINUX_BUDDY_MODEL || 'gpt-6.1-sol',
       autoSpeak: true,
     };
     speech = new SpeechService(settings.wakeWord, {
