@@ -45,7 +45,7 @@ import {
   type TaskRecord,
   type VoiceGate,
 } from '../electron/types';
-import { openCodeGoModelOptions } from './model-options';
+import { modelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { PcmCapture, type FrameCapture } from './pcm-capture';
 import { LiveKitLink } from './livekit-link';
@@ -599,22 +599,22 @@ function SettingsDialog({
             <small>Friday can still work elsewhere when you ask.</small>
           </label>
           <label className="field-label">
-            <span>OpenCode Go model ID</span>
+            <span>Model</span>
             <input
-              list="opencode-models"
+              list="friday-models"
               value={settings.model}
               spellCheck={false}
-              placeholder="provider/model"
+              placeholder="gpt-6.1-sol"
               onChange={(event) => onChange({ ...settings, model: event.target.value })}
               onBlur={(event) => onSave({ model: event.target.value })}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
-            <datalist id="opencode-models">
-              {openCodeGoModelOptions.map((option) => (
+            <datalist id="friday-models">
+              {modelOptions.map((option) => (
                 <option value={option.value} label={option.label} key={option.value} />
               ))}
             </datalist>
-            <small>Any valid model ID accepted by your OpenCode Go account.</small>
+            <small>GPT 6.1 Sol uses Codex. Other choices use OpenCode Go.</small>
           </label>
         </div>
 
@@ -660,7 +660,7 @@ function SettingsDialog({
               <Cloud size={15} />
               <span>
                 <strong>Requests &amp; vision</strong>
-                <small>Commands—and screenshots only when needed—go to your selected OpenCode Go model.</small>
+                <small>Commands—and screenshots only when needed—go to your selected model.</small>
               </span>
             </div>
             <div>

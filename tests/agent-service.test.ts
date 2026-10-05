@@ -88,6 +88,21 @@ afterEach(async () => {
 });
 
 describe('AgentService lifecycle', () => {
+  it.each([
+    ['gpt-6.1-sol', 'openai-codex'],
+    ['gpt-6-luna', 'opencode-go'],
+  ])('routes %s through %s for parent and child sessions', async (model, provider) => {
+    const { service, invocations } = await fixture();
+    await service.updateSettings({ model });
+    await service.submit('Delegate a lookup');
+    await service.startChild('Lookup', 'Find the answer');
+    expect(invocations).toHaveLength(2);
+    for (const invocation of invocations) {
+      const args = invocation[1] as string[];
+      expect(args[args.indexOf('--provider') + 1]).toBe(provider);
+      expect(args[args.indexOf('--model') + 1]).toBe(model);
+    }
+  });
   it('Stop cancels queued submissions and running children, clears presentation, and permits a fresh request', async () => {
     const voice = new FakeVoice();
     const { service, children, tool } = await fixture({ voice });

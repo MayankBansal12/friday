@@ -433,7 +433,7 @@ if (hasSingleInstanceLock)
       defaultCwd: process.env.HOME || process.cwd(),
       launchAtLogin: app.getLoginItemSettings().openAtLogin,
       wakeWord: process.env.LINUX_BUDDY_WAKE_WORD || 'Friday',
-      model: process.env.LINUX_BUDDY_MODEL || 'gpt-6-luna',
+      model: process.env.LINUX_BUDDY_MODEL || 'gpt-6.1-sol',
       autoSpeak: true,
     };
     speech = new SpeechService(settings.wakeWord, {

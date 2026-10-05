@@ -1,4 +1,5 @@
-export const openCodeGoModelOptions = [
+export const modelOptions = [
+  { value: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' },
   { value: 'gpt-6-luna', label: 'GPT 6 Luna' },
   { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { openCodeGoModelOptions } from '../src/model-options.js';
+import { modelOptions } from '../src/model-options.js';
 
-describe('OpenCode Go model picker', () => {
-  it('offers every model in the OpenCode Go provider catalog', () => {
-    expect(openCodeGoModelOptions.map(({ value }) => value)).toEqual([
+describe('Friday model picker', () => {
+  it('offers supported model choices', () => {
+    expect(modelOptions.map(({ value }) => value)).toEqual([
+      'gpt-6.1-sol',
       'gpt-6-luna',
       'deepseek-v4-flash',
       'deepseek-v4-pro',
@@ -23,7 +24,7 @@ describe('OpenCode Go model picker', () => {
   });
 
   it('does not expose duplicate model IDs', () => {
-    const values = openCodeGoModelOptions.map(({ value }) => value);
+    const values = modelOptions.map(({ value }) => value);
     expect(new Set(values).size).toBe(values.length);
   });
 });

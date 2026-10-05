@@ -1,6 +1,6 @@
 # Friday
 
-Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. Friday can look, draw, and complete short GUI tasks. The parent uses OpenCode Go; computer control uses your signed-in Codex CLI.
+Friday is a voice-first desktop assistant for this Fedora 43 / GNOME 49 / Wayland machine. One parent Pi session answers you, guides you on screen, and delegates independent work to background child sessions. Friday can look, draw, and complete short GUI tasks. The parent defaults to GPT 6.1 Sol through Pi’s Codex provider; computer control uses your signed-in Codex CLI.
 
 See [the current request flow](docs/request-flow.md) for session boundaries, speech behavior, and the implementation diagram.
 
@@ -8,11 +8,11 @@ See [the current request flow](docs/request-flow.md) for session boundaries, spe
 
 Requirements: Node.js 22+, pnpm, Python 3.12+ with venv/pip and PyGObject, GNOME Shell 49, `pi` 0.85.1+, `ffmpeg`, and `espeak-ng`. Desktop integration currently supports the built-in 1920×1080 display at 100% scale.
 
-Configure OpenCode Go through `OPENCODE_API_KEY` in `.env` or existing Pi authentication. See [.env.example](.env.example) for environment overrides.
+Configure Pi authentication for `openai-codex` to use the default GPT 6.1 Sol. Other model choices use OpenCode Go through `OPENCODE_API_KEY` in `.env` or existing Pi authentication. See [.env.example](.env.example) for environment overrides.
 
 Speech recognition is hosted Groq Whisper (`whisper-large-v3-turbo`, multilingual) when `GROQ_API_KEY` is set; otherwise it falls back to local Parakeet V3, which additionally needs the int8 ONNX model files (available through Handy) and `pnpm stt:setup`.
 
-For computer control, install Codex CLI (tested with 0.155.1), run `codex login`, and check `codex login status`. Your existing ChatGPT sign-in works; no separate OpenAI API key is required. Chat, speech, guidance, and background tasks still work without Codex. The operator uses the [Codex app-server protocol](https://developers.openai.com/codex/app-server) with Friday's bounded desktop tools.
+For computer control, install Codex CLI (tested with 0.155.1), run `codex login`, and check `codex login status`. Your existing ChatGPT sign-in works; no separate OpenAI API key is required. Chat, speech, guidance, and background tasks do not require the Codex CLI. The operator uses the [Codex app-server protocol](https://developers.openai.com/codex/app-server) with Friday's bounded desktop tools.
 
 ```sh
 pnpm install

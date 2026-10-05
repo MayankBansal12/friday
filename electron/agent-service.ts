@@ -163,7 +163,7 @@ export class AgentService extends EventEmitter {
       try {
         this.settings = { ...this.settings, ...validSettings(saved.settings) };
         // A saved deprecated model overrides the current startup default; migrate it on load.
-        if (this.settings.model === 'kimi-k2.6') this.settings.model = 'gpt-6-luna';
+        if (this.settings.model === 'kimi-k2.6') this.settings.model = 'gpt-6.1-sol';
       } catch {
         /* Keep defaults. */
       }
@@ -700,7 +700,7 @@ export class AgentService extends EventEmitter {
         '--mode',
         'rpc',
         '--provider',
-        'opencode-go',
+        this.settings.model === 'gpt-6.1-sol' ? 'openai-codex' : 'opencode-go',
         '--model',
         this.settings.model,
         '--thinking',
