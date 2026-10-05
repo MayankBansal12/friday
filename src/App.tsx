@@ -406,15 +406,7 @@ function TaskView({
   );
 }
 
-function HistoryView({
-  tasks,
-  onOpenTask,
-  onNewTask,
-}: {
-  tasks: TaskRecord[];
-  onOpenTask: (id: string) => void;
-  onNewTask: () => void;
-}) {
+function HistoryView({ tasks, onOpenTask }: { tasks: TaskRecord[]; onOpenTask: (id: string) => void }) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -425,28 +417,16 @@ function HistoryView({
   return (
     <section className="history-view">
       <header className="history-heading">
-        <div>
-          <p className="eyebrow">Local task history</p>
-          <h1>The archive</h1>
-          <p>
-            {tasks.length
-              ? `${tasks.length} task${tasks.length === 1 ? '' : 's'}, kept on this computer.`
-              : 'Your work will collect here.'}
-          </p>
-        </div>
-        <button className="hero-action compact pressable" type="button" onClick={onNewTask}>
-          <Plus size={17} /> New task
-        </button>
+        <h1>History</h1>
+        <span>
+          {tasks.length} {tasks.length === 1 ? 'request' : 'requests'}
+        </span>
       </header>
 
       <label className="history-search">
-        <Search size={17} />
+        <Search size={15} strokeWidth={1.5} />
         <span className="sr-only">Search task history</span>
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search tasks and answers…"
-        />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search history…" />
         {query && (
           <button type="button" aria-label="Clear search" onClick={() => setQuery('')}>
             <X size={14} />
@@ -463,13 +443,13 @@ function HistoryView({
               </span>
               <span className="history-row-copy">
                 <strong>{item.prompt}</strong>
-                <small>{item.response || item.error || item.steps.at(-1)?.title || 'No result recorded yet.'}</small>
+                {item.response && <small>{item.response}</small>}
               </span>
               <span className="history-row-meta">
                 <time dateTime={new Date(item.createdAt).toISOString()}>{formatRelativeTime(item.createdAt)}</time>
                 <span>{statusLabel(item.status)}</span>
               </span>
-              <ArrowRight className="history-arrow" size={16} />
+              <ArrowRight className="history-arrow" size={14} strokeWidth={1.5} />
             </button>
           ))}
         </div>
@@ -478,8 +458,8 @@ function HistoryView({
           <span>
             <Archive size={22} />
           </span>
-          <h2>{tasks.length ? 'No matching tasks' : 'Nothing in the archive yet'}</h2>
-          <p>{tasks.length ? 'Try a different search.' : 'Give Friday a job and its outcome will show up here.'}</p>
+          <h2>{tasks.length ? 'No matching tasks' : 'No history yet'}</h2>
+          <p>{tasks.length ? 'Try a different search.' : 'Your requests will appear here.'}</p>
         </div>
       )}
     </section>
@@ -1827,8 +1807,9 @@ export default function App() {
                   type="button"
                   onClick={() => void stopAll()}
                   title="Stop speech and all tasks"
+                  aria-label="Stop Friday"
                 >
-                  <CircleStop size={15} strokeWidth={1.5} /> <span>Stop</span>
+                  <CircleStop size={15} strokeWidth={1.5} />
                 </button>
               )}
             </div>
@@ -2015,7 +1996,6 @@ export default function App() {
                 setView('detail');
                 setShowActivity(false);
               }}
-              onNewTask={newTask}
             />
           ) : view === 'detail' && task ? (
             <TaskView

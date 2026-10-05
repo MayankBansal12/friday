@@ -61,17 +61,22 @@
 button:focus-visible,
 a:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline: none;
+  background-color: var(--paper-bright);
+  color: var(--ink);
 }
-/* Inputs that suppress their outline show focus on their container instead. */
 input:focus-visible,
-textarea:focus-visible {
-  outline-color: var(--focus);
+textarea:focus-visible,
+.setting-toggle input:focus-visible {
+  outline: none;
 }
 .switch-row input:focus-visible + .switch-control {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline: none;
+  background-color: var(--paper-deep);
+}
+.view-switcher button:focus-visible {
+  color: var(--ink);
+  border-bottom-color: var(--ink-faint);
 }
 
 /* ---------- Window and title bar ---------- */
@@ -454,7 +459,7 @@ textarea:focus-visible {
   gap: 4px;
 }
 .composer-toolbar {
-  justify-content: space-between;
+  justify-content: flex-end;
 }
 .composer-tools .mark-button,
 .composer-tools .mic-button {
@@ -473,7 +478,10 @@ textarea:focus-visible {
   color: var(--ink-soft);
 }
 .composer-tools .stop-button {
+  width: 28px;
   height: 28px;
+  padding: 0;
+  justify-content: center;
   border: 0;
   background: transparent;
   font-weight: 500;
@@ -481,11 +489,12 @@ textarea:focus-visible {
 .composer-toolbar .send-button {
   width: 30px;
   height: 30px;
-  border-radius: 10px;
+  border-radius: 50%;
 }
 .command-bar:focus-within {
-  border-color: var(--citron-deep);
-  box-shadow: 0 0 0 3px #d9ff911a;
+  border-color: var(--line-strong);
+  background: var(--paper-bright);
+  box-shadow: none;
 }
 .command-bar textarea {
   width: 100%;
@@ -520,18 +529,66 @@ textarea:focus-visible {
 
 /* ---------- History ---------- */
 
+.content-scroll > .history-view {
+  width: min(100%, 640px);
+  padding: 28px 0;
+}
+.history-heading {
+  align-items: center;
+  gap: 12px;
+}
+.history-heading h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.history-heading > span {
+  color: var(--ink-faint);
+  font-size: var(--text-sm);
+}
 .history-search {
-  border-color: var(--line-strong);
+  height: 40px;
+  margin-top: 18px;
+  border-color: var(--line);
+  background: var(--paper-raised);
+  border-radius: 12px;
+}
+.history-list {
+  margin-top: 16px;
+  gap: 0;
 }
 .history-search:focus-within {
-  border-color: var(--citron-deep);
-  box-shadow: 0 0 0 3px #d9ff911a;
+  border-color: var(--line-strong);
+  background: var(--paper-bright);
+  box-shadow: none;
 }
 .history-search input {
   font-size: var(--text-md);
 }
 .history-row {
-  border-radius: 14px;
+  min-height: 64px;
+  align-items: center;
+  padding: 13px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.history-row .history-status {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+}
+.history-row .history-status.cancelled {
+  color: var(--ink-faint);
+}
+.history-row .history-arrow {
+  opacity: 0;
+}
+.history-row:hover .history-arrow,
+.history-row:focus-visible .history-arrow {
+  opacity: 1;
 }
 .history-row-copy strong {
   font-size: var(--text-md);
@@ -541,6 +598,8 @@ textarea:focus-visible {
   font-size: var(--text-sm);
 }
 .history-row-meta {
+  font-family: inherit;
+  text-transform: none;
   font-size: var(--text-xs);
 }
 .history-empty h2 {
@@ -615,8 +674,9 @@ textarea:focus-visible {
 }
 .field-label input:focus,
 .field-label select:focus {
-  border-color: var(--citron-deep);
-  box-shadow: 0 0 0 3px #d9ff911a;
+  border-color: var(--line-strong);
+  background: var(--paper-bright);
+  box-shadow: none;
 }
 .switch-control {
   border-color: var(--line-strong);
@@ -665,8 +725,7 @@ textarea:focus-visible {
   cursor: pointer;
 }
 .setting-toggle input:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline: none;
 }
 
 .privacy-card {
@@ -937,11 +996,23 @@ textarea:focus-visible {
 }
 /* The idle composer is a button dressed as the input it becomes, same box. */
 .presence-composer {
+  align-items: center;
   min-height: 44px;
   margin-top: 12px;
   border-color: var(--line-strong);
-  border-radius: 14px;
+  border-radius: 22px;
   background: var(--paper-sunken);
+}
+.presence-composer:focus-within {
+  border-color: var(--line-strong);
+  background: var(--paper-bright);
+  box-shadow: none;
+}
+.presence-composer button {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
 }
 /* Block, not flex, so a long saved draft ends in an ellipsis on one line. */
 .presence-composer.is-idle {
@@ -966,8 +1037,9 @@ textarea:focus-visible {
 }
 .presence-root .presence-composer.is-idle:focus-visible {
   outline: none;
-  border-color: var(--citron-deep);
-  box-shadow: 0 0 0 3px #d9ff911a;
+  border-color: var(--line-strong);
+  background: var(--paper-bright);
+  box-shadow: none;
 }
 .friday-presence .presence-footer {
   align-items: center;
