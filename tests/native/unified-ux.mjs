@@ -30,6 +30,17 @@ try {
     if (await evaluate("Boolean(document.querySelector('.presence-heading'))")) break;
     await pause(100);
   }
+  await pause(600);
+  assert.equal(
+    await evaluate('Boolean(document.querySelector(\'[aria-label="Open workspace"]\'))'),
+    false,
+    'Workspace control stays hidden at rest',
+  );
+  assert.equal(
+    await evaluate('Boolean(document.querySelector(\'[aria-label="Stop Friday"]\'))'),
+    false,
+    'Idle Friday has no stop control',
+  );
   await evaluate("document.querySelector('.presence-heading').focus()");
   await pause();
   await click('.presence-composer.is-idle');
@@ -155,6 +166,19 @@ try {
     ),
     1,
     'A failed conversation turn has one error alert',
+  );
+  await evaluate(
+    `fixture.task({id:'active',role:'parent',conversationId:'parent',prompt:'Do this task',status:'thinking',steps:[],createdAt:300,updatedAt:300});fixture.emit()`,
+  );
+  await pause();
+  assert(
+    await evaluate('Boolean(document.querySelector(\'[aria-label="Stop Friday"]\'))'),
+    'Stop is available during work',
+  );
+  await click('[aria-label="Stop Friday"]');
+  assert(
+    await evaluate("Boolean(document.querySelector('.presence-heading'))"),
+    'Stopping work keeps Friday available',
   );
   console.log(`Unified UX regression checks passed. Screenshots: ${output}`);
 } finally {

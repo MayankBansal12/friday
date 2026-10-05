@@ -861,7 +861,16 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 4px;
+  gap: 2px;
+}
+.presence-controls .presence-action {
+  width: 28px;
+  height: 28px;
+  color: var(--ink-faint);
+}
+.presence-controls .presence-action:hover,
+.presence-controls .presence-action:focus-visible {
+  color: var(--ink);
 }
 .presence-input-row {
   display: flex;

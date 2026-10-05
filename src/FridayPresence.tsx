@@ -182,6 +182,9 @@ export function FridayPresence(props: Props) {
         (props.reportedChildren?.[s.id] ?? 0) < s.updatedAt),
   );
   const running = children.filter((s) => s.status === 'running');
+  const canStop = Boolean(
+    busy || speaking || props.controlling || props.guiding || running.length || listening === 'transcribing',
+  );
   const attention = visible.filter((s) => ['needs_input', 'failed', 'interrupted'].includes(s.status)).length;
   const selected = children.find((s) => s.id === props.selectedChildId);
   const detail = props.error || task?.error || state?.presentation.text || '';
@@ -649,33 +652,37 @@ export function FridayPresence(props: Props) {
             )}
             <div className="presence-controls">
               <button
-                className={`presence-action ${props.micEnabled ? 'lit' : ''}`}
+                className="presence-action"
                 onClick={props.micEnabled ? props.onMicOff : props.onMicOn}
                 aria-label={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
                 aria-pressed={props.micEnabled}
                 title={props.micEnabled ? 'Turn microphone off' : 'Turn microphone on'}
               >
-                {props.micEnabled ? <Mic size={18} /> : <MicOff size={18} />}
+                {props.micEnabled ? <Mic size={14} strokeWidth={1.5} /> : <MicOff size={14} strokeWidth={1.5} />}
               </button>
-              <button
-                className="presence-action"
-                onClick={props.onDetails}
-                aria-label="Open workspace"
-                title="Open workspace"
-              >
-                <Maximize2 size={18} />
-              </button>
-              <button
-                className="presence-action"
-                aria-label="Stop Friday"
-                title="Stop speech and all tasks"
-                onClick={() => {
-                  setDismissed(contentKey);
-                  props.onStop();
-                }}
-              >
-                <CircleStop size={18} />
-              </button>
+              {hovered && (
+                <button
+                  className="presence-action"
+                  onClick={props.onDetails}
+                  aria-label="Open workspace"
+                  title="Open workspace"
+                >
+                  <Maximize2 size={14} strokeWidth={1.5} />
+                </button>
+              )}
+              {canStop && (
+                <button
+                  className="presence-action"
+                  aria-label="Stop Friday"
+                  title="Stop speech and all tasks"
+                  onClick={() => {
+                    setDismissed(contentKey);
+                    props.onStop();
+                  }}
+                >
+                  <CircleStop size={14} strokeWidth={1.5} />
+                </button>
+              )}
             </div>
           </motion.header>
           <AnimatePresence initial={false}>
