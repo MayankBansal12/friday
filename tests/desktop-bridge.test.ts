@@ -43,6 +43,7 @@ async function fixture(compressed = false, computer?: ComputerRunner) {
           scene: 0,
           data: 'image',
           windowBounds: { x: 400, y: 200, width: 800, height: 600 },
+          pointer: { x: 800, y: 400 },
           lastMark: { points: [{ x: 500, y: 300 }], current: true },
         };
       return {};
@@ -150,13 +151,14 @@ describe('host desktop permissions and cancellation', () => {
     await expect(bridge.mark()).rejects.toThrow('sign out');
     expect(window.hide).not.toHaveBeenCalled();
   });
-  it('keeps screenshot, window bounds, marks and drawings in one coordinate system', async () => {
+  it('keeps screenshot, window bounds, pointer, marks and drawings in one coordinate system', async () => {
     const f = await fixture(true);
     const observed = (await f.request('/screenshot')).body;
     expect(observed).toMatchObject({
       width: 1440,
       height: 810,
       windowBounds: { x: 300, y: 150, width: 600, height: 450 },
+      pointer: { x: 600, y: 300 },
       lastMark: { points: [{ x: 375, y: 225 }] },
     });
     const result = await f.request('/draw', {

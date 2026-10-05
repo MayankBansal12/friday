@@ -7,7 +7,7 @@ import {
 } from '../src/progressive-transcription';
 import type { PcmRequest, PcmResult } from '../electron/pcm-transcription';
 import { validPcmRequest } from '../electron/pcm-transcription';
-function setup(direct = false, playing = () => false, floor = new NoiseFloor()) {
+function setup(direct = false, playing = () => false, floor = new NoiseFloor(), interim?: boolean) {
   let time = 0;
   const jobs: { request: PcmRequest; resolve: (r: PcmResult) => void }[] = [];
   const final: string[] = [],
@@ -18,6 +18,7 @@ function setup(direct = false, playing = () => false, floor = new NoiseFloor()) 
     revocations = 0;
   const stt = new ProgressiveTranscription({
     direct,
+    partials: interim,
     floor,
     playback: playing,
     now: () => time,
@@ -68,6 +69,16 @@ describe('progressive batch coverage', () => {
     expect(s.final).toEqual(['Wait, not that one.']);
     // Results after the endpoint are finals, not interim text.
     expect(s.partials).toEqual(['Wait']);
+  });
+  it('decodes only at the endpoint when interim decodes are off', async () => {
+    const s = setup(false, () => false, new NoiseFloor(), false);
+    s.feed(3000);
+    expect(s.jobs).toHaveLength(0);
+    s.feed(860, false);
+    expect(s.jobs).toHaveLength(1);
+    await s.complete(0, 'Open my calendar.');
+    expect(s.final).toEqual(['Open my calendar.']);
+    expect(s.partials).toEqual([]);
   });
   it('reuses a complete silence-window result without decoding at the endpoint', async () => {
     const s = setup();
@@ -211,9 +222,11 @@ describe('speech detection and endpointing', () => {
   it('endpoints a turn held open only by sub-speech noise instead of overflowing the buffer', async () => {
     const s = setup();
     s.feed(1000);
-    s.feed(5000, 70); // RMS ~.0021: above the off threshold, below onset level
+    s.feed(6000, 70); // RMS ~.0021: above the off threshold, below onset level
+    // The noise keeps going after the cutoff; it must not reopen the turn.
     expect(events(s, 'noise-hold')).toBe(1);
     expect(events(s, 'endpoint')).toBe(1);
+    expect(events(s, 'endpoint-revoked')).toBe(0);
     expect(s.errors).toEqual([]);
     while (!s.final.length && s.jobs.length) await s.complete(s.jobs.length - 1, 'Testing');
     expect(s.final).toEqual(['Testing']);

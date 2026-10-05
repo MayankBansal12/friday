@@ -23,8 +23,7 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
-import { FridayMascot } from './FridayMascot';
-import { fridayMood } from './friday-mood';
+import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
 
@@ -69,6 +68,10 @@ interface Props {
   controlling: boolean;
   level: number;
   heard: string;
+  /** The heard words were judged not meant for Friday and did not interrupt it. */
+  heardIgnored?: boolean;
+  /** Submit ignored speech after all. */
+  onSendIgnored?: () => void;
   /** The user's recognized words: live while they speak, final briefly after submission. */
   transcript?: { text: string; final: boolean };
   error?: string;
@@ -154,6 +157,21 @@ export function FridayPresence(props: Props) {
   const contentRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const busy = task && activeStatuses.has(task.status);
+  // A brief pleased squint once a task she was working on finishes and she has stopped talking.
+  const [pleased, setPleased] = useState(false);
+  const workedOn = useRef(new Set<string>());
+  useEffect(() => {
+    if (!task) return;
+    if (activeStatuses.has(task.status)) workedOn.current.add(task.id);
+    if (task.status !== 'completed' || speaking || !workedOn.current.delete(task.id)) return;
+    const start = setTimeout(() => setPleased(true), 0);
+    const end = setTimeout(() => setPleased(false), 700);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(end);
+      setPleased(false);
+    };
+  }, [task, speaking]);
   const listeningToRequest = ['starting', 'armed', 'transcribing'].includes(listening);
   const children = (state?.sessions ?? []).filter((s) => s.role === 'child').sort((a, b) => b.updatedAt - a.updatedAt);
   const visible = children.filter(
@@ -419,14 +437,27 @@ export function FridayPresence(props: Props) {
     window.addEventListener('blur', blur);
     return () => window.removeEventListener('blur', blur);
   }, [text, setTyping]);
-  const mood = fridayMood({
-    attention: Boolean(approvals.length || props.error || task?.error),
-    speaking,
-    working: Boolean(busy || props.controlling),
-    listening,
-    typing,
-    micEnabled: props.micEnabled,
-  });
+  const mood: FridayMood =
+    approvals.length || props.error || task?.error || listening === 'error'
+      ? 'worried'
+      : speaking
+        ? 'speaking'
+        : pleased
+          ? 'pleased'
+          : // Guiding and controlling look at her own mark or cursor instead of thinking.
+            props.controlling || props.guiding
+            ? 'idle'
+            : busy || listening === 'transcribing'
+              ? 'thinking'
+              : listeningToRequest || typing
+                ? 'listening'
+                : !props.micEnabled
+                  ? 'muted'
+                  : resting
+                    ? 'sleepy'
+                    : !engaged
+                      ? 'peeking'
+                      : 'idle';
   const mark = <FridayMascot mood={mood} className="presence-mark" />;
   const taskList = (
     <section className="background-list" aria-label="Background tasks">
@@ -657,7 +688,19 @@ export function FridayPresence(props: Props) {
                       <p>Ask a question or tell me what you’d like done.</p>
                     </div>
                   )}
-                  {props.heard && listeningToRequest && <p className="heard-text">{props.heard}</p>}
+                  {props.heard &&
+                    listeningToRequest &&
+                    (props.heardIgnored ? (
+                      <button
+                        className="heard-text ignored"
+                        title="Friday thought this wasn’t meant for it. Send it anyway."
+                        onClick={props.onSendIgnored}
+                      >
+                        Ignored: “{props.heard}” · Send
+                      </button>
+                    ) : (
+                      <p className="heard-text">{props.heard}</p>
+                    ))}
                   <Conversation tasks={conversation} state={state} />
                   {detail &&
                     (props.error ||

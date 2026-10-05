@@ -21,5 +21,5 @@ export function fridayMood({ attention, speaking, working, listening, typing, mi
   if (speaking) return 'speaking';
   if (working || listening === 'transcribing') return 'thinking';
   if (typing || listening === 'starting' || listening === 'armed') return 'listening';
-  return micEnabled ? 'idle' : 'sleepy';
+  return micEnabled ? 'idle' : 'muted';
 }

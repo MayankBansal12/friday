@@ -19,6 +19,7 @@
     "desktop:install": "pnpm desktop:build && python3 scripts/install-desktop.py",
     "desktop:status": "python3 scripts/desktop-command.py",
     "stt:setup": "python3 scripts/setup-stt.py",
+    "wake:setup": "python3 scripts/setup-wake-word.py",
     "start:desktop": "python3 scripts/start-desktop.py",
     "test:native": "pnpm desktop:build && python3 tests/native/run.py",
     "test:native:computer": "pnpm desktop:build && python3 tests/native/run.py --computer",
@@ -31,7 +32,8 @@
     "productName": "Linux Buddy",
     "asar": true,
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "**/node_modules/sherpa-onnx-linux-x64/**"
     ],
     "publish": null,
     "files": [
@@ -69,6 +71,7 @@
     "motion": "^13.4.4",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "sherpa-onnx-node": "1.13.8",
     "ws": "^8.22.0"
   },
   "devDependencies": {

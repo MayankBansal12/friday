@@ -24,10 +24,11 @@ import { SpeechChannel } from './speech-channel.js';
 import type { Utterance, VoiceOutput } from './speech-output.js';
 import { validateSpeech } from './speech-policy.js';
 import { validSettings } from './validation.js';
+import { debugEnabled, debugId, debugLog } from './debug-log.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions`;
+const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -317,6 +318,15 @@ export class AgentService extends EventEmitter {
     await this.persist();
     this.publish();
     return structuredClone(session);
+  }
+  /** Stop every unfinished background task. The calling parent turn keeps running to confirm it. */
+  async stopAllChildren() {
+    const active = this.sessions.filter(
+      (s) => s.role === 'child' && (s.status === 'running' || s.status === 'needs_input'),
+    );
+    const stopped = [];
+    for (const session of active) stopped.push(await this.stopChild(session.id));
+    return { stopped: stopped.map(({ id, title }) => ({ id, title })) };
   }
   async readSession(id: string, offset = 0) {
     return {
@@ -1304,6 +1314,20 @@ export class AgentService extends EventEmitter {
     return { ok: true, effects: 'applied', results };
   }
 
+  private debugToolRequest(request: IncomingMessage, response: ServerResponse, task: string, session: string) {
+    const id = debugId();
+    const started = Date.now();
+    const route = (request.url ?? '').split('?')[0];
+    const tool = /^\/(?:tools|desktop)\/[a-z_-]+$/.test(route) ? route : 'other';
+    debugLog('TOOL', 'started', { id, task, session, tool });
+    response.once('finish', () =>
+      debugLog('TOOL', 'completed', { id, task, tool, status: response.statusCode, ms: Date.now() - started }),
+    );
+    response.once('close', () => {
+      if (!response.writableFinished) debugLog('TOOL', 'connection closed before reply', { id, tool });
+    });
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const reply = (status: number, data: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -1312,6 +1336,7 @@ export class AgentService extends EventEmitter {
     const worker = [...this.workers.values()].find((w) => request.headers.authorization === `Bearer ${w.token}`);
     const task = worker?.task;
     if (!worker || !task || terminal.has(task.status)) return reply(401, { error: 'Session is not active' });
+    if (debugEnabled()) this.debugToolRequest(request, response, task.id, worker.session.id);
     try {
       let size = 0;
       const chunks: Buffer[] = [];
@@ -1380,6 +1405,9 @@ export class AgentService extends EventEmitter {
           break;
         case '/tools/session_stop':
           result = await this.stopChild(shortText(data.id, 'session ID', 128));
+          break;
+        case '/tools/stop_all':
+          result = await this.stopAllChildren();
           break;
         case '/tools/interact':
           result = await this.interact(worker, task, data);

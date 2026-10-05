@@ -6,15 +6,18 @@ See [the current request flow](docs/request-flow.md) for session boundaries, spe
 
 ## Setup and launch
 
-Requirements: Node.js 22+, pnpm, Python 3.12+ with venv/pip and PyGObject, GNOME Shell 49, `pi` 0.85.1+, local Parakeet V3 int8 ONNX model files (available through Handy), `ffmpeg`, and `espeak-ng`. Desktop integration currently supports the built-in 1920×1080 display at 100% scale.
+Requirements: Node.js 22+, pnpm, Python 3.12+ with venv/pip and PyGObject, GNOME Shell 49, `pi` 0.85.1+, `ffmpeg`, and `espeak-ng`. Desktop integration currently supports the built-in 1920×1080 display at 100% scale.
 
 Configure OpenCode Go through `OPENCODE_API_KEY` in `.env` or existing Pi authentication. See [.env.example](.env.example) for environment overrides.
+
+Speech recognition is hosted Groq Whisper (`whisper-large-v3-turbo`, multilingual) when `GROQ_API_KEY` is set; otherwise it falls back to local Parakeet V3, which additionally needs the int8 ONNX model files (available through Handy) and `pnpm stt:setup`.
 
 For computer control, install Codex CLI (tested with 0.155.1), run `codex login`, and check `codex login status`. Your existing ChatGPT sign-in works; no separate OpenAI API key is required. Chat, speech, guidance, and background tasks still work without Codex. The operator uses the [Codex app-server protocol](https://developers.openai.com/codex/app-server) with Friday's bounded desktop tools.
 
 ```sh
 pnpm install
 pnpm stt:setup
+pnpm wake:setup
 pnpm desktop:install
 # On first install or after changing the GNOME extension:
 # save your work, sign out, then sign back in once.
@@ -33,17 +36,18 @@ For development, use `pnpm dev`. The local launch commands use `--no-sandbox` be
 
 ## Using Friday
 
-- Friday opens in active listening. After ten seconds without a request, it rests and shows **Say “hey friday” to wake her up**. The local detector keeps listening in rest: “Hey Friday” opens a new request, and “Hey Friday, open my calendar” includes the request in one utterance.
+- Friday opens in active listening. After ten seconds without a request, it rests and shows **Say “hey friday” to wake her up**. The on-device wake word detector (see [Wake word](#wake-word)) keeps listening in rest: “Hey Friday” opens a new request, and “Hey Friday, open my calendar” includes the request in one utterance.
 - One top-center notch shows listening, work, speech, and drawing guidance, 5 px below the system panel. At rest it contracts to a smaller pill with the wake hint and Stop; listening and work use the full-width bar. Hover to open details, move away to collapse. Motion animates the size changes without scaling the text and respects reduced-motion preferences. Keyboard focus also opens details. There are no extra expand/collapse or microphone buttons in the bar. Drag the notch bar to move it anywhere inside the work area — it follows the pointer and remembers its spot across restarts.
-- The notch always has **Stop Friday**. Clicking it or saying **“Friday stop”** cancels speech and all running actions, clears drawings, and returns an enabled microphone to rest. Explicit microphone-off remains off until enabled again.
+- The notch always has **Stop Friday**. Clicking it cancels speech and all running actions, clears drawings, and returns an enabled microphone to rest. Explicit microphone-off remains off until enabled again.
 - A voice request keeps the conversation engaged: Friday keeps listening while it works and speaks. Talking over Friday (two or more words besides “um”/“uh”, or anything addressed to Friday) stops its voice immediately, and the finished sentence replaces the unfinished request, so “no, the other one” works as a correction. Friday's own voice is filtered by the browser's echo canceller and an echo guard that drops transcripts matching what Friday was saying (within 1.5 s of it stopping); corrections containing words such as “no”, “not” or “instead” are never treated as echo. While Friday talks, a lone “yeah” or “okay” is treated as listening, not a new request; “no”, “wait” and addressed speech still count. If you pause mid-request and continue within 2.5 s, before Friday has acted or answered, the whole request is resubmitted instead of only its second half.
 - While a voice request runs, Friday plays one short local acknowledgement clip (“hmm”, “okay”, “let's see”) from `assets/acknowledgements/`. It costs no voice request, is skipped when replies are muted (and for typed requests unless **Speak replies to typed requests** is on), and stops as soon as the answer, Stop, a new request or talk-over arrives. The notch shows your recognized words while you speak and for 3 s after the request is sent.
-- Typed requests return to wake waiting and are answered on screen unless **Speak replies to typed requests** is on. Opening the text composer keeps only Stop recognition active, so nearby conversation cannot submit a request. Wake/Stop detection uses local Parakeet transcription with an 850 ms speech endpoint plus inference time; it is not an instant dedicated wake engine.
+- Typed requests return to wake waiting and are answered on screen unless **Speak replies to typed requests** is on. Opening the text composer pauses recognition, so nearby conversation cannot submit a request.
+- There is no spoken stop keyword. Ask Friday in your own words (“stop everything”, “forget all of that”) and it calls its `stop_all` tool to cancel every background task, then confirms what it stopped; for one named task it stops only that task, and when the target is unclear it asks. Any new voice request already interrupts Friday's current reply.
 - Background tasks use the existing upper-right circle. Hover or focus it for updates; select a task to ask about it. Selection alone sends nothing. A new “Hey Friday” clears old task context. A task's own Stop affects only that task; the notch Stop cancels all work. Completed updates can be dismissed individually.
 - **Guiding you** appears in the same notch only after a drawing is confirmed on screen. Screenshot-only work never enters guidance. Friday briefly hides for the screenshot itself, then returns without taking focus; drawing does not replace it with another box.
 - Hover for **Type instead**, the microphone on/off toggle, and **Settings & history**. Settings/history contains previous requests and **Mark screen**. **New task** resets the parent conversation; normal requests reuse it.
 - **Ctrl+Shift+Space** or the tray's **Talk to Friday** activates listening. **Ctrl+Shift+Escape** stops all work and recording. Native **Escape** clears the overlay and stops its desktop request.
-- During computer control, the same notch shows **Controlling your computer · Esc twice to stop**. It passes clicks through and is excluded from the screenshots sent to the operator. Press Escape twice within 1.5 seconds, say **“Friday stop”**, or activate Friday to release control. Short speech updates continue alongside actions; the notch returns to its normal status when control finishes.
+- During computer control, the same notch shows **Controlling your computer · Esc twice to stop**. It passes clicks through and is excluded from the screenshots sent to the operator. Press Escape twice within 1.5 seconds, click Stop, or activate Friday to release control. Short speech updates continue alongside actions; the notch returns to its normal status when control finishes.
 - Agent drawings are click-through and preserve normal pointer movement. Drawings expire after 30 seconds and clear when input, focus, or geometry changes make them stale. Guidance advances when you ask; it does not continuously watch the screen.
 - Closing the window hides Friday; the tray menu has **Quit**. Quitting interrupts running children and saves their history. Reopening starts a new parent Pi session; all earlier sessions and the task registry stay searchable through the session tools, and interrupted children resume only on request.
 
@@ -66,7 +70,7 @@ Speech status reports its evidence honestly: `dispatch-estimate` (audio handed t
 With `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` set (and optionally `LIVEKIT_ROOM`, default `friday`), audio uses a LiveKit room:
 
 1. The Friday window publishes its echo-cancelled microphone to the room.
-2. The main process subscribes and forwards 16 kHz frames to the same segmenter and local Parakeet recognizer as the direct path. There is one recognizer, and it runs locally.
+2. The main process subscribes and forwards 16 kHz frames to the same segmenter and recognizer as the direct path. There is one recognizer, and it follows the configured STT provider.
 3. The transcript goes to the same parent Pi session and model. There is no second LLM.
 4. Rumik PCM from `speak_tool` is published as Friday's voice track. The window plays it through an audio element, which gives Chromium's echo canceller its reference.
 
@@ -79,13 +83,23 @@ Fallbacks are automatic and never silent:
 - A listener that leaves mid-reply fails that reply rather than dropping it silently.
 - Stop and barge-in clear the sender queue and mute audio already buffered in the window.
 
-Parakeet is batch recognition. While you speak, the recorder re-decodes the growing segment to produce revisable partials, which drive barge-in. The final transcript comes only after the 850 ms end-of-speech pause (1.6 s when the words so far end mid-phrase, such as “open the”). Speech detection adapts to the room's noise floor, so quiet speech and soft word endings are kept; during Friday's playback it needs a louder onset. LiveKit reduces playback and transport latency; it does not make recognition streaming.
+Transcription is batch recognition. While you speak, the recorder re-decodes the growing segment to produce revisable partials, which drive barge-in. The final transcript comes only after the 850 ms end-of-speech pause (1.6 s when the words so far end mid-phrase, such as “open the”). Speech detection adapts to the room's noise floor, so quiet speech and soft word endings are kept; during Friday's playback it needs a louder onset. LiveKit reduces playback and transport latency; it does not make recognition streaming.
 
 For development, run a local server such as `livekit-server --dev --bind 127.0.0.1` (key `devkey`, secret `secret`, URL `ws://127.0.0.1:7880`). Do not use development credentials for a remote server.
 
-## Local speech recognition
+## Speech recognition
 
-`pnpm stt:setup` installs a pinned CPU ONNX runtime into `$XDG_DATA_HOME/friday/stt-venv` (default `~/.local/share/friday/stt-venv`). Friday reads the existing Parakeet V3 model in `$XDG_DATA_HOME/com.pais.handy/models/parakeet-tdt-0.6b-v3-int8`. It does not download model weights or invoke Handy. Set `LINUX_BUDDY_STT_MODEL` to a different local directory if needed; it must contain `config.json`, `vocab.txt`, `encoder-model.int8.onnx`, and `decoder_joint-model.int8.onnx`.
+Hosted Groq Whisper (`whisper-large-v3-turbo`) is used when `GROQ_API_KEY` is present in `.env`. It recognizes 99+ languages including Hindi with auto-detection, needs no local model, and returns in roughly half a second. Every utterance audio is uploaded to Groq — that is the tradeoff for multilingual capture. Set `LINUX_BUDDY_STT_PROVIDER=parakeet` to force the offline engine, `LINUX_BUDDY_GROQ_STT_MODEL` to change the model, or `LINUX_BUDDY_GROQ_STT_LANGUAGE` (an ISO code such as `hi`) to pin a language instead of auto-detection. The key is removed from the environment before agents or audio helpers start.
+
+### Speech while Friday is busy
+
+When `TYPESAFE_API_KEY` is set, speech that is not addressed with "Hey Friday" while Friday works or talks goes to TypeSafe's Jev decision model (`jev-latest`, about 300 ms) before it can cancel the current turn. Jev sees the transcript, the current request and what Friday last said, and answers `interrupt` or `ignore`. A confident `ignore` (a phone call, TV, filler, a mis-transcription) is shown dimmed in the notch as "Ignored" and Friday keeps going; click it to send it anyway, or say the same thing again within 15 seconds and it goes straight through. Corrections that start with "no", "wait", "stop", "actually" and similar skip the check, and any Jev error or timeout (1.5 s) falls back to interrupting. The transcript text is sent to TypeSafe. Set `LINUX_BUDDY_TURN_GATE=off` to disable it.
+
+### Wake word
+
+At rest, microphone audio never leaves the machine. A small on-device keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with the 3.3M-parameter GigaSpeech zipformer, about 3% of one CPU core) listens only for “Hey” plus the configured wake word. Only after it fires is audio transcribed: the last two seconds are replayed so the phrase is not clipped, and the transcript must actually contain “Hey Friday” or the wake is discarded. Follow-ups during an engaged conversation need no wake phrase. `pnpm wake:setup` downloads the ~13 MB model into `$XDG_DATA_HOME/friday/wake-word/`. Without the model (or with `LINUX_BUDDY_WAKE_DETECTOR=off`) Friday falls back to transcribing all speech and matching the wake word in text, which uploads everything to Groq when that provider is active. `LINUX_BUDDY_WAKE_MODEL` points to another model directory; `LINUX_BUDDY_WAKE_SCORE` (default 1.5, higher triggers more easily) and `LINUX_BUDDY_WAKE_THRESHOLD` (default 0.25, lower triggers more easily) tune sensitivity. Interim re-decodes are off with Groq, so each utterance is one request.
+
+Without a key, recognition runs fully offline through local Parakeet V3. `pnpm stt:setup` installs a pinned CPU ONNX runtime into `$XDG_DATA_HOME/friday/stt-venv` (default `~/.local/share/friday/stt-venv`). Friday reads the existing Parakeet V3 model in `$XDG_DATA_HOME/com.pais.handy/models/parakeet-tdt-0.6b-v3-int8`. It does not download model weights or invoke Handy. Set `LINUX_BUDDY_STT_MODEL` to a different local directory if needed; it must contain `config.json`, `vocab.txt`, `encoder-model.int8.onnx`, and `decoder_joint-model.int8.onnx`. Parakeet V3 covers 25 European languages; Hindi is not among them, so multilingual use needs Groq.
 
 The Python worker starts when listening begins, stays loaded until Friday quits, and communicates over private process pipes. Recognition runs locally and temporary audio files are removed after each request. Model loading and inference have timeouts; a failed worker can restart on the next request. A custom environment can be installed with `pnpm stt:setup --venv /path/to/venv`; launch Friday with `LINUX_BUDDY_STT_PYTHON=/path/to/venv/bin/python` to use it. Both development and packaged apps use the same external runtime/model.
 
@@ -181,4 +195,4 @@ Code layout:
 - `scripts/`: desktop install/status, speech setup, and the desktop launcher.
 - `tests/`: unit tests and reusable native/UI integration harness.
 
-Settings include working folder, model, wake word, launch at login, spoken replies, and spoken replies to typed requests. Environment overrides include `LINUX_BUDDY_MODEL`, `LINUX_BUDDY_WAKE_WORD`, `LINUX_BUDDY_STT_MODEL`, `LINUX_BUDDY_STT_PYTHON`, `LINUX_BUDDY_STT_THREADS`, `LINUX_BUDDY_PI_BIN`, `LINUX_BUDDY_FFMPEG_BIN`, and the optional `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` and `LIVEKIT_ROOM`. Activity reports model/tool/capture/transcription timings; hosted inference remains the main source of latency.
+Settings include working folder, model, wake word, launch at login, spoken replies, and spoken replies to typed requests. Environment overrides include `LINUX_BUDDY_MODEL`, `LINUX_BUDDY_WAKE_WORD`, `LINUX_BUDDY_STT_MODEL`, `LINUX_BUDDY_STT_PYTHON`, `LINUX_BUDDY_STT_THREADS`, `LINUX_BUDDY_WAKE_MODEL`, `LINUX_BUDDY_WAKE_DETECTOR`, `LINUX_BUDDY_WAKE_SCORE`, `LINUX_BUDDY_WAKE_THRESHOLD`, `LINUX_BUDDY_PI_BIN`, `LINUX_BUDDY_FFMPEG_BIN`, and the optional `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` and `LIVEKIT_ROOM`. Activity reports model/tool/capture/transcription timings; hosted inference remains the main source of latency.

@@ -4,10 +4,10 @@ import { fridayMood } from '../src/friday-mood';
 const resting = { listening: 'listening', micEnabled: true } as const;
 
 describe('Friday mood', () => {
-  it('rests idle while only waiting for the wake word, and sleeps with the mic off', () => {
+  it('rests idle while only waiting for the wake word, and shows muted with the mic off', () => {
     expect(fridayMood(resting)).toBe('idle');
     expect(fridayMood({ ...resting, listening: 'paused' })).toBe('idle');
-    expect(fridayMood({ listening: 'idle', micEnabled: false })).toBe('sleepy');
+    expect(fridayMood({ listening: 'idle', micEnabled: false })).toBe('muted');
   });
 
   it('listens only while a request is being heard or typed', () => {

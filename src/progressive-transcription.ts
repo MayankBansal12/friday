@@ -22,6 +22,8 @@ interface Options {
   trace?(event: SpeechTrace): void;
   now?(): number;
   direct?: boolean;
+  /** Re-decode while the user is still speaking. Off for hosted recognition (per-request cost). */
+  partials?: boolean;
   /** True while Friday's own voice may reach the mic; speech then needs more energy to count. */
   playback?(): boolean;
   /** Shared across segments so a new request starts with a calibrated noise floor. */
@@ -166,26 +168,29 @@ export class ProgressiveTranscription {
           this.record('endpoint-revoked');
           this.options.endpointRevoked?.();
         }
-      } else if (this.inSpeech) {
-        this.record('speech-end');
-      }
+      } else if (this.inSpeech) this.record('speech-end');
       this.inSpeech = voiced;
       // Audio between the off and onset thresholds (fan, hum, clicks) counts as voiced yet
       // never reaches speech level, so it can hold a turn open through every endpoint check.
-      // Five seconds without a single onset-level frame is not a pause in speech: close the
-      // turn instead of overflowing the buffer.
+      // Five seconds without a single onset-level frame is not a pause in speech: end the
+      // turn at the last loud frame, so the noise is neither decoded nor able to reopen it.
       if (this.inSpeech && this.length - this.lastLoud >= noiseHoldLimit) {
         this.record('noise-hold');
-        this.finish(false);
+        this.speechEnd = this.lastLoud;
         this.inSpeech = false;
+        this.finish(false);
       }
-      this.inSpeech = voiced;
     }
     const quiet = this.length - this.speechEnd;
     // Decode a complete suffix during silence, once, with 240 ms trailing context.
     const target = Math.min(this.length, this.speechEnd + trailingContext);
     if (quiet >= trailingContext) this.want(target);
-    else if (this.inSpeech && this.now() - this.lastDecodeAt >= this.cadenceMs && this.length >= 9600)
+    else if (
+      this.options.partials !== false &&
+      this.inSpeech &&
+      this.now() - this.lastDecodeAt >= this.cadenceMs &&
+      this.length >= 9600
+    )
       this.want(this.length);
     if (!this.options.direct && quiet >= endpointQuiet) {
       this.finish(false);

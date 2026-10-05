@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { continuation, continuationMs, ignoredFinal } from '../src/voice-turns';
+import {
+  continuation,
+  continuationMs,
+  corrective,
+  ignoredFinal,
+  needsTurnGate,
+  repeatMs,
+  repeatsIgnored,
+} from '../src/voice-turns';
 
 describe('voice turns', () => {
   it('drops hesitations and silence but keeps short answers', () => {
@@ -48,5 +56,62 @@ describe('voice turns', () => {
     expect(continuation(previous, { ...next, speechStartedAt: 9_900 }, 'thinking')).toBeUndefined();
     expect(continuation(previous, { ...next, addressed: true }, 'thinking')).toBeUndefined();
     expect(continuation(undefined, next, 'thinking')).toBeUndefined();
+  });
+});
+
+describe('corrective', () => {
+  it('recognizes corrections that should interrupt at once', () => {
+    for (const text of [
+      'No, make it Mumbai.',
+      'wait',
+      'Stop.',
+      'Hold on a sec',
+      'Actually, check hotels',
+      'never mind',
+    ])
+      expect(corrective(text)).toBe(true);
+    for (const text of ['Nobody asked', 'Knowing you, sure', 'thank you', 'waiting for mom'])
+      expect(corrective(text)).toBe(false);
+  });
+});
+
+describe('needsTurnGate', () => {
+  const base = {
+    text: 'Did you eat lunch?',
+    addressed: false,
+    continued: false,
+    direct: false,
+    busy: true,
+    now: 100_000,
+  };
+
+  it('judges unaddressed speech while Friday is busy', () => {
+    expect(needsTurnGate(base)).toBe(true);
+  });
+
+  it('acts at once when idle, addressed, continuing, push-to-talk or correcting', () => {
+    expect(needsTurnGate({ ...base, busy: false })).toBe(false);
+    expect(needsTurnGate({ ...base, addressed: true })).toBe(false);
+    expect(needsTurnGate({ ...base, continued: true })).toBe(false);
+    expect(needsTurnGate({ ...base, direct: true })).toBe(false);
+    expect(needsTurnGate({ ...base, text: 'No, make it Mumbai.' })).toBe(false);
+  });
+
+  it('lets the user insist by repeating ignored speech soon after', () => {
+    const ignored = { text: 'Only direct flights please.', at: base.now - 4000 };
+    expect(needsTurnGate({ ...base, text: 'Only direct flights, please!', ignored })).toBe(false);
+    expect(needsTurnGate({ ...base, text: 'And the markets fell today.', ignored })).toBe(true);
+    expect(
+      needsTurnGate({ ...base, text: 'Only direct flights.', ignored: { ...ignored, at: base.now - repeatMs - 1 } }),
+    ).toBe(true);
+  });
+});
+
+describe('repeatsIgnored', () => {
+  it('needs most of the new words to have been ignored', () => {
+    const ignored = { text: 'How much is the cheapest one?', at: 0 };
+    expect(repeatsIgnored('How much is the cheapest one', ignored, 1000)).toBe(true);
+    expect(repeatsIgnored('the one with the view', ignored, 1000)).toBe(false);
+    expect(repeatsIgnored('anything', undefined, 1000)).toBe(false);
   });
 });
