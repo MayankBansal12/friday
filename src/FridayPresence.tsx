@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -421,22 +421,30 @@ export function FridayPresence(props: Props) {
       }
     }, 450);
   }
-  function collapse() {
+  const collapse = useCallback(() => {
     setHovered(false);
     setAutoOpen(false);
     setTyping(false);
     setDismissed(contentKey);
-  }
+  }, [contentKey, setTyping]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') collapse();
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, [collapse]);
   useEffect(() => {
     const blur = () => {
-      if (text.trim()) return;
+      keyboardFocus.current = false;
+      setDismissed(contentKey);
       setHovered(false);
       setAutoOpen(false);
       setTyping(false);
     };
     window.addEventListener('blur', blur);
     return () => window.removeEventListener('blur', blur);
-  }, [text, setTyping]);
+  }, [contentKey, setTyping]);
   const mood: FridayMood =
     approvals.length || props.error || task?.error || listening === 'error'
       ? 'worried'
@@ -544,12 +552,6 @@ export function FridayPresence(props: Props) {
         if (!e.currentTarget.contains(e.relatedTarget)) {
           keyboardFocus.current = false;
           leave();
-        }
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          collapse();
         }
       }}
     >
@@ -704,8 +706,9 @@ export function FridayPresence(props: Props) {
                   <Conversation tasks={conversation} state={state} />
                   {detail &&
                     (props.error ||
-                      task?.error ||
-                      !conversation.some((item) => item.id === state?.presentation.taskId)) && (
+                      (task?.error
+                        ? !conversation.some((item) => item.id === task.id)
+                        : !conversation.some((item) => item.id === state?.presentation.taskId))) && (
                       <div
                         className={`presence-reply presence-markdown ${props.error || task?.error ? 'is-error' : ''}`}
                         role={props.error || task?.error ? 'alert' : undefined}

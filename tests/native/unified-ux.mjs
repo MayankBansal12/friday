@@ -42,6 +42,24 @@ try {
   await click('[aria-label="Open workspace"]');
   assert.equal(await evaluate("document.querySelector('textarea').value"), 'Keep this draft across sizes');
   await screenshot('workspace-draft');
+  // Keep the workspace faded out until the main process confirms the resize.
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  await evaluate(`window.originalSetExpanded = window.buddy.setExpanded;
+    window.buddy.setExpanded = async value => {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return window.originalSetExpanded(value);
+    };
+    document.querySelector('[aria-label="Back to pill"]').click()`);
+  await pause(220);
+  assert(await evaluate("document.querySelector('.friday-window').classList.contains('is-closing')"));
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.friday-window')).opacity"), '0');
+  await pause(600);
+  assert(await evaluate("Boolean(document.querySelector('.presence-heading'))"));
+  await evaluate('window.buddy.setExpanded = window.originalSetExpanded');
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await evaluate("document.querySelector('.presence-heading').focus()");
+  await pause();
+  await click('[aria-label="Open workspace"]');
   await click('[aria-label="Back to pill"]');
   await evaluate("document.querySelector('.presence-heading').focus()");
   await pause();
@@ -50,7 +68,24 @@ try {
     await evaluate('document.querySelector(\'input[aria-label="Ask Friday"]\').value'),
     'Keep this draft across sizes',
   );
-  await click('[aria-label="Collapse to pill"]');
+  // Switching apps releases typing/wake suppression without discarding the draft.
+  await click('[aria-label="Turn microphone on"]');
+  await evaluate("window.dispatchEvent(new Event('blur'))");
+  await pause(550);
+  assert.notEqual(await evaluate('fixture.listening'), 'paused');
+  assert.equal(await evaluate(`Boolean(document.querySelector('input[aria-label="Ask Friday"]'))`), false);
+  await evaluate("document.querySelector('.presence-heading').focus()");
+  await pause();
+  assert.equal(
+    await evaluate("document.querySelector('.presence-composer.is-idle').textContent"),
+    'Keep this draft across sizes',
+  );
+  // Escape reaches the pill even when the hotkey focuses only the window/body.
+  await evaluate(
+    "document.activeElement.blur();document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true}))",
+  );
+  await pause();
+  assert.equal(await evaluate("Boolean(document.querySelector('.presence-body'))"), false);
   const before = await evaluate('fixture.calls.length');
   await evaluate("document.querySelector('.presence-heading').focus()");
   await pause();
@@ -97,8 +132,30 @@ try {
   );
   await screenshot('compact-long');
   await click('[aria-label="Open workspace"]');
+  await click('.view-switcher button:nth-child(2)');
+  await evaluate("document.querySelector('.content-scroll').scrollTop=0");
+  await pause();
+  await click('.view-switcher button:nth-child(1)');
+  assert(
+    await evaluate(
+      "(()=>{const el=document.querySelector('.content-scroll');return el.scrollHeight-el.scrollTop-el.clientHeight<48})()",
+    ),
+    'Conversation reopens at the latest turn after History',
+  );
   await click('[aria-label="Open settings"]');
   await screenshot('settings');
+  await evaluate(`fixture.task({id:'failed',role:'parent',conversationId:'parent',prompt:'Fail this request',error:'Unique regression error',status:'failed',steps:[],createdAt:200,updatedAt:200});
+    fixture.runtime.presentation = {text:'', expanded:false, speaking:false, taskId:'failed'};fixture.emit()`);
+  await click('[aria-label="Back to pill"]');
+  await evaluate("document.querySelector('.presence-heading').focus()");
+  await pause();
+  assert.equal(
+    await evaluate(
+      "Array.from(document.querySelectorAll('[role=alert]')).filter(el=>el.textContent==='Unique regression error').length",
+    ),
+    1,
+    'A failed conversation turn has one error alert',
+  );
   console.log(`Unified UX regression checks passed. Screenshots: ${output}`);
 } finally {
   close();

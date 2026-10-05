@@ -249,6 +249,7 @@
         },
       });
       window.buddy = {
+        voiceGate: async () => ({ localWake: false, partials: true }),
         fridayState: async () => runtime,
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,

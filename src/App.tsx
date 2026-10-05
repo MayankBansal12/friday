@@ -713,8 +713,7 @@ export default function App() {
   useEffect(() => {
     if (!closingWorkspace) return;
     const timer = setTimeout(() => {
-      void window.buddy.setExpanded(false);
-      setClosingWorkspace(false);
+      void window.buddy.setExpanded(false).catch(() => setClosingWorkspace(false));
     }, 160);
     return () => clearTimeout(timer);
   }, [closingWorkspace]);
@@ -1509,6 +1508,7 @@ export default function App() {
       window.buddy.onExpanded((value) => {
         changeTyping(false);
         setExpanded(value);
+        setClosingWorkspace(false);
       }),
     [changeTyping],
   );
@@ -1563,6 +1563,10 @@ export default function App() {
   useEffect(() => {
     if (selectedStatus && !activeStatuses.has(selectedStatus)) void refreshDesktop();
   }, [selectedStatus, refreshDesktop]);
+
+  useEffect(() => {
+    if (view === 'now' && expanded) followLatest.current = true;
+  }, [view, expanded]);
 
   useEffect(() => {
     if (!contentRef.current || view !== 'now' || !followLatest.current) return;
