@@ -154,9 +154,11 @@ describe('camera snapshot tool', () => {
     await pending;
     await vi.waitFor(() => expect(service.state().cameraActive).toBe(false));
   });
-  it('defaults off and restricts access to active parent requests with no tool arguments', async () => {
+  it('defaults on, honors disabling, and restricts access to active parent requests with no tool arguments', async () => {
     const camera = { capture: vi.fn(async () => photo) };
     const { service, tool, invocations } = await fixture({ camera });
+    expect(service.getSettings().cameraEnabled).toBe(true);
+    await service.updateSettings({ cameraEnabled: false });
     await service.submit('Look at me');
     expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('Camera access is off');
     expect(camera.capture).not.toHaveBeenCalled();
@@ -741,6 +743,7 @@ describe('parent and child runtime boundary', () => {
   });
   it('starts a fresh parent session on restart and keeps earlier sessions searchable', async () => {
     const { service, dir } = await fixture();
+    await service.updateSettings({ cameraEnabled: false });
     const parentId = service.state().parentId;
     await service.submit('Delegate');
     const child = await service.startChild('Long job', 'Keep going');
@@ -750,6 +753,7 @@ describe('parent and child runtime boundary', () => {
     });
     services.push(restored);
     await restored.init();
+    expect(restored.getSettings().cameraEnabled).toBe(false);
     expect(restored.state().parentId).not.toBe(parentId);
     const previous = restored.state().sessions.find((s) => s.id === parentId);
     expect(previous?.role).toBe('parent');

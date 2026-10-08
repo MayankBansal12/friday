@@ -42,15 +42,15 @@ try {
   await pause();
   const toggle =
     "[...document.querySelectorAll('label')].find(l => l.textContent.includes('Camera snapshots')).querySelector('input')";
-  assert.equal(await evaluate(`${toggle}.checked`), false);
-  await evaluate(`${toggle}.click()`);
-  await pause();
   assert.equal(await evaluate(`${toggle}.checked`), true);
-  assert.equal(await evaluate("fixture.calls.some(c => c[0] === 'settings' && c[1].cameraEnabled === true)"), true);
   await evaluate(`${toggle}.click()`);
   await pause();
   assert.equal(await evaluate(`${toggle}.checked`), false);
   assert.equal(await evaluate("fixture.calls.some(c => c[0] === 'settings' && c[1].cameraEnabled === false)"), true);
+  await evaluate(`${toggle}.click()`);
+  await pause();
+  assert.equal(await evaluate(`${toggle}.checked`), true);
+  assert.equal(await evaluate("fixture.calls.some(c => c[0] === 'settings' && c[1].cameraEnabled === true)"), true);
   assert.match(
     await evaluate("document.querySelector('.settings-dialog').textContent"),
     /Earlier photos may be sent again in this conversation, even with access off/,
@@ -60,7 +60,7 @@ try {
     const screenshot = await call('Page.captureScreenshot', {});
     await writeFile(`${process.env.FRIDAY_SCREENSHOTS}/camera-settings.png`, Buffer.from(screenshot.data, 'base64'));
   }
-  console.log('Camera UI: active status in notch/workspace, Stop, opt-in and opt-out passed.');
+  console.log('Camera UI: active status in notch/workspace, Stop, default-on, disable and re-enable passed.');
 } finally {
   close();
 }

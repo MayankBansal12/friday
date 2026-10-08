@@ -151,6 +151,7 @@ export class AgentService extends EventEmitter {
     private readonly options: AgentServiceOptions = {},
   ) {
     super();
+    this.settings = { cameraEnabled: true, ...settings };
     this.spawnProcess = options.spawn ?? spawn;
     this.grace = options.terminateGraceMs ?? 1200;
     this.channel = new SpeechChannel(() => this.options.voice, {

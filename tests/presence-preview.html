@@ -256,7 +256,7 @@
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
-        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: false }),
+        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: true }),
         updateSettings: async (next) => {
           fixture.calls.push(['settings', next]);
           return { wakeWord: 'Friday', ...next };

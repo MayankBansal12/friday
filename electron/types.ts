@@ -100,7 +100,7 @@ export function cameraStatus(state?: Pick<FridayState, 'cameraActive' | 'cameraC
 export type SurfaceLayout = 'orb' | 'tasks' | 'quiet' | 'bar' | 'panel' | 'details';
 
 export interface BuddySettings {
-  /** Opt in to on-demand webcam photos sent to the configured model. */
+  /** Allow requested webcam photos sent to the configured model; enabled by default. */
   cameraEnabled?: boolean;
   defaultCwd: string;
   launchAtLogin: boolean;
