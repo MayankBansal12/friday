@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
+import { Camera } from '../camera.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -25,6 +26,7 @@ import { configureDebugLog, debugEnabled, debugId, debugLog, debugUrl, installDe
 import { stageRuntimeExtension } from '../runtime-extension.js';
 import {
   activeStatuses,
+  cameraStatus,
   type BuddySettings,
   type ListeningState,
   type SurfaceLayout,
@@ -98,6 +100,8 @@ const nativeWindowPlacement =
   (app.commandLine.getSwitchValue('ozone-platform') === 'wayland' || !process.env.DISPLAY);
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let trayVoiceStatus = 'idle';
+let trayCameraStatus: string | undefined;
 let quitting = false;
 let shutdownComplete = false;
 let service: AgentService;
@@ -347,10 +351,14 @@ function createWindow(openSilently: boolean) {
   screen.on('display-removed', reanchorSurface);
 }
 
+function refreshTrayStatus() {
+  tray?.setToolTip(`Friday — ${trayCameraStatus ?? trayVoiceStatus}`);
+}
+
 function createTray() {
   const iconPath = join(root, 'assets/icon.png');
   tray = new Tray(existsSync(iconPath) ? iconPath : nativeImage.createEmpty());
-  tray.setToolTip('Friday — idle');
+  refreshTrayStatus();
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Talk to Friday', click: () => activateFriday(true) },
@@ -505,7 +513,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
-      { voice: speaker, acknowledgements },
+      { voice: speaker, acknowledgements, camera: new Camera() },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -547,6 +555,13 @@ if (hasSingleInstanceLock)
     };
     let lastDebugPresentation = '';
     service.on('state', (state) => {
+      const wasCapturing = Boolean(trayCameraStatus);
+      trayCameraStatus = cameraStatus(state);
+      refreshTrayStatus();
+      if (trayCameraStatus && !wasCapturing && window && !window.isDestroyed()) {
+        if (window.isMinimized()) window.hide();
+        window.showInactive();
+      }
       const summary = debugEnabled()
         ? `${state.parentId}:${state.presentation.speaking}:${Boolean(state.presentation.acknowledging)}`
         : '';
@@ -809,19 +824,16 @@ if (hasSingleInstanceLock)
         fromWindow(event);
         const next = validListeningState(state);
         debugLog('VOICE', 'state', { state: next });
-        tray?.setToolTip(
-          `Friday — ${
-            {
-              idle: 'Microphone off',
-              paused: 'Microphone paused',
-              starting: 'Opening microphone…',
-              listening: `Say Hey ${service.getSettings().wakeWord}`,
-              transcribing: 'One moment…',
-              armed: 'Go ahead…',
-              error: 'Check your microphone',
-            }[next as ListeningState]
-          }`,
-        );
+        trayVoiceStatus = {
+          idle: 'Microphone off',
+          paused: 'Microphone paused',
+          starting: 'Opening microphone…',
+          listening: `Say Hey ${service.getSettings().wakeWord}`,
+          transcribing: 'One moment…',
+          armed: 'Go ahead…',
+          error: 'Check your microphone',
+        }[next as ListeningState];
+        refreshTrayStatus();
         if (next === 'listening' || next === 'armed')
           void speech.prepare().catch((error) => console.error('Local STT preparation failed', error.message));
         if (next === 'idle' || next === 'paused' || next === 'error' || next === 'listening') speech.reset();

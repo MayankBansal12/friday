@@ -95,7 +95,10 @@ export default function fridayExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => {
     if (
       role === 'child' &&
-      (event.toolName.startsWith('desktop_') || event.toolName.startsWith('session_') || event.toolName === 'interact')
+      (event.toolName.startsWith('desktop_') ||
+        event.toolName.startsWith('camera_') ||
+        event.toolName.startsWith('session_') ||
+        event.toolName === 'interact')
     )
       return {
         block: true,
@@ -320,6 +323,27 @@ The whole call is validated first: status "rejected" means nothing ran; fix the 
     async execute(_id, params, signal) {
       const result = await bridge('/control', params, signal);
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: 'camera_snapshot',
+    label: 'Look through the camera',
+    description:
+      'Take one fresh webcam photo when the user asks you to look at them, an object they are holding, or their surroundings. Requires Camera snapshots enabled in Settings. One attempt per user request; a retake needs a new request. The camera closes before the photo returns. No live video or background monitoring. If unavailable, explain the error; never bypass the setting with shell or desktop tools. Use desktop_observe for screen content. This photo is not a desktop observation and cannot be drawn on with draw_tool.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    async execute(_id, params, signal) {
+      const result = await bridge('/tools/camera_snapshot', params, signal);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Webcam photo captured at ${new Date(Number(result.capturedAt)).toISOString()}. The camera is now closed. This is a single moment, not a live view or a desktop screenshot.`,
+          },
+          { type: 'image', data: String(result.data), mimeType: 'image/jpeg' },
+        ],
+        details: { capturedAt: result.capturedAt, mimeType: result.mimeType },
+      };
     },
   });
 

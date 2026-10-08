@@ -11,6 +11,7 @@ import {
   Archive,
   ArrowRight,
   ArrowUp,
+  Camera,
   Check,
   ChevronDown,
   CircleStop,
@@ -37,6 +38,7 @@ import {
 } from 'lucide-react';
 import {
   activeStatuses,
+  cameraStatus,
   type BuddySettings,
   type FridayState,
   type ListeningState,
@@ -579,6 +581,33 @@ function SettingsDialog({
 
         <div className="settings-section">
           <div className="settings-section-title">
+            <span className="settings-section-icon blue">
+              <Camera size={16} />
+            </span>
+            <span>
+              <strong>Camera</strong>
+              <small>Let Friday see what you show it</small>
+            </span>
+          </div>
+          <label className="setting-toggle">
+            <span>
+              <strong>Camera snapshots</strong>
+              <small>
+                Take a photo when you ask Friday to look, then close the camera. Photos go to your model and stay in
+                local history. Earlier photos may be sent again in this conversation, even with access off. Start a new
+                conversation to stop using them as context.
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.cameraEnabled === true}
+              onChange={(event) => onSave({ cameraEnabled: event.target.checked })}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">
             <span className="settings-section-icon warm">
               <Folder size={16} />
             </span>
@@ -660,7 +689,7 @@ function SettingsDialog({
               <Cloud size={15} />
               <span>
                 <strong>Requests &amp; vision</strong>
-                <small>Commands—and screenshots only when needed—go to your selected model.</small>
+                <small>Requests, screenshots, and requested camera photos go to your selected model.</small>
               </span>
             </div>
             <div>
@@ -1693,13 +1722,16 @@ export default function App() {
   }
 
   const listeningActive = listenState !== 'idle' && listenState !== 'error';
-  const presence = listeningActive
-    ? { label: listenState === 'transcribing' ? 'One moment…' : 'Mic on', tone: 'voice' }
-    : activeTask?.status === 'awaiting_approval'
-      ? { label: 'Waiting on you', tone: 'approval' }
-      : activeTask
-        ? { label: 'Working', tone: 'working' }
-        : { label: 'Standing by', tone: 'ready' };
+  const camera = cameraStatus(friday);
+  const presence = camera
+    ? { label: camera, tone: 'working' }
+    : listeningActive
+      ? { label: listenState === 'transcribing' ? 'One moment…' : 'Mic on', tone: 'voice' }
+      : activeTask?.status === 'awaiting_approval'
+        ? { label: 'Waiting on you', tone: 'approval' }
+        : activeTask
+          ? { label: 'Working', tone: 'working' }
+          : { label: 'Standing by', tone: 'ready' };
 
   const composer = (
     <footer className="composer-area">

@@ -37,11 +37,11 @@ describe('production runtime extension staging', () => {
         const tools = []; let guard;
         install({ registerTool(tool) { tools.push(tool.name); }, on(event, handler) { assert.equal(event, 'tool_call'); guard = handler; } });
         if (role === 'parent') {
-          for (const name of ['interact', 'session_start', 'session_actions', 'session_list', 'session_read', 'session_search', 'session_update', 'session_stop', 'stop_all', 'desktop_observe', 'desktop_clear']) assert(tools.includes(name), name);
+          for (const name of ['interact', 'session_start', 'session_actions', 'session_list', 'session_read', 'session_search', 'session_update', 'session_stop', 'stop_all', 'camera_snapshot', 'desktop_observe', 'desktop_clear']) assert(tools.includes(name), name);
           for (const name of ['task_report', 'speak', 'show_text', 'set_presentation', 'desktop_draw']) assert(!tools.includes(name), name);
         } else {
           assert.deepEqual(tools, ['task_report']);
-          for (const toolName of ['interact', 'session_start', 'session_actions', 'desktop_observe'])
+          for (const toolName of ['interact', 'session_start', 'session_actions', 'camera_snapshot', 'desktop_observe'])
             assert.equal((await guard({ toolName, input: {} }, {})).block, true);
         }
         let confirmations = 0;

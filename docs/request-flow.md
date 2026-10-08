@@ -2,6 +2,8 @@
 
 Friday has one foreground parent Pi session. Each user request is a turn in that session. Independent background work gets a separate child Pi session. The host handles process lifecycle, local speech, persistence, and window state; it is not another LLM.
 
+With **Camera snapshots** enabled in Settings, the parent can also call `camera_snapshot` when asked to look at the user or physical objects. The host opens the Linux webcam through FFmpeg, captures one JPEG, closes the process, and returns an image block to Pi. The UI shows camera activity until the process closes. Stop, supersession, disabling access, request completion/failure, disconnect, and shutdown cancel pending captures; background children cannot call the tool. Each request permits at most one attempt. Camera photos go to the configured model and remain in Pi history; they may be re-sent on later turns even with camera access off. New conversation removes them from the active context, not saved history. Camera shutdown waits are bounded so a wedged device cannot block Stop, new requests, or Quit; the indicator and capture lock remain until actual close. They do not replace the desktop observation used for drawing.
+
 ```mermaid
 flowchart TD
     userRequest["You speak a request"] -->|"Echo-cancelled mic · optional LiveKit room"| localStt["Transcription · Groq Whisper or local Parakeet (batch)"]

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import {
   activeStatuses,
+  cameraStatus,
   type FridayState,
   type ListeningState,
   type SurfaceLayout,
@@ -119,6 +120,8 @@ function taskPreview(text: string) {
 
 export function FridayPresence(props: Props) {
   const { state, task, listening, speaking } = props;
+  const camera = cameraStatus(state);
+  const cameraActive = Boolean(camera);
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
@@ -183,7 +186,13 @@ export function FridayPresence(props: Props) {
   );
   const running = children.filter((s) => s.status === 'running');
   const canStop = Boolean(
-    busy || speaking || props.controlling || props.guiding || running.length || listening === 'transcribing',
+    cameraActive ||
+    busy ||
+    speaking ||
+    props.controlling ||
+    props.guiding ||
+    running.length ||
+    listening === 'transcribing',
   );
   const attention = visible.filter((s) => ['needs_input', 'failed', 'interrupted'].includes(s.status)).length;
   const selected = children.find((s) => s.id === props.selectedChildId);
@@ -204,10 +213,17 @@ export function FridayPresence(props: Props) {
   );
   // The user's words take the status line until Friday answers or needs something.
   const userWords =
-    props.transcript?.text.trim() && !props.controlling && !typing && !approvals.length && !props.guiding && !speaking
+    props.transcript?.text.trim() &&
+    !cameraActive &&
+    !props.controlling &&
+    !typing &&
+    !approvals.length &&
+    !props.guiding &&
+    !speaking
       ? props.transcript
       : undefined;
   const engaged = Boolean(
+    cameraActive ||
     props.controlling ||
     busy ||
     speaking ||
@@ -242,31 +258,33 @@ export function FridayPresence(props: Props) {
       : engaged
         ? 'bar'
         : 'quiet';
-  const status = props.controlling
-    ? 'Controlling your computer · Esc twice to stop'
-    : typing
-      ? 'Type your request…'
-      : approvals.length
-        ? 'Needs your approval'
-        : props.guiding
-          ? 'Guiding you'
-          : speaking
-            ? 'Speaking…'
-            : userWords
-              ? spokenLine(userWords.text, userWords.final)
-              : listening === 'starting'
-                ? 'Opening microphone…'
-                : listening === 'transcribing'
-                  ? 'One moment…'
-                  : busy
-                    ? 'Working on it…'
-                    : listening === 'armed'
-                      ? 'Listening…'
-                      : listening === 'error'
-                        ? 'Check your microphone'
-                        : !props.micEnabled
-                          ? 'Microphone off'
-                          : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+  const status = camera
+    ? camera
+    : props.controlling
+      ? 'Controlling your computer · Esc twice to stop'
+      : typing
+        ? 'Type your request…'
+        : approvals.length
+          ? 'Needs your approval'
+          : props.guiding
+            ? 'Guiding you'
+            : speaking
+              ? 'Speaking…'
+              : userWords
+                ? spokenLine(userWords.text, userWords.final)
+                : listening === 'starting'
+                  ? 'Opening microphone…'
+                  : listening === 'transcribing'
+                    ? 'One moment…'
+                    : busy
+                      ? 'Working on it…'
+                      : listening === 'armed'
+                        ? 'Listening…'
+                        : listening === 'error'
+                          ? 'Check your microphone'
+                          : !props.micEnabled
+                            ? 'Microphone off'
+                            : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);

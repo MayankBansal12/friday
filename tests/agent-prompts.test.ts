@@ -7,6 +7,7 @@ describe('agent prompts', () => {
   it('teaches the parent its tools and when to use them', () => {
     for (const tool of [
       'desktop_observe',
+      'camera_snapshot',
       'draw_tool',
       'desktop_control',
       'session_actions',

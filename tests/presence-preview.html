@@ -42,6 +42,7 @@
         <option>quiet</option>
         <option>listening</option>
         <option>thinking</option>
+        <option>camera</option>
         <option>speaking</option>
         <option>guidance</option>
         <option>control</option>
@@ -75,6 +76,7 @@
         child('c', 'Organize the project notes'),
       ];
       const runtime = {
+        cameraActive: scenario === 'camera',
         parentId: 'parent',
         sessions:
           scenario === 'one'
@@ -254,7 +256,11 @@
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
-        getSettings: async () => ({ wakeWord: 'Friday' }),
+        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: false }),
+        updateSettings: async (next) => {
+          fixture.calls.push(['settings', next]);
+          return { wakeWord: 'Friday', ...next };
+        },
         desktopStatus: async () => ({ ready: true }),
         silence: noop,
         interrupt: async () => {
@@ -308,6 +314,8 @@
         },
         stop: async () => {
           fixture.calls.push(['stop']);
+          if (!fixture.deferCameraClose) runtime.cameraActive = false;
+          runtime.cameraClosing = runtime.cameraActive;
           fixture.guiding = false;
           runtime.presentation = { text: '', expanded: false, speaking: false };
           for (const t of tasks)

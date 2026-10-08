@@ -82,14 +82,26 @@ export interface PresentationState {
 }
 
 export interface FridayState {
+  /** True until the camera capture process has closed, including cancellation cleanup. */
+  cameraActive?: boolean;
+  /** The capture was cancelled and is still releasing the device. */
+  cameraClosing?: boolean;
   parentId: string;
   sessions: SessionRecord[];
   presentation: PresentationState;
 }
 
+/** Camera indicator text, shown until every capture process has released the device. */
+export function cameraStatus(state?: Pick<FridayState, 'cameraActive' | 'cameraClosing'>) {
+  if (!state?.cameraActive) return undefined;
+  return state.cameraClosing ? 'Camera on · Waiting to close…' : 'Camera on · Taking one photo…';
+}
+
 export type SurfaceLayout = 'orb' | 'tasks' | 'quiet' | 'bar' | 'panel' | 'details';
 
 export interface BuddySettings {
+  /** Opt in to on-demand webcam photos sent to the configured model. */
+  cameraEnabled?: boolean;
   defaultCwd: string;
   launchAtLogin: boolean;
   wakeWord: string;

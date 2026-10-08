@@ -68,12 +68,13 @@ async function fixture(
   );
   services.push(service);
   await service.init();
-  async function tool(index: number, path: string, data = {}) {
+  async function tool(index: number, path: string, data = {}, signal?: AbortSignal) {
     const env = (invocations[index][2] as { env: Record<string, string> }).env;
     const response = await fetch(`${env.LINUX_BUDDY_RUNTIME_URL}${path}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${env.LINUX_BUDDY_RUNTIME_TOKEN}`, 'content-type': 'application/json' },
       body: JSON.stringify(data),
+      signal,
     });
     return { status: response.status, data: await response.json() };
   }
@@ -81,6 +82,209 @@ async function fixture(
 }
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+describe('camera snapshot tool', () => {
+  const photo = { data: '/9j/2Q==', mimeType: 'image/jpeg' as const, capturedAt: 1000 };
+  it('accepts a new turn during settled camera cleanup without letting the old finalization overwrite it', async () => {
+    let release: (value: typeof photo) => void = () => {};
+    const camera = {
+      capture: vi.fn(
+        () =>
+          new Promise<typeof photo>((resolve) => {
+            release = resolve;
+          }),
+      ),
+    };
+    const revokeRun = vi.fn();
+    const { service, children, tool } = await fixture({ camera, cameraStopGraceMs: 1000 }, { revokeRun });
+    await service.updateSettings({ cameraEnabled: true });
+    const first = await service.submit('Look at me');
+    const disconnect = new AbortController();
+    const pending = tool(0, '/tools/camera_snapshot', {}, disconnect.signal).catch(() => undefined);
+    await vi.waitFor(() => expect(camera.capture).toHaveBeenCalledOnce());
+    disconnect.abort();
+    await vi.waitFor(() => expect(service.state().cameraClosing).toBe(true));
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'The camera is still closing.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await vi.waitFor(() => expect(service.list().find((task) => task.id === first.id)?.status).toBe('completed'));
+    const next = await service.submit('Hello again');
+    expect(next.status).toBe('thinking');
+    expect(children).toHaveLength(1);
+    await tool(0, '/tools/interact', { actions: [{ tool: 'show_text_tool', args: { text: 'New reply' } }] });
+    release(photo);
+    await pending;
+    await vi.waitFor(() => expect(service.state().cameraActive).toBe(false));
+    await settle();
+    expect(service.state().presentation).toMatchObject({ taskId: next.id, text: 'New reply' });
+    expect(service.state().sessions.find((session) => session.id === next.conversationId)).toMatchObject({
+      latestTaskId: next.id,
+      status: 'running',
+    });
+    expect(revokeRun.mock.calls).toEqual([[first.id, true]]);
+    // A second tool call proves the old finalization didn't clear the reused worker's task.
+    expect((await tool(0, '/tools/session_list')).status).toBe(200);
+  });
+  it('keeps processing the next turn while a settled turn waits for a wedged camera', async () => {
+    let release: (value: typeof photo) => void = () => {};
+    const camera = {
+      capture: vi.fn(
+        () =>
+          new Promise<typeof photo>((resolve) => {
+            release = resolve;
+          }),
+      ),
+    };
+    const { service, children, tool } = await fixture({ camera, cameraStopGraceMs: 60_000 });
+    await service.updateSettings({ cameraEnabled: true });
+    const first = await service.submit('Look at me');
+    const disconnect = new AbortController();
+    const pending = tool(0, '/tools/camera_snapshot', {}, disconnect.signal).catch(() => undefined);
+    await vi.waitFor(() => expect(camera.capture).toHaveBeenCalledOnce());
+    disconnect.abort();
+    await vi.waitFor(() => expect(service.state().cameraClosing).toBe(true));
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'The camera is unavailable.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await vi.waitFor(() => expect(service.list().find((task) => task.id === first.id)?.status).toBe('completed'));
+    const next = await service.submit('Hello again');
+    children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Hi.' }] });
+    children[0].rpc({ type: 'agent_settled' });
+    await vi.waitFor(() => expect(service.list().find((task) => task.id === next.id)?.status).toBe('completed'));
+    expect(service.state()).toMatchObject({ cameraActive: true, cameraClosing: true });
+    release(photo);
+    await pending;
+    await vi.waitFor(() => expect(service.state().cameraActive).toBe(false));
+  });
+  it('defaults off and restricts access to active parent requests with no tool arguments', async () => {
+    const camera = { capture: vi.fn(async () => photo) };
+    const { service, tool, invocations } = await fixture({ camera });
+    await service.submit('Look at me');
+    expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('Camera access is off');
+    expect(camera.capture).not.toHaveBeenCalled();
+    await service.updateSettings({ cameraEnabled: true });
+    expect((await tool(0, '/tools/camera_snapshot', { device: '/dev/video2' })).status).toBe(400);
+    await service.startChild('Research', 'Find an answer');
+    expect((await tool(1, '/tools/camera_snapshot')).data.error).toContain('parent session');
+    expect(camera.capture).not.toHaveBeenCalled();
+    expect((invocations[0][1] as string[]).join(' ')).toContain('camera_snapshot');
+    expect((invocations[1][1] as string[]).join(' ')).not.toContain('camera_snapshot');
+    expect(await tool(0, '/tools/camera_snapshot')).toEqual({ status: 200, data: photo });
+    expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('Only one');
+    expect(camera.capture).toHaveBeenCalledOnce();
+    await service.stop();
+    expect((await tool(0, '/tools/camera_snapshot')).status).toBe(401);
+  });
+
+  it.each(['stop', 'replace', 'disable', 'shutdown', 'disconnect', 'complete', 'fail', 'conversation'])(
+    'cancels the capture on %s and clears the camera indicator',
+    async (action) => {
+      let signal: AbortSignal | undefined;
+      const camera = {
+        capture: vi.fn((input: AbortSignal) => {
+          signal = input;
+          return new Promise<typeof photo>((_resolve, reject) => {
+            input.addEventListener('abort', () => reject(new Error('Camera snapshot cancelled.')), { once: true });
+          });
+        }),
+      };
+      const { service, tool, children } = await fixture({ camera });
+      await service.updateSettings({ cameraEnabled: true });
+      await service.submit('Look at me');
+      const disconnect = new AbortController();
+      const pending = tool(0, '/tools/camera_snapshot', {}, disconnect.signal).catch(() => ({ status: 0, data: {} }));
+      await vi.waitFor(() => expect(camera.capture).toHaveBeenCalledOnce());
+      expect(service.state().cameraActive).toBe(true);
+      expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('already in progress');
+      if (action === 'stop') await service.stop();
+      if (action === 'replace') await service.submit('Never mind');
+      if (action === 'disable') await service.updateSettings({ cameraEnabled: false });
+      if (action === 'shutdown') await service.shutdown();
+      if (action === 'disconnect') disconnect.abort();
+      if (action === 'complete') {
+        children[0].rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Done' }] });
+        children[0].rpc({ type: 'agent_settled' });
+      }
+      if (action === 'fail') children[0].finish(1);
+      if (action === 'conversation') await service.newConversation();
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      expect((await pending).status).not.toBe(200);
+      expect(service.state().cameraActive).toBe(false);
+    },
+  );
+
+  it.each(['disable', 'stop', 'replace'])(
+    'keeps the indicator on until %s releases the camera, and discards a late photo',
+    async (action) => {
+      let release: (value: typeof photo) => void = () => {};
+      const camera = {
+        capture: vi.fn(
+          () =>
+            new Promise<typeof photo>((resolve) => {
+              release = resolve;
+            }),
+        ),
+      };
+      const { service, tool } = await fixture({ camera });
+      await service.updateSettings({ cameraEnabled: true });
+      await service.submit('Look at me');
+      const pending = tool(0, '/tools/camera_snapshot');
+      await vi.waitFor(() => expect(camera.capture).toHaveBeenCalledOnce());
+      const disabled =
+        action === 'disable'
+          ? service.updateSettings({ cameraEnabled: false })
+          : action === 'stop'
+            ? service.stop()
+            : service.submit('Never mind');
+      expect(service.state().cameraActive).toBe(true);
+      await vi.waitFor(() => expect(service.state().cameraClosing).toBe(true));
+      release(photo);
+      await disabled;
+      expect((await pending).data.error).toContain('cancelled');
+      expect(service.state().cameraActive).toBe(false);
+    },
+  );
+
+  it.each(['stop', 'replace', 'disable', 'shutdown'])(
+    'bounds %s when the camera never closes, without falsely turning off its indicator',
+    async (action) => {
+      let release: (value: typeof photo) => void = () => {};
+      const camera = {
+        capture: vi.fn(
+          () =>
+            new Promise<typeof photo>((resolve) => {
+              release = resolve;
+            }),
+        ),
+      };
+      const { service, tool } = await fixture({ camera, cameraStopGraceMs: 20 });
+      await service.updateSettings({ cameraEnabled: true });
+      await service.submit('Look at me');
+      const pending = tool(0, '/tools/camera_snapshot').catch(() => ({ status: 0, data: {} }));
+      await vi.waitFor(() => expect(camera.capture).toHaveBeenCalledOnce());
+      if (action === 'stop') await service.stop();
+      if (action === 'replace') await service.submit('Never mind');
+      if (action === 'disable') await service.updateSettings({ cameraEnabled: false });
+      if (action === 'shutdown') await service.shutdown();
+      expect(service.state()).toMatchObject({ cameraActive: true, cameraClosing: true });
+      if (action !== 'shutdown') await expect(service.submit('Hello')).resolves.toMatchObject({ status: 'thinking' });
+      // Simulate the device eventually recovering. The old pixels must still be discarded.
+      release(photo);
+      expect((await pending).status).not.toBe(200);
+      await vi.waitFor(() => expect(service.state().cameraActive).toBe(false));
+    },
+  );
+
+  it('allows a retake only on a new request, including after a failed capture', async () => {
+    const camera = { capture: vi.fn().mockRejectedValueOnce(new Error('Camera is busy')).mockResolvedValue(photo) };
+    const { service, tool } = await fixture({ camera });
+    await service.updateSettings({ cameraEnabled: true });
+    await service.submit('Look at me');
+    expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('busy');
+    expect((await tool(0, '/tools/camera_snapshot')).data.error).toContain('Only one');
+    await service.submit('Try again');
+    expect((await tool(1, '/tools/camera_snapshot')).status).toBe(200);
+    expect(camera.capture).toHaveBeenCalledTimes(2);
+  });
+});
 
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.shutdown()));

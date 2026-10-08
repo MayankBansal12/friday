@@ -107,6 +107,12 @@ This is utterance-based recognition, not streaming: the existing recorder submit
 
 ## Desktop integration and permissions
 
+Enable **Camera snapshots** in Settings, then ask “Look at me” or “What am I holding?” Friday's parent session can call `camera_snapshot` to open the webcam briefly, send one photo to the selected vision-capable model, and close the camera before replying. There is at most one snapshot attempt per request; ask again for a retake. Friday reveals its window without taking focus and shows **Camera on · Taking one photo…** in the notch and tray during capture. Stop, a replacement request, disabling camera access, or quitting Friday cancels the capture and releases the device. Background children cannot use this tool.
+
+Camera access defaults off. This is an on-demand photo, with no live video or background monitoring. Photos are sent to your configured model and retained in Pi's local conversation history, like screenshots; no separate photo file is created. Earlier photos may be sent again with later turns in that conversation, even after camera access is turned off. **New conversation** stops using the old context; it does not delete the saved history. The setting gates Friday's camera tool, not arbitrary shell access. Camera photos cannot be used as desktop drawing observations.
+
+Linux capture uses the existing `ffmpeg` dependency with Video4Linux2 (`/dev/video0` by default; override with `LINUX_BUDDY_CAMERA_DEVICE=/dev/video2` or a stable `/dev/v4l/by-id/…` / `/dev/v4l/by-path/…` device). Capture allows a brief exposure warmup, scales to at most 1280×960, and times out after ten seconds. Missing, busy, or inaccessible devices return a setup message. If a wedged device will not close after cancellation, Friday keeps **Camera on · Waiting to close…** visible and blocks further captures, while Stop, new requests, and Quit remain available. Reconnect the webcam if its light stays on. See [FFmpeg's Video4Linux2 documentation](https://ffmpeg.org/ffmpeg-devices.html#video4linux2_002c-v4l2).
+
 The parent Pi session exposes `desktop_observe`, `interact` (with `draw_tool`), `desktop_clear`, and `desktop_control`. Children cannot call screen or presentation tools. Observations carry fresh IDs and a 1440px JPEG; the host validates and maps screenshot coordinates to the native display. GNOME renders consistent sketch-style annotations and acknowledges drawing only after painting. Captures exclude overlays without erasing valid drawings. Visible overlays inhibit fullscreen display bypass and release that hold when hidden.
 
 `desktop_control` runs one bounded Codex task within the parent's existing desktop lease. It supports clicks, double clicks, pointer movement, dragging, scrolling, text, key combinations, and drawing. Input batches consume one fresh observation and automatically return another screenshot. Drawings use a separate call after observing the changed screen. The operator has no shell, environment, browser, MCP, or plugin tools. Ordinary shell/file tasks stay with the parent because they are faster there.
@@ -179,6 +185,8 @@ Manual renderer harnesses drive the real React app in `tests/presence-preview.ht
 | `node tests/native/presence-speech.mjs`   | Playback, engaged listening while speaking, delayed replay races                             |
 | `node tests/native/presence-review.mjs`   | Regression probes from the independent UX review                                             |
 | `node tests/native/interact-flow.mjs`     | Barge-in on partials, voice/typed corrections while busy, echo drop, late-transcript fencing |
+| `node tests/native/camera.mjs`            | Real FFmpeg single-photo capture and release using synthetic video (build desktop first)     |
+| `node tests/native/camera-ui.mjs`         | Camera status in notch/workspace, Stop, and Settings opt-in/out (CDP 9338, Vite 5178)        |
 | `node tests/native/notch-audio.mjs`       | Synthetic speech through real local Parakeet and the React app                               |
 | `node tests/native/livekit-transport.mjs` | Compiled main `LiveKitVoice` against a local server: synthetic mic in, voice out, abort      |
 | `node tests/native/livekit-renderer.mjs`  | Real browser LiveKit SDK and `LiveKitLink` against main `LiveKitVoice` (CDP 9335)            |

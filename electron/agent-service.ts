@@ -25,10 +25,11 @@ import type { Utterance, VoiceOutput } from './speech-output.js';
 import { validateSpeech } from './speech-policy.js';
 import { validSettings } from './validation.js';
 import { debugEnabled, debugId, debugLog } from './debug-log.js';
+import type { CameraSnapshot } from './camera.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
+const parentTools = `${fileTools},interact,camera_snapshot,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -65,6 +66,9 @@ interface Worker {
   model: string;
 }
 export interface AgentServiceOptions {
+  camera?: { capture(signal: AbortSignal): Promise<CameraSnapshot> };
+  /** Bound control-flow cleanup even if a wedged camera never closes after SIGKILL. */
+  cameraStopGraceMs?: number;
   spawn?: typeof spawn;
   persistDebounceMs?: number;
   terminateGraceMs?: number;
@@ -96,6 +100,7 @@ function shortText(value: unknown, name: string, max = 8000) {
   return value.trim();
 }
 function toolTitle(name: string) {
+  if (name === 'camera_snapshot') return 'Taking a camera photo';
   if (name === 'desktop_observe') return 'Looking at the screen';
   if (name === 'interact') return 'Replying';
   if (name === 'session_start') return 'Starting background work';
@@ -123,6 +128,8 @@ export class AgentService extends EventEmitter {
   /** Host-only identity of each interaction's requested effects, for retry deduplication. */
   private fingerprints = new Map<string, string>();
   private interactionSequence = 0;
+  private cameraCapture?: { taskId: string; abort: AbortController; done: Promise<CameraSnapshot> };
+  private cameraAttempts = new WeakSet<TaskRecord>();
   private server = createServer((request, response) => void this.handle(request, response));
   private runtimeUrl = '';
   private readonly spawnProcess: typeof spawn;
@@ -218,7 +225,13 @@ export class AgentService extends EventEmitter {
     return this.tasks.map((t) => structuredClone(t)).sort((a, b) => b.createdAt - a.createdAt);
   }
   state(): FridayState {
-    return structuredClone({ parentId: this.parentId, sessions: this.sessions, presentation: this.presentation });
+    return structuredClone({
+      parentId: this.parentId,
+      sessions: this.sessions,
+      presentation: this.presentation,
+      cameraActive: Boolean(this.cameraCapture),
+      cameraClosing: this.cameraCapture?.abort.signal.aborted === true,
+    });
   }
   getSettings() {
     return { ...this.settings };
@@ -226,6 +239,7 @@ export class AgentService extends EventEmitter {
   async updateSettings(next: Partial<BuddySettings>) {
     const old = this.settings;
     this.settings = { ...old, ...next };
+    if (next.cameraEnabled === false) await this.stopCamera();
     try {
       await this.persist();
     } catch (error) {
@@ -387,6 +401,7 @@ export class AgentService extends EventEmitter {
   }
   async stop() {
     this.actionGeneration++;
+    this.cameraCapture?.abort.abort();
     this.silence();
     this.presentation = { text: '', expanded: false, speaking: false };
     this.publish();
@@ -491,6 +506,7 @@ export class AgentService extends EventEmitter {
   async shutdown() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    await this.stopCamera();
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = undefined;
     this.silence();
@@ -894,6 +910,9 @@ export class AgentService extends EventEmitter {
       }
       worker.task = undefined;
       this.clearApprovals(worker);
+      // Ownership is final before any await, so a new request can reuse this worker. Camera cleanup
+      // must not hold this worker's event queue: a wedged device keeps its own indicator instead.
+      if (worker.session.role === 'parent') void this.stopCamera(task.id);
       await this.changed(task);
       if (worker.session.role === 'child') await this.retire(worker);
     }
@@ -960,6 +979,7 @@ export class AgentService extends EventEmitter {
   }
   private async retire(worker: Worker) {
     if (this.workers.get(worker.session.id) === worker) this.workers.delete(worker.session.id);
+    if (worker.task) await this.stopCamera(worker.task.id);
     this.clearApprovals(worker);
     if (worker.child.exitCode !== null || worker.child.signalCode !== null) return;
     await new Promise<void>((done) => {
@@ -1328,6 +1348,79 @@ export class AgentService extends EventEmitter {
     });
   }
 
+  private async stopCamera(taskId?: string) {
+    const capture = this.cameraCapture;
+    if (!capture || (taskId && capture.taskId !== taskId)) return;
+    capture.abort.abort();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        capture.done.catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.options.cameraStopGraceMs ?? 2000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    // Keep the capture lock and indicator until its actual close, even when control flow times out.
+  }
+
+  private async snapshot(worker: Worker, task: TaskRecord, response: ServerResponse) {
+    if (this.settings.cameraEnabled !== true)
+      throw new Error('Camera access is off. Enable Camera snapshots in Friday Settings, then ask again.');
+    if (!this.options.camera) throw new Error('Camera capture is unavailable.');
+    if (this.cameraCapture)
+      throw new Error(
+        this.cameraCapture.abort.signal.aborted
+          ? 'The previous camera capture is still closing. Reconnect the webcam if its light stays on.'
+          : 'A camera snapshot is already in progress.',
+      );
+    if (this.cameraAttempts.has(task))
+      throw new Error('Only one camera snapshot attempt is allowed per request. Ask again to retake.');
+    if (this.shuttingDown || task.status === 'awaiting_approval') throw new Error('Request is not active.');
+    const abort = new AbortController();
+    const disconnected = () => {
+      if (!response.writableEnded) abort.abort();
+    };
+    response.on('close', disconnected);
+    this.cameraAttempts.add(task);
+    if (response.destroyed || response.socket?.destroyed) {
+      response.off('close', disconnected);
+      throw new Error('Camera snapshot cancelled.');
+    }
+    const closing = () => this.publish();
+    abort.signal.addEventListener('abort', closing, { once: true });
+    const capture = {
+      taskId: task.id,
+      abort,
+      done: Promise.resolve().then(() => {
+        if (abort.signal.aborted) throw new Error('Camera snapshot cancelled.');
+        return this.options.camera!.capture(abort.signal);
+      }),
+    };
+    this.cameraCapture = capture;
+    this.publish();
+    try {
+      const photo = await capture.done;
+      if (
+        abort.signal.aborted ||
+        this.shuttingDown ||
+        this.settings.cameraEnabled !== true ||
+        worker.task !== task ||
+        terminal.has(task.status) ||
+        this.workers.get(worker.session.id) !== worker
+      )
+        throw new Error('Camera snapshot cancelled.');
+      return photo;
+    } finally {
+      response.off('close', disconnected);
+      abort.signal.removeEventListener('abort', closing);
+      if (this.cameraCapture === capture) this.cameraCapture = undefined;
+      this.publish();
+    }
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const reply = (status: number, data: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -1382,6 +1475,10 @@ export class AgentService extends EventEmitter {
       if (worker.session.role !== 'parent') throw new Error('This tool belongs to the parent session');
       let result: unknown;
       switch (request.url) {
+        case '/tools/camera_snapshot':
+          if (Object.keys(data).length) throw new Error('Camera snapshots take no arguments.');
+          result = await this.snapshot(worker, task, response);
+          break;
         case '/tools/session_actions':
           result = await this.sessionActions(worker, task, data);
           break;
