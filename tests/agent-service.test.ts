@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentService } from '../electron/agent-service.js';
 import { DesktopError } from '../electron/desktop-status.js';
 import { TaskStore } from '../electron/store.js';
-import type { BuddySettings } from '../electron/types.js';
+import type { BuddySettings, CameraState } from '../electron/types.js';
 import { FakeVoice } from './fake-voice.js';
 
 const dirs: string[] = [];
@@ -68,12 +68,13 @@ async function fixture(
   );
   services.push(service);
   await service.init();
-  async function tool(index: number, path: string, data = {}) {
+  async function tool(index: number, path: string, data = {}, signal?: AbortSignal) {
     const env = (invocations[index][2] as { env: Record<string, string> }).env;
     const response = await fetch(`${env.LINUX_BUDDY_RUNTIME_URL}${path}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${env.LINUX_BUDDY_RUNTIME_TOKEN}`, 'content-type': 'application/json' },
       body: JSON.stringify(data),
+      signal,
     });
     return { status: response.status, data: await response.json() };
   }
@@ -81,6 +82,268 @@ async function fixture(
 }
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+class FakeCamera extends EventEmitter {
+  state: CameraState = 'off';
+  opens = 0;
+  closes = 0;
+  /** Simulates a wedged device whose processes never exit. */
+  wedged = false;
+  private clock = 1000;
+  frameGate?: Promise<void>;
+  private set(state: CameraState) {
+    this.state = state;
+    this.emit('state', state);
+  }
+  async open() {
+    if (this.state === 'live') return;
+    this.opens++;
+    this.set('opening');
+    await Promise.resolve();
+    this.set('live');
+  }
+  async frame(after: number, signal: AbortSignal) {
+    if (this.state !== 'live') throw new Error('The camera is off.');
+    await this.frameGate;
+    if (signal.aborted) throw new Error('Camera look cancelled.');
+    this.clock = Math.max(this.clock, after) + 1;
+    const frame = { data: Buffer.from([0xff, 0xd8, this.clock & 0xff, 0xff, 0xd9]), capturedAt: this.clock };
+    this.emit('frame', frame);
+    return frame;
+  }
+  async close() {
+    if (this.state === 'off') return;
+    this.closes++;
+    this.set('closing');
+    if (this.wedged) return new Promise<void>(() => {});
+    await Promise.resolve();
+    this.set('off');
+  }
+}
+
+describe('live camera tools', () => {
+  const finish = async (child: FakeChild, id: string, service: AgentService) => {
+    child.rpc({ type: 'agent_end', messages: [{ role: 'assistant', content: 'Done.' }] });
+    child.rpc({ type: 'agent_settled' });
+    await vi.waitFor(() => expect(service.list().find((task) => task.id === id)?.status).toBe('completed'));
+  };
+
+  it('defaults on, honors disabling, and restricts camera tools to active parent requests', async () => {
+    const camera = new FakeCamera();
+    const { service, tool, invocations } = await fixture({ camera });
+    expect(service.getSettings().cameraEnabled).toBe(true);
+    await service.updateSettings({ cameraEnabled: false });
+    await service.submit('Look at me');
+    expect((await tool(0, '/tools/camera_look')).data.error).toContain('Camera access is off');
+    await expect(service.cameraOn()).rejects.toThrow('Camera access is off');
+    expect(camera.opens).toBe(0);
+    await service.updateSettings({ cameraEnabled: true });
+    expect((await tool(0, '/tools/camera_look', { device: '/dev/video2' })).status).toBe(400);
+    expect((await tool(0, '/tools/camera_look', { seconds: 11 })).status).toBe(400);
+    expect((await tool(0, '/tools/camera_look', { seconds: '2' })).status).toBe(400);
+    await service.startChild('Research', 'Look things up');
+    expect((await tool(1, '/tools/camera_look')).data.error).toContain('parent session');
+    expect(camera.opens).toBe(0);
+    expect((invocations[0][1] as string[]).join(' ')).toContain('camera_look,camera_off');
+    expect((invocations[1][1] as string[]).join(' ')).not.toContain('camera_');
+  });
+
+  it('keeps the camera live across looks and requests, and tells Friday it is live', async () => {
+    const camera = new FakeCamera();
+    const frames: unknown[] = [];
+    const { service, tool, children } = await fixture({ camera });
+    service.on('camera-frame', (frame) => frames.push(frame));
+    const first = await service.submit('Can you see this cube?');
+    const look = await tool(0, '/tools/camera_look');
+    expect(look.status).toBe(200);
+    expect(look.data.frames).toHaveLength(1);
+    expect(Buffer.from(look.data.frames[0].data, 'base64').readUInt16BE(0)).toBe(0xffd8);
+    expect(service.state().camera).toBe('live');
+    expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    expect(camera.opens).toBe(1);
+    await finish(children[0], first.id, service);
+    expect(service.list().find((task) => task.id === first.id)?.cameraFrames).toBe(2);
+    expect(frames).toHaveLength(2);
+
+    children[0].stdin.read();
+    await service.submit('Check now');
+    expect(children[0].stdin.read()?.toString()).toContain('live: call camera_look');
+    expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    expect(camera.opens).toBe(1);
+  });
+
+  it('watches for the requested seconds with frames spread across that time', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.submit('Watch me turn it');
+    const started = Date.now();
+    const watching = tool(0, '/tools/camera_look', { seconds: 1 });
+    await vi.waitFor(() => expect(service.state().cameraActivity).toMatchObject({ kind: 'watching', seconds: 1 }));
+    const look = await watching;
+    expect(Date.now() - started).toBeGreaterThanOrEqual(950);
+    expect(service.state().cameraActivity).toMatchObject({ kind: 'looked', frames: 2 });
+    expect(look.data.frames).toHaveLength(2);
+    expect(look.data.frames[1].capturedAt).toBeGreaterThan(look.data.frames[0].capturedAt);
+  });
+
+  it('clears the looking indicator when a look fails, and forgets activity once the camera is off', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.submit('Look');
+    await tool(0, '/tools/camera_look');
+    expect(service.state().cameraActivity).toMatchObject({ kind: 'looked', frames: 1 });
+    camera.frame = async () => {
+      throw new Error('The camera stopped sending video.');
+    };
+    expect((await tool(0, '/tools/camera_look')).data.error).toContain('stopped sending video');
+    expect(service.state().cameraActivity).toBeUndefined();
+    await service.cameraOff();
+    expect(service.state()).toMatchObject({ camera: 'off', cameraActivity: undefined });
+  });
+
+  it('caps looks per request', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.submit('Look');
+    for (let i = 0; i < 23; i++) expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    // A watch near the cap is trimmed to the remaining allowance, never past it.
+    expect((await tool(0, '/tools/camera_look', { seconds: 1 })).data.frames).toHaveLength(1);
+    expect((await tool(0, '/tools/camera_look')).data.error).toContain('looked many times');
+  });
+
+  it('reports a camera that stops on its own, and clears the error when it turns on again', async () => {
+    const camera = new FakeCamera();
+    const { service } = await fixture({ camera });
+    await service.cameraOn();
+    camera.emit('failure', new Error('The camera stopped sending video.'));
+    await camera.close();
+    expect(service.state().cameraError).toMatchObject({ message: 'The camera stopped sending video.' });
+    await service.cameraOn();
+    expect(service.state().cameraError).toBeUndefined();
+  });
+
+  it('keeps the camera off while Friday controls the desktop', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.cameraOn();
+    await service.blockCamera('Friday is controlling your computer.');
+    expect(service.state().camera).toBe('off');
+    await service.submit('Look at me');
+    expect((await tool(0, '/tools/camera_look')).data.error).toContain('controlling your computer');
+    await service.blockCamera(undefined);
+    expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+  });
+
+  it('lets a replaced watch finish without clearing the newer watch narration', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.submit('Watch this');
+    const old = tool(0, '/tools/camera_look', { seconds: 1 });
+    await vi.waitFor(() => expect(service.state().cameraActivity?.kind).toBe('watching'));
+    await service.submit('No, watch this instead');
+    // Replacing a running request starts a fresh Pi session.
+    const newer = tool(1, '/tools/camera_look', { seconds: 2 });
+    await vi.waitFor(() => expect(service.state().cameraActivity).toMatchObject({ seconds: 2 }));
+    await old;
+    expect(service.state().cameraActivity).toMatchObject({ kind: 'watching', seconds: 2 });
+    expect((await newer).status).toBe(200);
+  });
+
+  it.each(['camera_off', 'button', 'stop', 'disable', 'conversation', 'shutdown'])(
+    'turns the camera off on %s',
+    async (action) => {
+      const camera = new FakeCamera();
+      const { service, tool } = await fixture({ camera });
+      await service.submit('Look at me');
+      await tool(0, '/tools/camera_look');
+      if (action === 'camera_off') expect((await tool(0, '/tools/camera_off')).data).toEqual({ camera: 'off' });
+      if (action === 'button') await service.cameraOff();
+      if (action === 'stop') await service.stop();
+      if (action === 'disable') await service.updateSettings({ cameraEnabled: false });
+      if (action === 'conversation') await service.newConversation();
+      if (action === 'shutdown') await service.shutdown();
+      await vi.waitFor(() => expect(service.state().camera).toBe('off'));
+      expect(camera.closes).toBe(1);
+    },
+  );
+
+  it('closes after idle time once no request is running', async () => {
+    const camera = new FakeCamera();
+    const { service, tool, children } = await fixture({ camera, cameraIdleMs: 40 });
+    const task = await service.submit('Look at me');
+    await tool(0, '/tools/camera_look');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(service.state().camera).toBe('live');
+    await finish(children[0], task.id, service);
+    await vi.waitFor(() => expect(service.state().camera).toBe('off'));
+  });
+
+  it('treats a request waiting for approval as idle', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera, cameraIdleMs: 40 });
+    const task = await service.submit('Look, then delete the file');
+    await tool(0, '/tools/camera_look');
+    (service as unknown as { tasks: { id: string; status: string }[] }).tasks.find((t) => t.id === task.id)!.status =
+      'awaiting_approval';
+    await vi.waitFor(() => expect(service.state().camera).toBe('off'));
+  });
+
+  it('asks the host to reveal the preview before every look', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    const reveal = vi.fn();
+    service.on('camera-look', reveal);
+    await service.submit('Look');
+    await tool(0, '/tools/camera_look');
+    await tool(0, '/tools/camera_look');
+    expect(reveal).toHaveBeenCalledTimes(2);
+  });
+
+  it('turns on from the camera button and lets Friday look without reopening', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.cameraOn();
+    expect(service.state().camera).toBe('live');
+    await service.submit('What do you see?');
+    expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    expect(camera.opens).toBe(1);
+  });
+
+  it('discards a look whose request was replaced, without closing the camera', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.cameraOn();
+    let release = () => {};
+    camera.frameGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await service.submit('Look at me');
+    const pending = tool(0, '/tools/camera_look');
+    await settle();
+    await service.submit('Never mind');
+    release();
+    expect((await pending).status).not.toBe(200);
+    expect(service.state().camera).toBe('live');
+  });
+
+  it.each(['stop', 'disable', 'shutdown'])(
+    'bounds %s when the camera never closes, without falsely turning off its indicator',
+    async (action) => {
+      const camera = new FakeCamera();
+      const { service } = await fixture({ camera, cameraStopGraceMs: 20 });
+      await service.cameraOn();
+      camera.wedged = true;
+      if (action === 'stop') await service.stop();
+      if (action === 'disable') await service.updateSettings({ cameraEnabled: false });
+      if (action === 'shutdown') await service.shutdown();
+      expect(service.state().camera).toBe('closing');
+      if (action === 'stop') {
+        await expect(service.submit('Hello')).resolves.toMatchObject({ status: 'thinking' });
+        await expect(service.cameraOn()).rejects.toThrow('still closing');
+      }
+    },
+  );
+});
 
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.shutdown()));
@@ -537,6 +800,7 @@ describe('parent and child runtime boundary', () => {
   });
   it('starts a fresh parent session on restart and keeps earlier sessions searchable', async () => {
     const { service, dir } = await fixture();
+    await service.updateSettings({ cameraEnabled: false });
     const parentId = service.state().parentId;
     await service.submit('Delegate');
     const child = await service.startChild('Long job', 'Keep going');
@@ -546,6 +810,7 @@ describe('parent and child runtime boundary', () => {
     });
     services.push(restored);
     await restored.init();
+    expect(restored.getSettings().cameraEnabled).toBe(false);
     expect(restored.state().parentId).not.toBe(parentId);
     const previous = restored.state().sessions.find((s) => s.id === parentId);
     expect(previous?.role).toBe('parent');

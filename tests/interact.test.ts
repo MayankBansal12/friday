@@ -164,6 +164,18 @@ describe('interact validation', () => {
 });
 
 describe('interact execution', () => {
+  it('keeps shown text on the record for the transcript without echoing it to the model', async () => {
+    const h = harness();
+    const ix = record();
+    const result = await executeInteract(plan({ actions: [show('Turn the right face up.')] }), ix, h.runtime);
+    expect(ix.actions[0]).toMatchObject({
+      tool: 'show_text_tool',
+      status: 'completed',
+      text: 'Turn the right face up.',
+    });
+    expect(result.actions[0]).toEqual({ tool: 'show_text_tool', status: 'completed' });
+  });
+
   it('parallel: text and drawing start promptly without waiting for voice audio', async () => {
     const h = harness({ syncWaitMs: 30 });
     const pending = executeInteract(plan({ actions: [speak(), draw(), show()] }), record(), h.runtime);

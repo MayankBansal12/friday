@@ -64,9 +64,14 @@ export function validSettings(value: unknown): Partial<BuddySettings> {
     'autoSpeak',
     'speakTypedReplies',
     'notchOffset',
+    'cameraEnabled',
   ]);
   if (Object.keys(input).some((key) => !allowed.has(key as keyof BuddySettings))) throw new Error('Unknown setting.');
   const result: Partial<BuddySettings> = {};
+  if ('cameraEnabled' in input) {
+    if (typeof input.cameraEnabled !== 'boolean') throw new Error('Camera access must be on or off.');
+    result.cameraEnabled = input.cameraEnabled;
+  }
   if ('autoSpeak' in input) {
     if (typeof input.autoSpeak !== 'boolean') throw new Error('Spoken replies must be on or off.');
     result.autoSpeak = input.autoSpeak;

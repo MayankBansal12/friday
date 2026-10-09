@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import {
   activeStatuses,
+  cameraStatus,
   type FridayState,
   type ListeningState,
   type SurfaceLayout,
@@ -26,6 +27,11 @@ import {
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
+import { CameraStage } from './CameraStage';
+import { useCameraLine } from './useCameraLine';
+
+/** The camera panel never grows past the screen; Friday's window sits 5px below the top panel. */
+const cameraMax = Math.min(690, window.screen.availHeight - 40);
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -119,6 +125,12 @@ function taskPreview(text: string) {
 
 export function FridayPresence(props: Props) {
   const { state, task, listening, speaking } = props;
+  const cameraOn = Boolean(cameraStatus(state));
+  const cameraLine = useCameraLine(state);
+  // Starting, looking, watching, and closing lead the status line; a finished look yields to speech.
+  const cameraNow =
+    cameraLine && !(state?.camera === 'live' && state.cameraActivity?.kind === 'looked') ? cameraLine : undefined;
+  const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
@@ -183,31 +195,46 @@ export function FridayPresence(props: Props) {
   );
   const running = children.filter((s) => s.status === 'running');
   const canStop = Boolean(
-    busy || speaking || props.controlling || props.guiding || running.length || listening === 'transcribing',
+    cameraChanging ||
+    busy ||
+    speaking ||
+    props.controlling ||
+    props.guiding ||
+    running.length ||
+    listening === 'transcribing',
   );
   const attention = visible.filter((s) => ['needs_input', 'failed', 'interrupted'].includes(s.status)).length;
   const selected = children.find((s) => s.id === props.selectedChildId);
   const detail = props.error || task?.error || state?.presentation.text || '';
   const contentKey = `${state?.presentation.taskId ?? ''}:${detail}`;
+  // A camera that stopped on its own opens the panel like a reply, so the reason is seen, not hovered for.
+  const cameraFailed = Boolean(props.error && props.error === state?.cameraError?.message);
   useEffect(() => {
-    if (!state?.presentation.expanded || !detail || dismissed === contentKey) return;
+    if (!(state?.presentation.expanded || cameraFailed) || !detail || dismissed === contentKey) return;
     const opening = setTimeout(() => setAutoOpen(true), 0);
     const timer = setTimeout(() => setAutoOpen(false), 15_000);
     return () => {
       clearTimeout(opening);
       clearTimeout(timer);
     };
-  }, [contentKey, state?.presentation.expanded, detail, dismissed]);
+  }, [contentKey, state?.presentation.expanded, cameraFailed, detail, dismissed]);
   const approvals = props.tasks.filter((t) => t.approval);
   const important = Boolean(
     approvals.length || ((props.error || task?.error || state?.presentation.expanded) && dismissed !== contentKey),
   );
   // The user's words take the status line until Friday answers or needs something.
   const userWords =
-    props.transcript?.text.trim() && !props.controlling && !typing && !approvals.length && !props.guiding && !speaking
+    props.transcript?.text.trim() &&
+    !cameraNow &&
+    !props.controlling &&
+    !typing &&
+    !approvals.length &&
+    !props.guiding &&
+    !speaking
       ? props.transcript
       : undefined;
   const engaged = Boolean(
+    cameraOn ||
     props.controlling ||
     busy ||
     speaking ||
@@ -219,7 +246,9 @@ export function FridayPresence(props: Props) {
     userWords,
   );
   const background = !engaged && visible.length > 0;
-  const expanded = !props.controlling && !background && (typing || hovered || (autoOpen && dismissed !== contentKey));
+  // A live camera keeps the panel open: its video stays on screen for as long as the camera is on.
+  const expanded =
+    !props.controlling && !background && (cameraOn || typing || hovered || (autoOpen && dismissed !== contentKey));
   const conversation = props.tasks
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -242,31 +271,37 @@ export function FridayPresence(props: Props) {
       : engaged
         ? 'bar'
         : 'quiet';
-  const status = props.controlling
-    ? 'Controlling your computer · Esc twice to stop'
-    : typing
-      ? 'Type your request…'
-      : approvals.length
-        ? 'Needs your approval'
-        : props.guiding
-          ? 'Guiding you'
-          : speaking
-            ? 'Speaking…'
-            : userWords
-              ? spokenLine(userWords.text, userWords.final)
-              : listening === 'starting'
-                ? 'Opening microphone…'
-                : listening === 'transcribing'
-                  ? 'One moment…'
-                  : busy
-                    ? 'Working on it…'
-                    : listening === 'armed'
-                      ? 'Listening…'
-                      : listening === 'error'
-                        ? 'Check your microphone'
-                        : !props.micEnabled
-                          ? 'Microphone off'
-                          : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+  const status = cameraNow
+    ? cameraNow
+    : props.controlling
+      ? 'Controlling your computer · Esc twice to stop'
+      : typing
+        ? 'Type your request…'
+        : approvals.length
+          ? 'Needs your approval'
+          : props.guiding
+            ? 'Guiding you'
+            : speaking
+              ? 'Speaking…'
+              : userWords
+                ? spokenLine(userWords.text, userWords.final)
+                : cameraLine
+                  ? cameraLine
+                  : listening === 'starting'
+                    ? 'Opening microphone…'
+                    : listening === 'transcribing'
+                      ? 'One moment…'
+                      : busy
+                        ? 'Working on it…'
+                        : listening === 'armed'
+                          ? 'Listening…'
+                          : listening === 'error'
+                            ? 'Check your microphone'
+                            : cameraOn
+                              ? 'Camera on · Ask me to look'
+                              : !props.micEnabled
+                                ? 'Microphone off'
+                                : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);
@@ -591,7 +626,8 @@ export function FridayPresence(props: Props) {
       ) : (
         <motion.section
           ref={panelRef}
-          className={`friday-presence ${expanded ? 'is-expanded' : ''}`}
+          className={`friday-presence ${expanded ? 'is-expanded' : ''} ${cameraOn && expanded ? 'is-camera' : ''}`}
+          style={cameraOn ? ({ '--camera-max': `${cameraMax}px` } as CSSProperties) : undefined}
           aria-label="Friday companion"
           initial={false}
           animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}
@@ -702,6 +738,7 @@ export function FridayPresence(props: Props) {
                   </div>
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
+                <CameraStage state={state} closable />
                 <div
                   className="presence-content"
                   ref={contentRef}
@@ -784,14 +821,16 @@ export function FridayPresence(props: Props) {
                       {text || 'Type a message…'}
                     </button>
                   )}
-                  <button
-                    className="presence-action"
-                    onClick={collapse}
-                    aria-label="Collapse to pill"
-                    title="Collapse to pill"
-                  >
-                    <ChevronUp size={14} />
-                  </button>
+                  {!cameraOn && (
+                    <button
+                      className="presence-action"
+                      onClick={collapse}
+                      aria-label="Collapse to pill"
+                      title="Collapse to pill"
+                    >
+                      <ChevronUp size={14} />
+                    </button>
+                  )}
                 </footer>
               </NotchBody>
             )}

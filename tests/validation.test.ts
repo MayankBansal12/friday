@@ -30,4 +30,10 @@ describe('IPC validation', () => {
     expect(() => validSettings({ notchOffset: { x: 0 } })).toThrow('Invalid notch anchor');
     expect(() => validSettings({ notchOffset: [0, 0] })).toThrow('Invalid notch anchor');
   });
+
+  it('requires a boolean for camera access', () => {
+    expect(validSettings({ cameraEnabled: true })).toEqual({ cameraEnabled: true });
+    expect(validSettings({ cameraEnabled: false })).toEqual({ cameraEnabled: false });
+    expect(() => validSettings({ cameraEnabled: 'true' })).toThrow('Camera access');
+  });
 });

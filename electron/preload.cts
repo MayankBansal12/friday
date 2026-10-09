@@ -58,6 +58,12 @@ contextBridge.exposeInMainWorld('buddy', {
   submit: (prompt: string, context?: RequestContext): Promise<TaskRecord> =>
     invoke('tasks:submit', 15_000, prompt, context),
   newConversation: (): Promise<string> => invoke('conversation:new', 10_000),
+  setCamera: (on: boolean): Promise<void> => invoke('camera:set', 15_000, on),
+  onCameraFrame: (callback: (jpeg: Uint8Array) => void) => {
+    const handler = (_: unknown, jpeg: Uint8Array) => callback(jpeg);
+    ipcRenderer.on('camera:frame', handler);
+    return () => ipcRenderer.removeListener('camera:frame', handler);
+  },
   desktopStatus: (): Promise<DesktopStatus> => invoke('desktop:status', 30_000),
   mark: (): Promise<void> => invoke('desktop:mark', 30_000),
   clearDrawing: (): Promise<void> => invoke('desktop:clear', 30_000),

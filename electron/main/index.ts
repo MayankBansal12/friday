@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
+import { Camera, type CameraFrame } from '../camera.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -25,6 +26,7 @@ import { configureDebugLog, debugEnabled, debugId, debugLog, debugUrl, installDe
 import { stageRuntimeExtension } from '../runtime-extension.js';
 import {
   activeStatuses,
+  cameraStatus,
   type BuddySettings,
   type ListeningState,
   type SurfaceLayout,
@@ -98,6 +100,8 @@ const nativeWindowPlacement =
   (app.commandLine.getSwitchValue('ozone-platform') === 'wayland' || !process.env.DISPLAY);
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let trayVoiceStatus = 'idle';
+let trayCameraStatus: string | undefined;
 let quitting = false;
 let shutdownComplete = false;
 let service: AgentService;
@@ -177,7 +181,8 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const width = Math.min(wantedWidth, area.width - 24);
   const height = Math.min(
     (notch || layout === 'tasks') && contentHeight
-      ? Math.max(notch ? 1 : 96, Math.min(420, Math.ceil(contentHeight)))
+      ? // The panel grows taller only for its live camera stage.
+        Math.max(notch ? 1 : 96, Math.min(layout === 'panel' ? 700 : 420, Math.ceil(contentHeight)))
       : wantedHeight,
     area.height - 24,
   );
@@ -306,6 +311,8 @@ function createWindow(openSilently: boolean) {
     if (!quitting) {
       event.preventDefault();
       stopListening();
+      // A hidden window can't show the camera preview, so closing it turns the camera off.
+      void service?.cameraOff();
       window?.hide();
     }
   });
@@ -321,11 +328,18 @@ function createWindow(openSilently: boolean) {
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   // A reloaded or crashed renderer is no longer listening; never route voice to it.
-  window.webContents.on('did-start-loading', () => liveKit?.listener(false));
+  // A reloaded or crashed renderer shows no camera preview, so the camera turns off with it.
+  window.webContents.on('did-start-loading', () => {
+    liveKit?.listener(false);
+    void service?.cameraOff();
+  });
   window.webContents.on('render-process-gone', (_event, details) => {
     debugLog('APP', 'renderer gone', { reason: details.reason, exitCode: details.exitCode });
     liveKit?.listener(false);
+    void service?.cameraOff();
   });
+  // However the window is minimized (Friday's button or the window manager), the preview is gone.
+  window.on('minimize', () => void service?.cameraOff());
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
@@ -347,10 +361,14 @@ function createWindow(openSilently: boolean) {
   screen.on('display-removed', reanchorSurface);
 }
 
+function refreshTrayStatus() {
+  tray?.setToolTip(`Friday — ${trayCameraStatus ?? trayVoiceStatus}`);
+}
+
 function createTray() {
   const iconPath = join(root, 'assets/icon.png');
   tray = new Tray(existsSync(iconPath) ? iconPath : nativeImage.createEmpty());
-  tray.setToolTip('Friday — idle');
+  refreshTrayStatus();
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Talk to Friday', click: () => activateFriday(true) },
@@ -505,7 +523,7 @@ if (hasSingleInstanceLock)
       settings,
       extensionPath,
       bridge,
-      { voice: speaker, acknowledgements },
+      { voice: speaker, acknowledgements, camera: new Camera() },
     );
     bridge.onStopped = (id, error) => {
       stopListening();
@@ -531,6 +549,7 @@ if (hasSingleInstanceLock)
     globalShortcut.register('CommandOrControl+Shift+Escape', () => {
       stopListening();
       bridge.stop();
+      void service.cameraOff();
       for (const task of service.list()) if (activeStatuses.has(task.status)) void service.cancel(task.id);
     });
     if (!globalShortcut.register('CommandOrControl+Shift+Space', activateFriday))
@@ -543,10 +562,29 @@ if (hasSingleInstanceLock)
       gazeTarget = point;
     };
     bridge.onControlChanged = (active) => {
+      // Controlling the desktop hides Friday's window, so its camera preview can't stay on screen.
+      void service.blockCamera(
+        active ? 'Friday is controlling your computer. The camera stays off until that finishes.' : undefined,
+      );
       if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
     };
     let lastDebugPresentation = '';
+    // Preview frames only while someone can see them; the JPEG arrives as a Uint8Array.
+    service.on('camera-frame', (frame: CameraFrame) => {
+      if (window && !window.isDestroyed() && window.isVisible()) window.webContents.send('camera:frame', frame.data);
+    });
+    // Friday never looks through the camera without its preview on screen.
+    const revealForCamera = () => {
+      if (!window || window.isDestroyed() || (window.isVisible() && !window.isMinimized())) return;
+      if (window.isMinimized()) window.hide();
+      window.showInactive();
+    };
+    service.on('camera-look', revealForCamera);
     service.on('state', (state) => {
+      const wasCapturing = Boolean(trayCameraStatus);
+      trayCameraStatus = cameraStatus(state);
+      refreshTrayStatus();
+      if (trayCameraStatus && !wasCapturing) revealForCamera();
       const summary = debugEnabled()
         ? `${state.parentId}:${state.presentation.speaking}:${Boolean(state.presentation.acknowledging)}`
         : '';
@@ -625,6 +663,12 @@ if (hasSingleInstanceLock)
       const task = validId(id);
       debugLog('APPROVAL', 'answer', { task, approved });
       return service.resolveApproval(task, approved);
+    });
+    ipcMain.handle('camera:set', async (event, on: unknown) => {
+      fromWindow(event);
+      if (typeof on !== 'boolean') throw new Error('Camera must be on or off.');
+      if (on) await service.cameraOn();
+      else await service.cameraOff();
     });
     ipcMain.handle('conversation:new', async (event) => {
       fromWindow(event);
@@ -802,6 +846,7 @@ if (hasSingleInstanceLock)
     ipcMain.handle('window:hide', (event) => {
       fromWindow(event);
       stopListening();
+      void service.cameraOff();
       window?.minimize();
     });
     ipcMain.on('voice:state', (event, state: ListeningState) => {
@@ -809,19 +854,16 @@ if (hasSingleInstanceLock)
         fromWindow(event);
         const next = validListeningState(state);
         debugLog('VOICE', 'state', { state: next });
-        tray?.setToolTip(
-          `Friday — ${
-            {
-              idle: 'Microphone off',
-              paused: 'Microphone paused',
-              starting: 'Opening microphone…',
-              listening: `Say Hey ${service.getSettings().wakeWord}`,
-              transcribing: 'One moment…',
-              armed: 'Go ahead…',
-              error: 'Check your microphone',
-            }[next as ListeningState]
-          }`,
-        );
+        trayVoiceStatus = {
+          idle: 'Microphone off',
+          paused: 'Microphone paused',
+          starting: 'Opening microphone…',
+          listening: `Say Hey ${service.getSettings().wakeWord}`,
+          transcribing: 'One moment…',
+          armed: 'Go ahead…',
+          error: 'Check your microphone',
+        }[next as ListeningState];
+        refreshTrayStatus();
         if (next === 'listening' || next === 'armed')
           void speech.prepare().catch((error) => console.error('Local STT preparation failed', error.message));
         if (next === 'idle' || next === 'paused' || next === 'error' || next === 'listening') speech.reset();

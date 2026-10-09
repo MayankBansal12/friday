@@ -46,6 +46,8 @@ export interface TaskRecord {
   createdAt: number;
   updatedAt: number;
   response?: string;
+  /** Camera frames Friday looked at for this request, so the transcript shows camera use. */
+  cameraFrames?: number;
   error?: string;
   steps: AgentStep[];
   approval?: Approval;
@@ -81,15 +83,61 @@ export interface PresentationState {
   echo?: EchoEntry[];
 }
 
+export type CameraState = 'off' | 'opening' | 'live' | 'closing';
+
+/** What Friday is doing with the live camera, so the UI can narrate every look. */
+export interface CameraActivity {
+  kind: 'looking' | 'watching' | 'looked';
+  /** Watching only: how long Friday watches. */
+  seconds?: number;
+  /** Looked only: how many frames went to the model. */
+  frames?: number;
+  at: number;
+}
+
 export interface FridayState {
+  /** Off only once every capture process has released the device, including cancellation cleanup. */
+  camera?: CameraState;
+  cameraActivity?: CameraActivity;
+  /** Why the camera last stopped on its own; cleared when it turns on again. */
+  cameraError?: { message: string; at: number };
   parentId: string;
   sessions: SessionRecord[];
   presentation: PresentationState;
 }
 
+/** How long "Looked through your camera" stays in the status line after a look. */
+export const cameraLookedMs = 5000;
+
+/** The status line while the camera is on: every start, look, and close is narrated. */
+export function cameraActivityLine(state: Pick<FridayState, 'camera' | 'cameraActivity'> | undefined, now: number) {
+  const activity = state?.cameraActivity;
+  if (state?.camera === 'opening') return 'Starting your camera to see…';
+  if (state?.camera === 'closing') return 'Turning your camera off…';
+  if (state?.camera !== 'live') return undefined;
+  if (activity?.kind === 'looking') return 'Looking through your camera…';
+  if (activity?.kind === 'watching') return `Watching for ${activity.seconds}s…`;
+  if (activity?.kind === 'looked' && now - activity.at < cameraLookedMs)
+    return activity.frames && activity.frames > 1 ? `Checked ${activity.frames} frames` : 'Looked through your camera';
+  return undefined;
+}
+
+/** Camera indicator text, shown until every capture process has released the device. */
+export function cameraStatus(state?: Pick<FridayState, 'camera'>) {
+  return state?.camera === 'opening'
+    ? 'Camera on · Starting…'
+    : state?.camera === 'live'
+      ? 'Camera on'
+      : state?.camera === 'closing'
+        ? 'Camera on · Closing…'
+        : undefined;
+}
+
 export type SurfaceLayout = 'orb' | 'tasks' | 'quiet' | 'bar' | 'panel' | 'details';
 
 export interface BuddySettings {
+  /** Let Friday turn on the webcam when asked to look; enabled by default. */
+  cameraEnabled?: boolean;
   defaultCwd: string;
   launchAtLogin: boolean;
   wakeWord: string;

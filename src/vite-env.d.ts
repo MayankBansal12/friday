@@ -30,6 +30,8 @@ declare global {
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;
       newConversation(): Promise<string>;
+      setCamera(on: boolean): Promise<void>;
+      onCameraFrame(callback: (jpeg: Uint8Array) => void): () => void;
       desktopStatus(): Promise<DesktopStatus>;
       mark(): Promise<void>;
       clearDrawing(): Promise<void>;

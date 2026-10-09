@@ -10,6 +10,7 @@ import { TaskStore } from './store.js';
 import type {
   AgentStep,
   BuddySettings,
+  CameraActivity,
   FridayState,
   InteractionRecord,
   PresentationState,
@@ -25,10 +26,11 @@ import type { Utterance, VoiceOutput } from './speech-output.js';
 import { validateSpeech } from './speech-policy.js';
 import { validSettings } from './validation.js';
 import { debugEnabled, debugId, debugLog } from './debug-log.js';
+import type { CameraFrame, LiveCamera } from './camera.js';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const fileTools = 'read,bash,edit,write,grep,find,ls';
-const parentTools = `${fileTools},interact,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
+const parentTools = `${fileTools},interact,camera_look,camera_off,desktop_observe,desktop_clear,desktop_control,session_start,session_list,session_read,session_search,session_update,session_stop,session_actions,stop_all`;
 interface RpcMessage {
   role?: string;
   content?: unknown;
@@ -65,6 +67,11 @@ interface Worker {
   model: string;
 }
 export interface AgentServiceOptions {
+  camera?: LiveCamera;
+  /** Bound control-flow cleanup even if a wedged camera never closes after SIGKILL. */
+  cameraStopGraceMs?: number;
+  /** A live camera closes after this long without a request or look. */
+  cameraIdleMs?: number;
   spawn?: typeof spawn;
   persistDebounceMs?: number;
   terminateGraceMs?: number;
@@ -96,6 +103,8 @@ function shortText(value: unknown, name: string, max = 8000) {
   return value.trim();
 }
 function toolTitle(name: string) {
+  if (name === 'camera_look') return 'Looking through the camera';
+  if (name === 'camera_off') return 'Turning the camera off';
   if (name === 'desktop_observe') return 'Looking at the screen';
   if (name === 'interact') return 'Replying';
   if (name === 'session_start') return 'Starting background work';
@@ -123,6 +132,11 @@ export class AgentService extends EventEmitter {
   /** Host-only identity of each interaction's requested effects, for retry deduplication. */
   private fingerprints = new Map<string, string>();
   private interactionSequence = 0;
+  private cameraIdle?: NodeJS.Timeout;
+  private cameraActivity?: CameraActivity;
+  private cameraError?: { message: string; at: number };
+  /** Set while the camera must stay off, e.g. during desktop control. */
+  private cameraBlocked?: string;
   private server = createServer((request, response) => void this.handle(request, response));
   private runtimeUrl = '';
   private readonly spawnProcess: typeof spawn;
@@ -144,7 +158,22 @@ export class AgentService extends EventEmitter {
     private readonly options: AgentServiceOptions = {},
   ) {
     super();
+    this.settings = { cameraEnabled: true, ...settings };
     this.spawnProcess = options.spawn ?? spawn;
+    options.camera?.on('state', () => {
+      if (options.camera?.state === 'off') {
+        clearTimeout(this.cameraIdle);
+        this.cameraActivity = undefined;
+      }
+      this.publish();
+    });
+    options.camera?.on('frame', (frame: CameraFrame) => this.emit('camera-frame', frame));
+    // A camera that stops on its own (unplugged, stalled, denied) must say why, not just vanish.
+    options.camera?.on('failure', (error?: Error) => {
+      if (!error) return;
+      this.cameraError = { message: error.message, at: Date.now() };
+      this.publish();
+    });
     this.grace = options.terminateGraceMs ?? 1200;
     this.channel = new SpeechChannel(() => this.options.voice, {
       speaking: (active, _text, lane) => {
@@ -218,7 +247,14 @@ export class AgentService extends EventEmitter {
     return this.tasks.map((t) => structuredClone(t)).sort((a, b) => b.createdAt - a.createdAt);
   }
   state(): FridayState {
-    return structuredClone({ parentId: this.parentId, sessions: this.sessions, presentation: this.presentation });
+    return structuredClone({
+      parentId: this.parentId,
+      sessions: this.sessions,
+      presentation: this.presentation,
+      camera: this.options.camera?.state ?? 'off',
+      cameraActivity: this.options.camera?.state === 'off' ? undefined : this.cameraActivity,
+      cameraError: this.cameraError,
+    });
   }
   getSettings() {
     return { ...this.settings };
@@ -226,6 +262,7 @@ export class AgentService extends EventEmitter {
   async updateSettings(next: Partial<BuddySettings>) {
     const old = this.settings;
     this.settings = { ...old, ...next };
+    if (next.cameraEnabled === false) await this.cameraOff();
     try {
       await this.persist();
     } catch (error) {
@@ -239,6 +276,7 @@ export class AgentService extends EventEmitter {
     const worker = this.workers.get(this.parentId);
     if (worker?.task) await this.cancel(worker.task.id);
     else if (worker) await this.retire(worker);
+    await this.cameraOff();
     this.parentId = randomUUID();
     this.sessions.unshift(this.newSession('parent', 'Friday', this.parentId));
     this.silence();
@@ -387,6 +425,7 @@ export class AgentService extends EventEmitter {
   }
   async stop() {
     this.actionGeneration++;
+    void this.cameraOff();
     this.silence();
     this.presentation = { text: '', expanded: false, speaking: false };
     this.publish();
@@ -491,6 +530,7 @@ export class AgentService extends EventEmitter {
   async shutdown() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    await this.cameraOff();
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = undefined;
     this.silence();
@@ -626,6 +666,7 @@ export class AgentService extends EventEmitter {
     const source = task.source ?? 'typed';
     const voice = this.speechSuppressed(task) ?? 'Speech may play.';
     const note: Record<string, unknown> = { source, voice };
+    if (this.options.camera?.state === 'live') note.camera = 'live: call camera_look to see what the user shows now';
     if (previous) {
       note.previousReply = {
         status: previous.status,
@@ -894,6 +935,7 @@ export class AgentService extends EventEmitter {
       }
       worker.task = undefined;
       this.clearApprovals(worker);
+      if (worker.session.role === 'parent') this.armCameraIdle();
       await this.changed(task);
       if (worker.session.role === 'child') await this.retire(worker);
     }
@@ -1090,7 +1132,10 @@ export class AgentService extends EventEmitter {
           status: 'duplicate',
           effects: 'none',
           duplicateOf: record.id,
-          previous: structuredClone(record),
+          previous: structuredClone({
+            ...record,
+            actions: record.actions.map(({ text, ...a }) => (a.tool === 'show_text_tool' ? a : { ...a, text })),
+          }),
           guidance: 'This exact interaction already ran; nothing new happened. Do not send it again.',
         };
     }
@@ -1328,6 +1373,129 @@ export class AgentService extends EventEmitter {
     });
   }
 
+  /** Turn the live camera on, for a requested look or the user's camera button. */
+  async cameraOn() {
+    if (this.settings.cameraEnabled !== true)
+      throw new Error('Camera access is off. Turn on Camera in Friday Settings, then ask again.');
+    if (!this.options.camera) throw new Error('Camera capture is unavailable.');
+    if (this.shuttingDown) throw new Error('Friday is shutting down.');
+    if (this.options.camera.state === 'closing')
+      throw new Error('The camera is still closing. Reconnect the webcam if its light stays on.');
+    if (this.cameraBlocked) throw new Error(this.cameraBlocked);
+    if (this.cameraError) {
+      this.cameraError = undefined;
+      this.publish();
+    }
+    await this.options.camera.open();
+    // Settings may have changed while the device was opening.
+    if (this.settings.cameraEnabled !== true || this.shuttingDown) {
+      await this.cameraOff();
+      throw new Error('Camera access was turned off.');
+    }
+    this.armCameraIdle();
+  }
+
+  /** Keep the camera off while `reason` applies; undefined allows it again. */
+  async blockCamera(reason?: string) {
+    this.cameraBlocked = reason;
+    if (reason) await this.cameraOff();
+  }
+
+  /** Close the camera. Bounded so a wedged device cannot block Stop or Quit; its indicator stays until it closes. */
+  async cameraOff() {
+    clearTimeout(this.cameraIdle);
+    const camera = this.options.camera;
+    if (!camera || camera.state === 'off') return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        camera.close(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.options.cameraStopGraceMs ?? 2000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The live camera closes once nobody has asked Friday anything for a while. */
+  private armCameraIdle() {
+    clearTimeout(this.cameraIdle);
+    if (!this.options.camera || this.options.camera.state === 'off') return;
+    this.cameraIdle = setTimeout(() => {
+      // Waiting on the user (an approval) is idle time: it must not keep the camera on indefinitely.
+      const busy = this.tasks.some(
+        (t) => t.conversationId === this.parentId && !terminal.has(t.status) && t.status !== 'awaiting_approval',
+      );
+      if (busy) this.armCameraIdle();
+      else void this.cameraOff();
+    }, this.options.cameraIdleMs ?? 60_000);
+  }
+
+  private async cameraLook(worker: Worker, task: TaskRecord, data: Record<string, unknown>, response: ServerResponse) {
+    if (Object.keys(data).some((key) => key !== 'seconds')) throw new Error('camera_look only accepts seconds.');
+    const seconds = data.seconds ?? 0;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0 || seconds > 10)
+      throw new Error('seconds must be a number from 0 to 10.');
+    const allowance = 24 - (task.cameraFrames ?? 0);
+    if (allowance <= 0) throw new Error('Friday already looked many times for this request. Reply with what you saw.');
+    const activity: CameraActivity = {
+      kind: seconds ? 'watching' : 'looking',
+      seconds: seconds || undefined,
+      at: Date.now(),
+    };
+    const abort = new AbortController();
+    const disconnected = () => {
+      if (!response.writableEnded) abort.abort();
+    };
+    response.on('close', disconnected);
+    try {
+      if (response.destroyed || response.socket?.destroyed) throw new Error('Camera look cancelled.');
+      this.emit('camera-look');
+      this.cameraActivity = activity;
+      this.publish();
+      await this.cameraOn();
+      const camera = this.options.camera!;
+      // One frame now, or up to six spread across the requested seconds.
+      const count = Math.min(allowance, seconds ? Math.min(6, Math.floor(seconds) + 1) : 1);
+      const interval = count > 1 ? (seconds * 1000) / (count - 1) : 0;
+      const start = Date.now();
+      const frames: CameraFrame[] = [];
+      for (let i = 0; i < count; i++) {
+        const wait = start + i * interval - Date.now();
+        if (wait > 0) await new Promise<void>((done) => setTimeout(done, wait));
+        if (abort.signal.aborted) break;
+        frames.push(await camera.frame(frames.at(-1)?.capturedAt ?? start - 1, abort.signal));
+      }
+      if (
+        abort.signal.aborted ||
+        this.shuttingDown ||
+        this.settings.cameraEnabled !== true ||
+        worker.task !== task ||
+        terminal.has(task.status) ||
+        this.workers.get(worker.session.id) !== worker
+      )
+        throw new Error('Camera look cancelled.');
+      this.armCameraIdle();
+      this.cameraActivity = { kind: 'looked', frames: frames.length, at: Date.now() };
+      this.publish();
+      task.cameraFrames = (task.cameraFrames ?? 0) + frames.length;
+      void this.changed(task);
+      return {
+        mimeType: 'image/jpeg',
+        frames: frames.map((frame) => ({ data: frame.data.toString('base64'), capturedAt: frame.capturedAt })),
+      };
+    } finally {
+      response.off('close', disconnected);
+      // A failed or cancelled look must not leave "Looking…" on screen, nor clear a newer look's.
+      if (this.cameraActivity === activity) {
+        this.cameraActivity = undefined;
+        this.publish();
+      }
+    }
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse) {
     const reply = (status: number, data: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -1382,6 +1550,14 @@ export class AgentService extends EventEmitter {
       if (worker.session.role !== 'parent') throw new Error('This tool belongs to the parent session');
       let result: unknown;
       switch (request.url) {
+        case '/tools/camera_look':
+          result = await this.cameraLook(worker, task, data, response);
+          break;
+        case '/tools/camera_off':
+          if (Object.keys(data).length) throw new Error('camera_off takes no arguments.');
+          await this.cameraOff();
+          result = { camera: this.options.camera?.state ?? 'off' };
+          break;
         case '/tools/session_actions':
           result = await this.sessionActions(worker, task, data);
           break;

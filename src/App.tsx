@@ -11,6 +11,7 @@ import {
   Archive,
   ArrowRight,
   ArrowUp,
+  Camera,
   Check,
   ChevronDown,
   CircleStop,
@@ -33,10 +34,13 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Video,
+  VideoOff,
   X,
 } from 'lucide-react';
 import {
   activeStatuses,
+  cameraStatus,
   type BuddySettings,
   type FridayState,
   type ListeningState,
@@ -54,6 +58,8 @@ import { VoiceFollowUp } from './voice-follow-up';
 import { detectWakeCommand, fromWakeWord } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
 import { Conversation } from './Conversation';
+import { CameraStage } from './CameraStage';
+import { useCameraLine } from './useCameraLine';
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import { fridayMood } from './friday-mood';
 import { isEcho, shouldBargeIn } from './echo-guard';
@@ -79,6 +85,9 @@ const starterIdeas = [
 ];
 
 type ProductView = 'now' | 'history' | 'detail';
+
+/** While the camera is on, Friday stays awake this long between requests, so you can move between looks. */
+const cameraAwakeMs = 60_000;
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? desktopErrorMessage(error) : fallback;
@@ -579,6 +588,34 @@ function SettingsDialog({
 
         <div className="settings-section">
           <div className="settings-section-title">
+            <span className="settings-section-icon blue">
+              <Camera size={16} />
+            </span>
+            <span>
+              <strong>Camera</strong>
+              <small>Let Friday see what you show it</small>
+            </span>
+          </div>
+          <label className="setting-toggle">
+            <span>
+              <strong>Camera</strong>
+              <small>
+                Friday turns the camera on when you ask it to look and keeps its live video on screen while it’s on. It
+                turns off when Friday goes back to sleep, after a minute with no requests, on Stop, or with the off
+                button. Only frames Friday looks at go to your model; they stay in local history and may be sent again
+                in this conversation, even with access off. Start a new conversation to stop using them as context.
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.cameraEnabled === true}
+              onChange={(event) => onSave({ cameraEnabled: event.target.checked })}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">
             <span className="settings-section-icon warm">
               <Folder size={16} />
             </span>
@@ -660,7 +697,7 @@ function SettingsDialog({
               <Cloud size={15} />
               <span>
                 <strong>Requests &amp; vision</strong>
-                <small>Commands—and screenshots only when needed—go to your selected model.</small>
+                <small>Requests, screenshots, and camera frames Friday looks at go to your selected model.</small>
               </span>
             </div>
             <div>
@@ -680,6 +717,10 @@ function SettingsDialog({
 export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [friday, setFriday] = useState<FridayState>();
+  const cameraOnRef = useRef(false);
+  useEffect(() => {
+    cameraOnRef.current = Boolean(friday?.camera && friday.camera !== 'off');
+  }, [friday?.camera]);
   const [selected, setSelected] = useState<string>();
   const [foregroundTaskId, setForegroundTaskId] = useState<string>();
   const [view, setView] = useState<ProductView>('now');
@@ -1215,9 +1256,12 @@ export default function App() {
         if (
           (conversationOpenRef.current || selectedChildRef.current) &&
           !typingRef.current &&
-          now - waitingSince > 10_000
+          now - waitingSince > (cameraOnRef.current ? cameraAwakeMs : 10_000)
         ) {
           waitingSince = now;
+          // Friday is going back to sleep: a camera nobody is talking to closes with her.
+          if (conversationOpenRef.current && cameraOnRef.current)
+            void window.buddy.setCamera(false).catch(() => undefined);
           conversationOpenRef.current = false;
           selectChild();
           setHeard('');
@@ -1397,8 +1441,14 @@ export default function App() {
         if (voiceFollowUpRef.current.taskChanged(next)) followUpPendingRef.current = true;
       }
     });
+    let cameraErrorAt = 0;
     const removeState = window.buddy.onFridayState((runtime) => {
       setFriday(runtime);
+      // A camera that stopped on its own says why, once, in the pill and the workspace alike.
+      if (runtime.cameraError && runtime.cameraError.at > cameraErrorAt) {
+        cameraErrorAt = runtime.cameraError.at;
+        setActionError(runtime.cameraError.message);
+      }
       if (speakingRef.current && !runtime.presentation.speaking) speakingEndedAtRef.current = Date.now();
       speakingRef.current = runtime.presentation.speaking;
       echoRef.current = runtime.presentation.echo;
@@ -1692,14 +1742,19 @@ export default function App() {
     });
   }
 
+  const cameraLine = useCameraLine(friday);
   const listeningActive = listenState !== 'idle' && listenState !== 'error';
-  const presence = listeningActive
-    ? { label: listenState === 'transcribing' ? 'One moment…' : 'Mic on', tone: 'voice' }
-    : activeTask?.status === 'awaiting_approval'
-      ? { label: 'Waiting on you', tone: 'approval' }
-      : activeTask
-        ? { label: 'Working', tone: 'working' }
-        : { label: 'Standing by', tone: 'ready' };
+  const camera = cameraLine ?? cameraStatus(friday);
+  const cameraOn = Boolean(cameraStatus(friday));
+  const presence = camera
+    ? { label: listeningActive ? `${camera} · Mic on` : camera, tone: 'working' }
+    : listeningActive
+      ? { label: listenState === 'transcribing' ? 'One moment…' : 'Mic on', tone: 'voice' }
+      : activeTask?.status === 'awaiting_approval'
+        ? { label: 'Waiting on you', tone: 'approval' }
+        : activeTask
+          ? { label: 'Working', tone: 'working' }
+          : { label: 'Standing by', tone: 'ready' };
 
   const composer = (
     <footer className="composer-area">
@@ -1786,6 +1841,23 @@ export default function App() {
               >
                 {marking ? <LoaderCircle className="spin" size={15} /> : <Scan size={15} strokeWidth={1.5} />}
               </button>
+              {settings?.cameraEnabled !== false && (
+                <button
+                  className={`mic-button camera-button pressable ${cameraOn ? 'active' : ''}`}
+                  type="button"
+                  aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+                  aria-pressed={cameraOn}
+                  title={cameraOn ? 'Turn camera off' : 'Turn camera on so Friday can see what you show it'}
+                  disabled={friday?.camera === 'opening' || friday?.camera === 'closing'}
+                  onClick={() =>
+                    void window.buddy
+                      .setCamera(!cameraOn)
+                      .catch((error) => setActionError(errorMessage(error, 'Could not turn on the camera')))
+                  }
+                >
+                  {cameraOn ? <Video size={15} strokeWidth={1.5} /> : <VideoOff size={15} strokeWidth={1.5} />}
+                </button>
+              )}
               <button
                 className={`mic-button pressable ${micEnabled ? 'active' : ''}`}
                 type="button"
@@ -1971,6 +2043,12 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {cameraOn && (
+          <div className="workspace-camera">
+            <CameraStage state={friday} />
+          </div>
+        )}
 
         <div
           className="content-scroll"

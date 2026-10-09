@@ -42,6 +42,7 @@
         <option>quiet</option>
         <option>listening</option>
         <option>thinking</option>
+        <option>camera</option>
         <option>speaking</option>
         <option>guidance</option>
         <option>control</option>
@@ -75,6 +76,7 @@
         child('c', 'Organize the project notes'),
       ];
       const runtime = {
+        camera: scenario === 'camera' ? 'live' : 'off',
         parentId: 'parent',
         sessions:
           scenario === 'one'
@@ -130,7 +132,37 @@
                     : undefined,
               },
             ]
-          : [];
+          : scenario === 'camera'
+            ? [
+                ['Can you see my cube?', 'The green face looks solved. Turn it so I can see the top.', 2],
+                ['Check now', 'Good. Now turn the right face up once.', 1],
+              ].map(([prompt, text, cameraFrames], i) => ({
+                id: `camera-${i}`,
+                role: 'parent',
+                conversationId: 'parent',
+                prompt,
+                status: 'completed',
+                cameraFrames,
+                interactions: [
+                  {
+                    id: `ix-${i}`,
+                    createdAt: now + i,
+                    updatedAt: now + i,
+                    timing: 'parallel',
+                    status: 'completed',
+                    // The second reply was speech-only with spoken replies off; it must still stay visible.
+                    actions: [
+                      i
+                        ? { tool: 'speak_tool', status: 'suppressed', text }
+                        : { tool: 'show_text_tool', status: 'completed', text },
+                    ],
+                  },
+                ],
+                steps: [],
+                createdAt: now + i,
+                updatedAt: now + i,
+              }))
+            : [];
       const fixture = (window.fixture = {
         runtime,
         tasks,
@@ -149,6 +181,19 @@
         },
         task(t) {
           callbacks.onTask?.(t);
+        },
+        /** A synthetic JPEG standing in for a live camera frame. */
+        async cameraFrame() {
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 240;
+          const context = canvas.getContext('2d');
+          context.fillStyle = '#3a7d44';
+          context.fillRect(0, 0, 320, 240);
+          context.fillStyle = '#f4d35e';
+          context.fillRect(110, 70, 100, 100);
+          const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg'));
+          callbacks.onCameraFrame?.(new Uint8Array(await blob.arrayBuffer()));
         },
         listen() {
           callbacks.onListen?.();
@@ -254,7 +299,11 @@
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
-        getSettings: async () => ({ wakeWord: 'Friday' }),
+        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: true }),
+        updateSettings: async (next) => {
+          fixture.calls.push(['settings', next]);
+          return { wakeWord: 'Friday', ...next };
+        },
         desktopStatus: async () => ({ ready: true }),
         silence: noop,
         interrupt: async () => {
@@ -308,6 +357,7 @@
         },
         stop: async () => {
           fixture.calls.push(['stop']);
+          if (runtime.camera !== 'off') runtime.camera = fixture.deferCameraClose ? 'closing' : 'off';
           fixture.guiding = false;
           runtime.presentation = { text: '', expanded: false, speaking: false };
           for (const t of tasks)
@@ -338,6 +388,11 @@
           callbacks.onExpanded?.(v);
         },
         hide: noop,
+        setCamera: async (on) => {
+          fixture.calls.push(['camera', on]);
+          runtime.camera = on ? 'live' : 'off';
+          fixture.emit();
+        },
       };
       for (const name of [
         'onTask',
@@ -348,6 +403,7 @@
         'onMark',
         'onGuidance',
         'onControlling',
+        'onCameraFrame',
       ])
         window.buddy[name] = (fn) => {
           callbacks[name] = fn;
