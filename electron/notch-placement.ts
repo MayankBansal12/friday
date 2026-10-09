@@ -3,17 +3,21 @@ import type { NotchAnchor } from './types.js';
 /** The resting bar's height. A bottom-anchored notch keeps this bar's bottom edge fixed. */
 export const restingBarHeight = 42;
 
+/** The hover panel's window height; the notch opens downward whenever this fits below its bar. */
+export const hoverPanelHeight = 420;
+
 /**
- * A notch dragged into the lower half of the screen grows upward: its bar stays under the
- * pointer while the panel opens above it. Growing downward there would push the whole window
- * up to fit the screen, moving the bar away from the pointer and collapsing the hover panel.
+ * A notch opens downward wherever its hover panel fits below the bar, and upward only when it
+ * doesn't: then its bar stays under the pointer while the panel opens above it. Growing downward
+ * without room would push the whole window up to fit the screen, moving the bar away from the
+ * pointer and collapsing the hover panel.
  */
 export function anchorNotch(
   area: { y: number; height: number },
   offsetY: number | undefined,
 ): { anchor: NotchAnchor; barTop: number } {
   const barTop = Math.min(Math.max(area.y + 5 + (offsetY ?? 0), area.y), area.y + area.height - restingBarHeight - 12);
-  return { anchor: barTop + restingBarHeight / 2 > area.y + area.height / 2 ? 'bottom' : 'top', barTop };
+  return { anchor: barTop + hoverPanelHeight > area.y + area.height ? 'bottom' : 'top', barTop };
 }
 
 /** The tallest notch surface (the camera panel) plus its shadow margin. */

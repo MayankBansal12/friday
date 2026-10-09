@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { anchorNotch, notchFrame, restingBarHeight } from '../electron/notch-placement.js';
+import { anchorNotch, hoverPanelHeight, notchFrame, restingBarHeight } from '../electron/notch-placement.js';
 
 // A 1080p screen whose top panel takes 32px.
 const area = { y: 32, height: 1048 };
 
 describe('notch anchoring', () => {
-  it('grows downward from the top half and upward from the bottom half', () => {
+  it('opens downward wherever the hover panel fits below the bar, and upward only when it does not', () => {
     expect(anchorNotch(area, undefined)).toEqual({ anchor: 'top', barTop: 37 });
     expect(anchorNotch(area, 400).anchor).toBe('top');
-    expect(anchorNotch(area, 600).anchor).toBe('bottom');
+    // The work area ends at 1080: a bar at 660 still fits the 420px panel below; one at 661 does not.
+    expect(anchorNotch(area, 1080 - hoverPanelHeight - 37)).toMatchObject({ anchor: 'top', barTop: 660 });
+    expect(anchorNotch(area, 1080 - hoverPanelHeight - 36)).toMatchObject({ anchor: 'bottom', barTop: 661 });
   });
 
   it('keeps the bar on screen when dragged past an edge', () => {

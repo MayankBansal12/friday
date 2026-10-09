@@ -134,7 +134,7 @@ export function FridayPresence(props: Props) {
   const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
-  // In the lower half of the screen the notch grows upward, with its bar at the bottom.
+  // Near the bottom of the screen, where its panel can't fit below, the notch grows upward, with its bar at the bottom.
   const [anchor, setAnchor] = useState<NotchAnchor>('top');
   useEffect(() => {
     let disposed = false;

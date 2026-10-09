@@ -587,7 +587,7 @@
   }
 }
 
-/* A notch in the lower half of the screen grows upward: the window keeps its bottom edge, the bar
+/* A notch too low for its panel to fit below grows upward: the window keeps its bottom edge, the bar
    sits at the bottom under the pointer, and the panel opens above it. */
 .presence-root.anchor-bottom {
   display: flex;
