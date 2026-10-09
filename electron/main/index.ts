@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
-import { Camera } from '../camera.js';
+import { Camera, type CameraFrame } from '../camera.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -181,7 +181,8 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const width = Math.min(wantedWidth, area.width - 24);
   const height = Math.min(
     (notch || layout === 'tasks') && contentHeight
-      ? Math.max(notch ? 1 : 96, Math.min(420, Math.ceil(contentHeight)))
+      ? // The panel grows taller only for its live camera stage.
+        Math.max(notch ? 1 : 96, Math.min(layout === 'panel' ? 700 : 420, Math.ceil(contentHeight)))
       : wantedHeight,
     area.height - 24,
   );
@@ -310,6 +311,8 @@ function createWindow(openSilently: boolean) {
     if (!quitting) {
       event.preventDefault();
       stopListening();
+      // A hidden window can't show the camera preview, so closing it turns the camera off.
+      void service?.cameraOff();
       window?.hide();
     }
   });
@@ -539,6 +542,7 @@ if (hasSingleInstanceLock)
     globalShortcut.register('CommandOrControl+Shift+Escape', () => {
       stopListening();
       bridge.stop();
+      void service.cameraOff();
       for (const task of service.list()) if (activeStatuses.has(task.status)) void service.cancel(task.id);
     });
     if (!globalShortcut.register('CommandOrControl+Shift+Space', activateFriday))
@@ -554,14 +558,22 @@ if (hasSingleInstanceLock)
       if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
     };
     let lastDebugPresentation = '';
+    // Preview frames only while someone can see them; the JPEG arrives as a Uint8Array.
+    service.on('camera-frame', (frame: CameraFrame) => {
+      if (window && !window.isDestroyed() && window.isVisible()) window.webContents.send('camera:frame', frame.data);
+    });
+    // Friday never looks through the camera without its preview on screen.
+    const revealForCamera = () => {
+      if (!window || window.isDestroyed() || (window.isVisible() && !window.isMinimized())) return;
+      if (window.isMinimized()) window.hide();
+      window.showInactive();
+    };
+    service.on('camera-look', revealForCamera);
     service.on('state', (state) => {
       const wasCapturing = Boolean(trayCameraStatus);
       trayCameraStatus = cameraStatus(state);
       refreshTrayStatus();
-      if (trayCameraStatus && !wasCapturing && window && !window.isDestroyed()) {
-        if (window.isMinimized()) window.hide();
-        window.showInactive();
-      }
+      if (trayCameraStatus && !wasCapturing) revealForCamera();
       const summary = debugEnabled()
         ? `${state.parentId}:${state.presentation.speaking}:${Boolean(state.presentation.acknowledging)}`
         : '';
@@ -640,6 +652,12 @@ if (hasSingleInstanceLock)
       const task = validId(id);
       debugLog('APPROVAL', 'answer', { task, approved });
       return service.resolveApproval(task, approved);
+    });
+    ipcMain.handle('camera:set', async (event, on: unknown) => {
+      fromWindow(event);
+      if (typeof on !== 'boolean') throw new Error('Camera must be on or off.');
+      if (on) await service.cameraOn();
+      else await service.cameraOff();
     });
     ipcMain.handle('conversation:new', async (event) => {
       fromWindow(event);
@@ -817,6 +835,7 @@ if (hasSingleInstanceLock)
     ipcMain.handle('window:hide', (event) => {
       fromWindow(event);
       stopListening();
+      void service.cameraOff();
       window?.minimize();
     });
     ipcMain.on('voice:state', (event, state: ListeningState) => {

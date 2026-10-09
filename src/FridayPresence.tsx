@@ -27,6 +27,8 @@ import {
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
+import { CameraStage } from './CameraStage';
+import { useCameraLine } from './useCameraLine';
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -120,8 +122,11 @@ function taskPreview(text: string) {
 
 export function FridayPresence(props: Props) {
   const { state, task, listening, speaking } = props;
-  const camera = cameraStatus(state);
-  const cameraActive = Boolean(camera);
+  const cameraOn = Boolean(cameraStatus(state));
+  const cameraLine = useCameraLine(state);
+  // Starting, looking, watching, and closing lead the status line; "Looked at you" yields to speech.
+  const cameraNow = cameraLine && state?.cameraActivity?.kind !== 'looked' ? cameraLine : undefined;
+  const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
@@ -186,7 +191,7 @@ export function FridayPresence(props: Props) {
   );
   const running = children.filter((s) => s.status === 'running');
   const canStop = Boolean(
-    cameraActive ||
+    cameraChanging ||
     busy ||
     speaking ||
     props.controlling ||
@@ -214,7 +219,7 @@ export function FridayPresence(props: Props) {
   // The user's words take the status line until Friday answers or needs something.
   const userWords =
     props.transcript?.text.trim() &&
-    !cameraActive &&
+    !cameraNow &&
     !props.controlling &&
     !typing &&
     !approvals.length &&
@@ -223,7 +228,7 @@ export function FridayPresence(props: Props) {
       ? props.transcript
       : undefined;
   const engaged = Boolean(
-    cameraActive ||
+    cameraOn ||
     props.controlling ||
     busy ||
     speaking ||
@@ -235,7 +240,9 @@ export function FridayPresence(props: Props) {
     userWords,
   );
   const background = !engaged && visible.length > 0;
-  const expanded = !props.controlling && !background && (typing || hovered || (autoOpen && dismissed !== contentKey));
+  // A live camera keeps the panel open: its video stays on screen for as long as the camera is on.
+  const expanded =
+    !props.controlling && !background && (cameraOn || typing || hovered || (autoOpen && dismissed !== contentKey));
   const conversation = props.tasks
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -258,8 +265,8 @@ export function FridayPresence(props: Props) {
       : engaged
         ? 'bar'
         : 'quiet';
-  const status = camera
-    ? camera
+  const status = cameraNow
+    ? cameraNow
     : props.controlling
       ? 'Controlling your computer · Esc twice to stop'
       : typing
@@ -272,19 +279,23 @@ export function FridayPresence(props: Props) {
               ? 'Speaking…'
               : userWords
                 ? spokenLine(userWords.text, userWords.final)
-                : listening === 'starting'
-                  ? 'Opening microphone…'
-                  : listening === 'transcribing'
-                    ? 'One moment…'
-                    : busy
-                      ? 'Working on it…'
-                      : listening === 'armed'
-                        ? 'Listening…'
-                        : listening === 'error'
-                          ? 'Check your microphone'
-                          : !props.micEnabled
-                            ? 'Microphone off'
-                            : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+                : cameraLine
+                  ? cameraLine
+                  : listening === 'starting'
+                    ? 'Opening microphone…'
+                    : listening === 'transcribing'
+                      ? 'One moment…'
+                      : busy
+                        ? 'Working on it…'
+                        : listening === 'armed'
+                          ? 'Listening…'
+                          : listening === 'error'
+                            ? 'Check your microphone'
+                            : cameraOn
+                              ? 'Camera on · Ask me to look'
+                              : !props.micEnabled
+                                ? 'Microphone off'
+                                : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);
@@ -609,7 +620,7 @@ export function FridayPresence(props: Props) {
       ) : (
         <motion.section
           ref={panelRef}
-          className={`friday-presence ${expanded ? 'is-expanded' : ''}`}
+          className={`friday-presence ${expanded ? 'is-expanded' : ''} ${cameraOn && expanded ? 'is-camera' : ''}`}
           aria-label="Friday companion"
           initial={false}
           animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}
@@ -720,6 +731,7 @@ export function FridayPresence(props: Props) {
                   </div>
                 )}
                 {selected?.question && <p className="selected-question">{selected.question}</p>}
+                <CameraStage state={state} closable />
                 <div
                   className="presence-content"
                   ref={contentRef}
@@ -802,14 +814,16 @@ export function FridayPresence(props: Props) {
                       {text || 'Type a message…'}
                     </button>
                   )}
-                  <button
-                    className="presence-action"
-                    onClick={collapse}
-                    aria-label="Collapse to pill"
-                    title="Collapse to pill"
-                  >
-                    <ChevronUp size={14} />
-                  </button>
+                  {!cameraOn && (
+                    <button
+                      className="presence-action"
+                      onClick={collapse}
+                      aria-label="Collapse to pill"
+                      title="Collapse to pill"
+                    >
+                      <ChevronUp size={14} />
+                    </button>
+                  )}
                 </footer>
               </NotchBody>
             )}

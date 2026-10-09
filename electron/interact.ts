@@ -293,7 +293,10 @@ export async function executeInteract(
       interactionId: record.id,
       timing: plan.timing,
       effects: effectsOf(record.actions),
-      actions: record.actions.map((a) => structuredClone(a)),
+      // The model already knows what it showed; don't echo up to 6000 characters back.
+      actions: record.actions.map(({ text, ...a }) =>
+        structuredClone(a.tool === 'show_text_tool' || text === undefined ? a : { ...a, text }),
+      ),
       ...(guidance ? { guidance } : {}),
     };
   };
@@ -377,6 +380,8 @@ export async function executeInteract(
       if (plan.text !== undefined && textAction?.status === 'accepted') {
         runtime.showText(plan.text, 'text');
         textAction.status = 'completed';
+        // Kept for the conversation transcript once the next request replaces the presentation.
+        textAction.text = plan.text;
       } else if (speechVisible && plan.speech !== undefined && speechAction && plan.text === undefined)
         runtime.showText(plan.speech, speechAction.status === 'suppressed' ? 'speech' : 'caption');
     } catch (error) {

@@ -14,6 +14,8 @@ const camera = new Camera({
     const synthetic = [...args];
     synthetic[input - 1] = 'lavfi';
     synthetic[input + 1] = 'testsrc2=size=1920x1080:rate=30';
+    // A real camera delivers frames in real time; make the synthetic source do the same.
+    synthetic.splice(input - 2, 0, '-re');
     const child = spawn(command, synthetic, options);
     children.push(child);
     return child;
@@ -21,24 +23,32 @@ const camera = new Camera({
   device: '/dev/video0',
 });
 for (let i = 0; i < 2; i++) {
-  const photo = await camera.capture(new AbortController().signal);
-  assert.equal(photo.mimeType, 'image/jpeg');
-  assert.equal(children[i].exitCode, 0, 'camera must be closed before returning');
-  const probe = JSON.parse(
-    execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-of', 'json', 'pipe:0'], {
-      input: Buffer.from(photo.data, 'base64'),
-    }),
-  );
-  assert.equal(probe.streams.length, 1);
-  assert.equal(probe.streams[0].width, 1280);
-  assert.equal(probe.streams[0].height, 720);
-  assert.equal(probe.streams[0].nb_read_frames, '1');
+  await camera.open();
+  assert.equal(camera.state, 'live');
+  const first = await camera.frame(0, new AbortController().signal);
+  const second = await camera.frame(first.capturedAt, new AbortController().signal);
+  assert(second.capturedAt > first.capturedAt, 'a later look must get a fresh frame');
+  for (const frame of [first, second]) {
+    const probe = JSON.parse(
+      execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-of', 'json', 'pipe:0'], {
+        input: frame.data,
+      }),
+    );
+    assert.equal(probe.streams.length, 1);
+    assert.equal(probe.streams[0].width, 1024);
+    assert.equal(probe.streams[0].height, 576);
+    assert.equal(probe.streams[0].nb_read_frames, '1');
+  }
+  await camera.close();
+  assert.equal(camera.state, 'off');
+  assert.notEqual(children[i].exitCode ?? children[i].signalCode, null, 'camera must be closed before close() returns');
 }
-console.log('Camera: real FFmpeg captured one scaled JPEG, exited, and reopened successfully (synthetic video only).');
+console.log('Camera: real FFmpeg streamed fresh scaled JPEG frames, closed, and reopened (synthetic video only).');
 
 // A wrapper and descendant both ignore SIGTERM and hold stdout open. Cancellation must kill both.
 let wrapper;
-const abort = new AbortController();
+let wrapperReady;
+const ready = new Promise((resolve) => (wrapperReady = resolve));
 const wrapped = new Camera({
   spawn(_command, _args, options) {
     wrapper = spawn(
@@ -55,7 +65,7 @@ const wrapped = new Camera({
       ],
       options,
     );
-    wrapper.stdout.once('data', () => abort.abort());
+    wrapper.stdout.once('data', () => wrapperReady());
     return wrapper;
   },
 });
@@ -64,8 +74,11 @@ const emergency = setTimeout(() => {
 }, 5000);
 const started = Date.now();
 try {
-  await assert.rejects(wrapped.capture(abort.signal), /cancelled/);
-  assert(Date.now() - started < 4000, 'camera cancellation must close wrapper and descendant promptly');
+  const opening = wrapped.open().catch((error) => error);
+  await ready;
+  await wrapped.close();
+  assert.match(String(await opening), /closed/);
+  assert(Date.now() - started < 4000, 'closing the camera must stop wrapper and descendant promptly');
   assert.equal(wrapper.signalCode, 'SIGKILL');
 } finally {
   clearTimeout(emergency);
@@ -73,10 +86,11 @@ try {
 console.log('Camera: SIGKILL closed a wrapper and its child after both ignored SIGTERM.');
 
 // The wrapper exits on SIGTERM while its child survives with separate output pipes.
-// Wrapper "close" must not cancel escalation or release the capture lock early.
+// Wrapper "close" must not cancel escalation or report the camera off early.
 let earlyWrapper;
 let descendant;
-const earlyAbort = new AbortController();
+let descendantReady;
+const descendantStarted = new Promise((resolve) => (descendantReady = resolve));
 const earlyClose = new Camera({
   spawn(_command, _args, options) {
     const childCode = "process.on('SIGTERM', () => {}); process.send(process.pid); setInterval(() => {}, 1000);";
@@ -89,7 +103,7 @@ const earlyClose = new Camera({
     earlyWrapper = spawn(process.execPath, ['-e', wrapperCode], options);
     earlyWrapper.stdout.once('data', (data) => {
       descendant = Number(data.toString());
-      earlyAbort.abort();
+      descendantReady();
     });
     return earlyWrapper;
   },
@@ -106,15 +120,19 @@ const killEarlyGroup = () => {
 const earlyEmergency = setTimeout(killEarlyGroup, 5000);
 const earlyStarted = Date.now();
 try {
-  await assert.rejects(earlyClose.capture(earlyAbort.signal), /cancelled/);
-  assert(Date.now() - earlyStarted < 4000, 'capture must finish before emergency cleanup');
+  const opening = earlyClose.open().catch((error) => error);
+  await descendantStarted;
+  await earlyClose.close();
+  assert.match(String(await opening), /closed/);
+  assert.equal(earlyClose.state, 'off');
+  assert(Date.now() - earlyStarted < 4000, 'close must finish before emergency cleanup');
   assert.equal(earlyWrapper.signalCode, 'SIGTERM', 'wrapper must exit before escalation');
   assert(Number.isInteger(descendant) && descendant > 0, 'descendant must start before cancellation');
   assert.equal(await cameraGroupActive(earlyWrapper.pid), false, 'no group member may retain resources');
   try {
     const stat = await readFile(`/proc/${descendant}/stat`, 'utf8');
     const state = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[0];
-    assert(['Z', 'X'].includes(state), 'descendant must have exited before capture settles');
+    assert(['Z', 'X'].includes(state), 'descendant must have exited before close() returns');
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }

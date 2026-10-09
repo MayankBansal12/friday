@@ -1200,3 +1200,148 @@ textarea:focus-visible,
     animation: none;
   }
 }
+
+/* Live camera: the user always sees what Friday's camera sees while it is on. */
+.camera-stage {
+  position: relative;
+  flex-shrink: 0;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #0b0d0a;
+  box-shadow: 0 0 0 1px #ffffff14;
+  transition: box-shadow 180ms ease;
+}
+.camera-stage img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+/* Friday is taking frames right now: the stage lights up until the look finishes. */
+.camera-stage.is-looking {
+  box-shadow:
+    0 0 0 2px #d9ff91,
+    0 0 24px #d9ff9133;
+}
+.camera-stage-wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #c9d1c0;
+  font-size: 13px;
+}
+.camera-shutter {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+  animation: camera-shutter 420ms ease-out;
+}
+@keyframes camera-shutter {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.camera-live,
+.camera-activity {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #000000b0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+.camera-live {
+  left: 10px;
+  top: 10px;
+}
+.camera-live i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff5d47;
+}
+.camera-activity {
+  left: 50%;
+  bottom: 10px;
+  max-width: calc(100% - 20px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.camera-stage.is-looking .camera-activity {
+  background: #d9ff91;
+  color: #172012;
+}
+.camera-off {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #000000b0;
+  color: #fff;
+  cursor: pointer;
+}
+.camera-off:hover {
+  background: #ff5d47;
+}
+@media (prefers-reduced-motion: reduce) {
+  .camera-shutter {
+    animation: none;
+  }
+}
+/* Pill camera mode: video on top, the conversation below it, composer at the bottom. */
+.friday-presence.is-camera {
+  max-height: 690px;
+}
+.friday-presence.is-camera .presence-body {
+  max-height: 620px;
+  gap: 12px;
+}
+.friday-presence.is-camera .presence-content {
+  flex: 1 1 auto;
+  min-height: 72px;
+  max-height: 210px;
+}
+/* Workspace: the video sits above the conversation, which scrolls beneath it. */
+.workspace-camera {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 14px 24px 4px;
+}
+.workspace-camera .camera-stage {
+  width: min(100%, 560px);
+}
+.composer-tools .camera-button.active {
+  color: #ff8a78;
+}
+/* What Friday did belongs on Friday's side, with its reply; only the user's words sit on the right. */
+.conversation-camera {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 -4px;
+  color: var(--ink-faint);
+  font-size: var(--text-sm);
+}

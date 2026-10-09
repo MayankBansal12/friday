@@ -327,23 +327,48 @@ The whole call is validated first: status "rejected" means nothing ran; fix the 
   });
 
   pi.registerTool({
-    name: 'camera_snapshot',
+    name: 'camera_look',
     label: 'Look through the camera',
     description:
-      'Take one fresh webcam photo when the user asks you to look at them, an object they are holding, or their surroundings. Requires Camera snapshots enabled in Settings. One attempt per user request; a retake needs a new request. The camera closes before the photo returns. No live video or background monitoring. If unavailable, explain the error; never bypass the setting with shell or desktop tools. Use desktop_observe for screen content. This photo is not a desktop observation and cannot be drawn on with draw_tool.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
+      "See the user, something they are holding, or their surroundings through the webcam, when they ask you to look or check. The first look turns the camera on; it then stays live with a preview the user can see, so later looks are instant. Look again whenever the user asks you to check, rather than relying on an older frame. Pass seconds (1-10) to watch a movement or several sides of an object: you get up to six frames spread over that time. Frames are unmirrored, as the camera sees: the user's right hand appears on the image's left. Requires Camera enabled in Settings; if unavailable, explain the error and never bypass it with shell or desktop tools. Use desktop_observe for screen content; camera frames cannot be drawn on with draw_tool.",
+    parameters: {
+      type: 'object',
+      properties: {
+        seconds: {
+          type: 'number',
+          minimum: 0,
+          maximum: 10,
+          description: 'Omit or 0 for one frame now; 1-10 to watch for that long.',
+        },
+      },
+      additionalProperties: false,
+    },
     async execute(_id, params, signal) {
-      const result = await bridge('/tools/camera_snapshot', params, signal);
+      const result = await bridge('/tools/camera_look', params, signal);
+      const frames = result.frames as { data: string; capturedAt: number }[];
+      const span =
+        frames.length > 1 ? ` over ${((frames.at(-1)!.capturedAt - frames[0].capturedAt) / 1000).toFixed(1)}s` : '';
       return {
         content: [
           {
             type: 'text',
-            text: `Webcam photo captured at ${new Date(Number(result.capturedAt)).toISOString()}. The camera is now closed. This is a single moment, not a live view or a desktop screenshot.`,
+            text: `${frames.length} live webcam ${frames.length === 1 ? 'frame' : 'frames, oldest first,'}${span}, ending ${new Date(frames.at(-1)!.capturedAt).toISOString()}. The camera stays on with a visible preview and closes when Friday goes back to sleep; call camera_off when the user is done.`,
           },
-          { type: 'image', data: String(result.data), mimeType: 'image/jpeg' },
+          ...frames.map((frame) => ({ type: 'image' as const, data: frame.data, mimeType: 'image/jpeg' })),
         ],
-        details: { capturedAt: result.capturedAt, mimeType: result.mimeType },
+        details: { frames: frames.map((frame) => frame.capturedAt), mimeType: result.mimeType },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: 'camera_off',
+    label: 'Turn the camera off',
+    description: 'Turn the webcam off when the user is done showing you things or asks you to stop looking.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    async execute(_id, params, signal) {
+      const result = await bridge('/tools/camera_off', params, signal);
+      return { content: [{ type: 'text', text: `Camera ${String(result.camera)}.` }], details: result };
     },
   });
 
