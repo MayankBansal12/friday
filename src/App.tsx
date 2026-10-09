@@ -1441,8 +1441,14 @@ export default function App() {
         if (voiceFollowUpRef.current.taskChanged(next)) followUpPendingRef.current = true;
       }
     });
+    let cameraErrorAt = 0;
     const removeState = window.buddy.onFridayState((runtime) => {
       setFriday(runtime);
+      // A camera that stopped on its own says why, once, in the pill and the workspace alike.
+      if (runtime.cameraError && runtime.cameraError.at > cameraErrorAt) {
+        cameraErrorAt = runtime.cameraError.at;
+        setActionError(runtime.cameraError.message);
+      }
       if (speakingRef.current && !runtime.presentation.speaking) speakingEndedAtRef.current = Date.now();
       speakingRef.current = runtime.presentation.speaking;
       echoRef.current = runtime.presentation.echo;

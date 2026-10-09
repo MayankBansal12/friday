@@ -42,15 +42,14 @@ export function CameraStage({ state, closable }: { state: CameraView; closable?:
           {camera === 'closing' ? 'Turning camera off…' : 'Starting camera…'}
         </span>
       )}
-      {/* Restarts its flash animation on every completed look. */}
-      {activity?.kind === 'looked' && <span className="camera-shutter" key={activity.at} aria-hidden="true" />}
       <span className="camera-live">
         <i aria-hidden="true" />
         {camera === 'live' ? 'Live' : camera === 'opening' ? 'Starting' : 'Closing'}
       </span>
-      {line && camera === 'live' && (
-        <span className="camera-activity" role="status">
-          {line}
+      {/* The header already announces camera narration; this chip is visual only. */}
+      {camera === 'live' && (
+        <span className={`camera-activity ${line ? '' : 'is-idle'}`} aria-hidden="true">
+          {line ?? 'Friday only sees when it looks'}
         </span>
       )}
       {closable && camera === 'live' && (

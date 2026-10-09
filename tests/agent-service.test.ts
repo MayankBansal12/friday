@@ -205,8 +205,48 @@ describe('live camera tools', () => {
     const camera = new FakeCamera();
     const { service, tool } = await fixture({ camera });
     await service.submit('Look');
-    for (let i = 0; i < 24; i++) expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    for (let i = 0; i < 23; i++) expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+    // A watch near the cap is trimmed to the remaining allowance, never past it.
+    expect((await tool(0, '/tools/camera_look', { seconds: 1 })).data.frames).toHaveLength(1);
     expect((await tool(0, '/tools/camera_look')).data.error).toContain('looked many times');
+  });
+
+  it('reports a camera that stops on its own, and clears the error when it turns on again', async () => {
+    const camera = new FakeCamera();
+    const { service } = await fixture({ camera });
+    await service.cameraOn();
+    camera.emit('failure', new Error('The camera stopped sending video.'));
+    await camera.close();
+    expect(service.state().cameraError).toMatchObject({ message: 'The camera stopped sending video.' });
+    await service.cameraOn();
+    expect(service.state().cameraError).toBeUndefined();
+  });
+
+  it('keeps the camera off while Friday controls the desktop', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.cameraOn();
+    await service.blockCamera('Friday is controlling your computer.');
+    expect(service.state().camera).toBe('off');
+    await service.submit('Look at me');
+    expect((await tool(0, '/tools/camera_look')).data.error).toContain('controlling your computer');
+    await service.blockCamera(undefined);
+    expect((await tool(0, '/tools/camera_look')).status).toBe(200);
+  });
+
+  it('lets a replaced watch finish without clearing the newer watch narration', async () => {
+    const camera = new FakeCamera();
+    const { service, tool } = await fixture({ camera });
+    await service.submit('Watch this');
+    const old = tool(0, '/tools/camera_look', { seconds: 1 });
+    await vi.waitFor(() => expect(service.state().cameraActivity?.kind).toBe('watching'));
+    await service.submit('No, watch this instead');
+    // Replacing a running request starts a fresh Pi session.
+    const newer = tool(1, '/tools/camera_look', { seconds: 2 });
+    await vi.waitFor(() => expect(service.state().cameraActivity).toMatchObject({ seconds: 2 }));
+    await old;
+    expect(service.state().cameraActivity).toMatchObject({ kind: 'watching', seconds: 2 });
+    expect((await newer).status).toBe(200);
   });
 
   it.each(['camera_off', 'button', 'stop', 'disable', 'conversation', 'shutdown'])(

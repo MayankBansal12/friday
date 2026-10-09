@@ -99,6 +99,8 @@ export interface FridayState {
   /** Off only once every capture process has released the device, including cancellation cleanup. */
   camera?: CameraState;
   cameraActivity?: CameraActivity;
+  /** Why the camera last stopped on its own; cleared when it turns on again. */
+  cameraError?: { message: string; at: number };
   parentId: string;
   sessions: SessionRecord[];
   presentation: PresentationState;
@@ -116,7 +118,7 @@ export function cameraActivityLine(state: Pick<FridayState, 'camera' | 'cameraAc
   if (activity?.kind === 'looking') return 'Looking through your camera…';
   if (activity?.kind === 'watching') return `Watching for ${activity.seconds}s…`;
   if (activity?.kind === 'looked' && now - activity.at < cameraLookedMs)
-    return activity.frames && activity.frames > 1 ? `Watched you · ${activity.frames} frames` : 'Looked at you';
+    return activity.frames && activity.frames > 1 ? `Checked ${activity.frames} frames` : 'Looked through your camera';
   return undefined;
 }
 

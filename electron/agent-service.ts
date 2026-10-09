@@ -134,6 +134,9 @@ export class AgentService extends EventEmitter {
   private interactionSequence = 0;
   private cameraIdle?: NodeJS.Timeout;
   private cameraActivity?: CameraActivity;
+  private cameraError?: { message: string; at: number };
+  /** Set while the camera must stay off, e.g. during desktop control. */
+  private cameraBlocked?: string;
   private server = createServer((request, response) => void this.handle(request, response));
   private runtimeUrl = '';
   private readonly spawnProcess: typeof spawn;
@@ -165,6 +168,12 @@ export class AgentService extends EventEmitter {
       this.publish();
     });
     options.camera?.on('frame', (frame: CameraFrame) => this.emit('camera-frame', frame));
+    // A camera that stops on its own (unplugged, stalled, denied) must say why, not just vanish.
+    options.camera?.on('failure', (error?: Error) => {
+      if (!error) return;
+      this.cameraError = { message: error.message, at: Date.now() };
+      this.publish();
+    });
     this.grace = options.terminateGraceMs ?? 1200;
     this.channel = new SpeechChannel(() => this.options.voice, {
       speaking: (active, _text, lane) => {
@@ -244,6 +253,7 @@ export class AgentService extends EventEmitter {
       presentation: this.presentation,
       camera: this.options.camera?.state ?? 'off',
       cameraActivity: this.options.camera?.state === 'off' ? undefined : this.cameraActivity,
+      cameraError: this.cameraError,
     });
   }
   getSettings() {
@@ -1371,6 +1381,11 @@ export class AgentService extends EventEmitter {
     if (this.shuttingDown) throw new Error('Friday is shutting down.');
     if (this.options.camera.state === 'closing')
       throw new Error('The camera is still closing. Reconnect the webcam if its light stays on.');
+    if (this.cameraBlocked) throw new Error(this.cameraBlocked);
+    if (this.cameraError) {
+      this.cameraError = undefined;
+      this.publish();
+    }
     await this.options.camera.open();
     // Settings may have changed while the device was opening.
     if (this.settings.cameraEnabled !== true || this.shuttingDown) {
@@ -1378,6 +1393,12 @@ export class AgentService extends EventEmitter {
       throw new Error('Camera access was turned off.');
     }
     this.armCameraIdle();
+  }
+
+  /** Keep the camera off while `reason` applies; undefined allows it again. */
+  async blockCamera(reason?: string) {
+    this.cameraBlocked = reason;
+    if (reason) await this.cameraOff();
   }
 
   /** Close the camera. Bounded so a wedged device cannot block Stop or Quit; its indicator stays until it closes. */
@@ -1417,8 +1438,13 @@ export class AgentService extends EventEmitter {
     const seconds = data.seconds ?? 0;
     if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0 || seconds > 10)
       throw new Error('seconds must be a number from 0 to 10.');
-    if ((task.cameraFrames ?? 0) >= 24)
-      throw new Error('Friday already looked many times for this request. Reply with what you saw.');
+    const allowance = 24 - (task.cameraFrames ?? 0);
+    if (allowance <= 0) throw new Error('Friday already looked many times for this request. Reply with what you saw.');
+    const activity: CameraActivity = {
+      kind: seconds ? 'watching' : 'looking',
+      seconds: seconds || undefined,
+      at: Date.now(),
+    };
     const abort = new AbortController();
     const disconnected = () => {
       if (!response.writableEnded) abort.abort();
@@ -1427,12 +1453,12 @@ export class AgentService extends EventEmitter {
     try {
       if (response.destroyed || response.socket?.destroyed) throw new Error('Camera look cancelled.');
       this.emit('camera-look');
-      this.cameraActivity = { kind: seconds ? 'watching' : 'looking', seconds: seconds || undefined, at: Date.now() };
+      this.cameraActivity = activity;
       this.publish();
       await this.cameraOn();
       const camera = this.options.camera!;
       // One frame now, or up to six spread across the requested seconds.
-      const count = seconds ? Math.min(6, Math.floor(seconds) + 1) : 1;
+      const count = Math.min(allowance, seconds ? Math.min(6, Math.floor(seconds) + 1) : 1);
       const interval = count > 1 ? (seconds * 1000) / (count - 1) : 0;
       const start = Date.now();
       const frames: CameraFrame[] = [];
@@ -1462,8 +1488,8 @@ export class AgentService extends EventEmitter {
       };
     } finally {
       response.off('close', disconnected);
-      // A failed or cancelled look must not leave "Looking…" on screen.
-      if (this.cameraActivity?.kind !== 'looked') {
+      // A failed or cancelled look must not leave "Looking…" on screen, nor clear a newer look's.
+      if (this.cameraActivity === activity) {
         this.cameraActivity = undefined;
         this.publish();
       }

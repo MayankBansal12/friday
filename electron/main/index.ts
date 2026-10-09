@@ -328,11 +328,18 @@ function createWindow(openSilently: boolean) {
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   // A reloaded or crashed renderer is no longer listening; never route voice to it.
-  window.webContents.on('did-start-loading', () => liveKit?.listener(false));
+  // A reloaded or crashed renderer shows no camera preview, so the camera turns off with it.
+  window.webContents.on('did-start-loading', () => {
+    liveKit?.listener(false);
+    void service?.cameraOff();
+  });
   window.webContents.on('render-process-gone', (_event, details) => {
     debugLog('APP', 'renderer gone', { reason: details.reason, exitCode: details.exitCode });
     liveKit?.listener(false);
+    void service?.cameraOff();
   });
+  // However the window is minimized (Friday's button or the window manager), the preview is gone.
+  window.on('minimize', () => void service?.cameraOff());
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
   else void window.loadFile(join(root, 'dist/index.html'));
@@ -555,6 +562,10 @@ if (hasSingleInstanceLock)
       gazeTarget = point;
     };
     bridge.onControlChanged = (active) => {
+      // Controlling the desktop hides Friday's window, so its camera preview can't stay on screen.
+      void service.blockCamera(
+        active ? 'Friday is controlling your computer. The camera stays off until that finishes.' : undefined,
+      );
       if (window && !window.isDestroyed()) window.webContents.send('desktop:controlling', active);
     };
     let lastDebugPresentation = '';

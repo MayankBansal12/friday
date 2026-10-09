@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -29,6 +29,9 @@ import './presence.css';
 import { Conversation } from './Conversation';
 import { CameraStage } from './CameraStage';
 import { useCameraLine } from './useCameraLine';
+
+/** The camera panel never grows past the screen; Friday's window sits 5px below the top panel. */
+const cameraMax = Math.min(690, window.screen.availHeight - 40);
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -124,8 +127,9 @@ export function FridayPresence(props: Props) {
   const { state, task, listening, speaking } = props;
   const cameraOn = Boolean(cameraStatus(state));
   const cameraLine = useCameraLine(state);
-  // Starting, looking, watching, and closing lead the status line; "Looked at you" yields to speech.
-  const cameraNow = cameraLine && state?.cameraActivity?.kind !== 'looked' ? cameraLine : undefined;
+  // Starting, looking, watching, and closing lead the status line; a finished look yields to speech.
+  const cameraNow =
+    cameraLine && !(state?.camera === 'live' && state.cameraActivity?.kind === 'looked') ? cameraLine : undefined;
   const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
@@ -203,15 +207,17 @@ export function FridayPresence(props: Props) {
   const selected = children.find((s) => s.id === props.selectedChildId);
   const detail = props.error || task?.error || state?.presentation.text || '';
   const contentKey = `${state?.presentation.taskId ?? ''}:${detail}`;
+  // A camera that stopped on its own opens the panel like a reply, so the reason is seen, not hovered for.
+  const cameraFailed = Boolean(props.error && props.error === state?.cameraError?.message);
   useEffect(() => {
-    if (!state?.presentation.expanded || !detail || dismissed === contentKey) return;
+    if (!(state?.presentation.expanded || cameraFailed) || !detail || dismissed === contentKey) return;
     const opening = setTimeout(() => setAutoOpen(true), 0);
     const timer = setTimeout(() => setAutoOpen(false), 15_000);
     return () => {
       clearTimeout(opening);
       clearTimeout(timer);
     };
-  }, [contentKey, state?.presentation.expanded, detail, dismissed]);
+  }, [contentKey, state?.presentation.expanded, cameraFailed, detail, dismissed]);
   const approvals = props.tasks.filter((t) => t.approval);
   const important = Boolean(
     approvals.length || ((props.error || task?.error || state?.presentation.expanded) && dismissed !== contentKey),
@@ -621,6 +627,7 @@ export function FridayPresence(props: Props) {
         <motion.section
           ref={panelRef}
           className={`friday-presence ${expanded ? 'is-expanded' : ''} ${cameraOn && expanded ? 'is-camera' : ''}`}
+          style={cameraOn ? ({ '--camera-max': `${cameraMax}px` } as CSSProperties) : undefined}
           aria-label="Friday companion"
           initial={false}
           animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}

@@ -54,10 +54,10 @@ describe('camera narration', () => {
       'Watching for 5s…',
     );
     const looked = { camera: 'live' as const, cameraActivity: { kind: 'looked' as const, frames: 1, at: 1000 } };
-    expect(cameraActivityLine(looked, 2000)).toBe('Looked at you');
+    expect(cameraActivityLine(looked, 2000)).toBe('Looked through your camera');
     expect(cameraActivityLine(looked, 7000)).toBeUndefined();
     expect(cameraActivityLine({ camera: 'live', cameraActivity: { kind: 'looked', frames: 4, at: 1000 } }, 2000)).toBe(
-      'Watched you · 4 frames',
+      'Checked 4 frames',
     );
     expect(cameraActivityLine({ camera: 'closing' }, 0)).toBe('Turning your camera off…');
     expect(cameraActivityLine({ camera: 'off' }, 0)).toBeUndefined();

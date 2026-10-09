@@ -56,11 +56,16 @@ try {
   await camera('live', "{ kind: 'watching', seconds: 5, at: Date.now() }");
   assert.match(await evaluate(status), /Watching for 5s/);
   await camera('live', "{ kind: 'looked', frames: 1, at: Date.now() }");
-  assert.match(await evaluate(status), /Looked at you/);
-  assert.equal(await exists('.camera-shutter'), true);
+  assert.match(await evaluate(status), /Looked through your camera/);
   assert.equal(await exists('.camera-stage.is-looking'), false);
   await camera('live', "{ kind: 'looked', frames: 1, at: Date.now() - 10000 }");
-  assert.doesNotMatch(await evaluate(status), /Looked at you/);
+  assert.doesNotMatch(await evaluate(status), /Looked through your camera/);
+  // While idle, the video says plainly that a live preview is not Friday watching.
+  assert.match(await evaluate("document.querySelector('.camera-activity').textContent"), /only sees when it looks/);
+  // Closing always leads, even right after a look.
+  await camera('closing', "{ kind: 'looked', frames: 1, at: Date.now() }");
+  assert.match(await evaluate(status), /Turning your camera off/);
+  await camera('live');
 
   // Stop releases the camera; a slow device keeps the camera UI until it actually closes.
   await evaluate('fixture.deferCameraClose = true');
@@ -72,6 +77,13 @@ try {
   assert.doesNotMatch(await evaluate(status), /camera/i);
   assert.equal(await exists('.camera-stage'), false);
   assert.equal(await exists('.friday-presence.is-camera'), false);
+
+  // A camera that stops on its own explains why instead of just vanishing.
+  await evaluate(
+    "fixture.runtime.camera = 'off'; fixture.runtime.cameraError = { message: 'The camera stopped sending video.', at: Date.now() }; fixture.emit()",
+  );
+  await pause();
+  assert.match(await evaluate('document.body.textContent'), /The camera stopped sending video/);
 
   await camera('live');
   await evaluate('document.querySelector(\'.camera-stage [aria-label="Turn camera off"]\').click()');

@@ -229,6 +229,8 @@
   color: #d8e6c4;
   font-size: 12px;
   margin: 0 0 12px;
+  /* The user's words sit on the user's side, like their messages. */
+  text-align: right;
 }
 .heard-text.ignored {
   display: block;
@@ -237,7 +239,8 @@
   background: none;
   color: rgba(216, 230, 196, 0.45);
   font-style: italic;
-  text-align: left;
+  width: 100%;
+  text-align: right;
   cursor: pointer;
 }
 .heard-text.ignored:hover {
