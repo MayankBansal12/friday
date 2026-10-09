@@ -327,7 +327,11 @@
           const root = document.querySelector('#root');
           const w = { orb: 96, tasks: 400, quiet: 520, bar: 520, panel: 520, details: 760 }[layout];
           root.style.width = `min(${w}px, calc(100vw - 24px))`;
-          root.style.top = ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '5px';
+          const bottom =
+            new URLSearchParams(location.search).get('anchor') === 'bottom' &&
+            ['quiet', 'bar', 'panel'].includes(layout);
+          root.style.top = bottom ? 'auto' : ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '5px';
+          root.style.bottom = bottom ? '5px' : 'auto';
           root.style.left = ['orb', 'tasks'].includes(layout) ? 'auto' : '50%';
           root.style.right = ['orb', 'tasks'].includes(layout) ? '18px' : 'auto';
           root.style.transform = ['orb', 'tasks'].includes(layout) ? 'none' : 'translateX(-50%)';
@@ -388,6 +392,8 @@
           callbacks.onExpanded?.(v);
         },
         hide: noop,
+        /** ?anchor=bottom previews a notch dragged into the lower half of the screen. */
+        notchAnchor: async () => new URLSearchParams(location.search).get('anchor') ?? 'top',
         setCamera: async (on) => {
           fixture.calls.push(['camera', on]);
           runtime.camera = on ? 'live' : 'off';
@@ -404,6 +410,7 @@
         'onGuidance',
         'onControlling',
         'onCameraFrame',
+        'onNotchAnchor',
       ])
         window.buddy[name] = (fn) => {
           callbacks[name] = fn;

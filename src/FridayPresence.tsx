@@ -21,6 +21,7 @@ import {
   cameraStatus,
   type FridayState,
   type ListeningState,
+  type NotchAnchor,
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
@@ -133,6 +134,19 @@ export function FridayPresence(props: Props) {
   const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
+  // In the lower half of the screen the notch grows upward, with its bar at the bottom.
+  const [anchor, setAnchor] = useState<NotchAnchor>('top');
+  useEffect(() => {
+    let disposed = false;
+    const remove = window.buddy.onNotchAnchor(setAnchor);
+    void window.buddy.notchAnchor().then((value) => {
+      if (!disposed) setAnchor(value);
+    });
+    return () => {
+      disposed = true;
+      remove();
+    };
+  }, []);
   const [showTasks, setShowTasks] = useState(false);
   const { typing, onTypingChange: setTyping } = props;
   const { draft: text, onDraftChange: setText } = props;
@@ -573,7 +587,7 @@ export function FridayPresence(props: Props) {
 
   return (
     <main
-      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''}`}
+      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''} ${anchor === 'bottom' && !background ? 'anchor-bottom' : ''}`}
       data-surface={surface}
       onMouseEnter={enter}
       onMouseLeave={leave}

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { Camera, type CameraFrame } from '../camera.js';
+import { anchorNotch, notchY } from '../notch-placement.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -29,6 +30,7 @@ import {
   cameraStatus,
   type BuddySettings,
   type ListeningState,
+  type NotchAnchor,
   type SurfaceLayout,
   type TaskRecord,
   type VoiceGate,
@@ -59,6 +61,7 @@ if (debugEnabled()) {
     'tasks:list',
     'window:surface',
     'window:notch-offset',
+    'window:anchor',
   ]);
   ipcMain.handle = (channel, listener) =>
     register(channel, async (event, ...args) => {
@@ -131,6 +134,8 @@ let surfaceWidth: number | undefined;
 let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
 let notchOffset: { x: number; y: number } | undefined;
+/** Which edge of the notch stays put while it resizes; the renderer lays out to match. */
+let notchAnchor: NotchAnchor = 'top';
 let notchPersistTimer: NodeJS.Timeout | undefined;
 let pointerTimer: NodeJS.Timeout | undefined;
 let lastPointer = '';
@@ -193,7 +198,9 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const y = area.y + (notch ? 5 : 12);
   if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
-    const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
+    const nextY = notch
+      ? notchY(area, notchOffset.y, height)
+      : Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
     if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
     return { x: nextX, y: nextY, width, height };
   }
@@ -209,6 +216,11 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   }
   const layoutChanged = layout !== surface;
   surface = layout;
+  const anchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
+  if (anchor !== notchAnchor) {
+    notchAnchor = anchor;
+    window.webContents.send('window:anchor', anchor);
+  }
   surfaceHeight = contentHeight;
   surfaceWidth = contentWidth;
   const bounds = surfaceBounds(layout, contentHeight);
@@ -242,7 +254,9 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
         layout,
         width: bounds.width,
         height: bounds.height,
-        ...(surface === layout && notchOffset ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y } : {}),
+        ...(surface === layout && notchOffset
+          ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y, anchor: notchAnchor }
+          : {}),
       })
       .then((result) => {
         if (result.placed) nativePlacement = placement;
@@ -819,6 +833,10 @@ if (hasSingleInstanceLock)
       window?.setFocusable(true);
       window?.show();
       window?.focus();
+    });
+    ipcMain.handle('window:anchor', (event) => {
+      fromWindow(event);
+      return notchAnchor;
     });
     ipcMain.handle('window:notch-offset', (event, value: unknown) => {
       fromWindow(event);

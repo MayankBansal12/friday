@@ -133,6 +133,9 @@ export function cameraStatus(state?: Pick<FridayState, 'camera'>) {
         : undefined;
 }
 
+/** The notch edge that stays put while it resizes: bottom when dragged into the lower half of the screen. */
+export type NotchAnchor = 'top' | 'bottom';
+
 export type SurfaceLayout = 'orb' | 'tasks' | 'quiet' | 'bar' | 'panel' | 'details';
 
 export interface BuddySettings {
