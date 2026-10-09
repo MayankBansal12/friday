@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { Camera, type CameraFrame } from '../camera.js';
-import { anchorNotch, notchY } from '../notch-placement.js';
+import { anchorNotch, notchFrame } from '../notch-placement.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -198,13 +198,18 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const y = area.y + (notch ? 5 : 12);
   if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
-    const nextY = notch
-      ? notchY(area, notchOffset.y, height)
-      : Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
-    if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
-    return { x: nextX, y: nextY, width, height };
+    const frame = notch
+      ? notchFrame(area, notchOffset.y, height)
+      : {
+          y: Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height),
+          height,
+          visibleHeight: height,
+        };
+    if (nextX < 0 || frame.y < 0 || !Number.isFinite(nextX) || !Number.isFinite(frame.y))
+      return { x, y, width, height, visibleHeight: height };
+    return { x: nextX, width, ...frame };
   }
-  return { x, y, width, height };
+  return { x, y, width, height, visibleHeight: height };
 }
 
 function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?: number) {
@@ -223,7 +228,7 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   }
   surfaceHeight = contentHeight;
   surfaceWidth = contentWidth;
-  const bounds = surfaceBounds(layout, contentHeight);
+  const { visibleHeight, ...bounds } = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
   const boundsChanged = Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value);
   if (boundsChanged) window.setBounds(bounds);
@@ -231,6 +236,8 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   // Keep a small margin for the shadow and the bridge into the hover panel.
   if (process.platform === 'linux' && !bridge?.controlling) {
     const { width, height } = bounds;
+    // A bottom-anchored notch shows its content at the bottom of a taller, fixed canvas.
+    const visibleTop = height - visibleHeight;
     const notchWidth = Math.max(1, Math.min(width, Math.ceil((contentWidth ?? (layout === 'quiet' ? 360 : 500)) + 20)));
     const regions =
       layout === 'tasks'
@@ -242,7 +249,7 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
           ? [{ x: width - 84, y: 4, width: 80, height: 80 }]
           : layout === 'details'
             ? [{ x: 0, y: 0, width, height }]
-            : [{ x: Math.floor((width - notchWidth) / 2), y: 0, width: notchWidth, height }];
+            : [{ x: Math.floor((width - notchWidth) / 2), y: visibleTop, width: notchWidth, height: visibleHeight }];
     window.setShape(regions);
   }
   const placement = JSON.stringify({ layout, ...bounds });
