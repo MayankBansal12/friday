@@ -394,6 +394,9 @@
         hide: noop,
         /** ?anchor=bottom previews a notch dragged too low for its panel to open downward. */
         notchAnchor: async () => new URLSearchParams(location.search).get('anchor') ?? 'top',
+        setNotchOffset: async (offset) => {
+          fixture.calls.push(['notchOffset', offset]);
+        },
         setCamera: async (on) => {
           fixture.calls.push(['camera', on]);
           runtime.camera = on ? 'live' : 'off';

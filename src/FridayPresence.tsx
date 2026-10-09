@@ -134,6 +134,11 @@ export function FridayPresence(props: Props) {
   const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
+  // Moving the pill is not asking to see it: a drag closes the hover panel, and the pointer must
+  // leave and come back before hovering opens it again.
+  const [dragging, setDragging] = useState(false);
+  const draggingRef = useRef(false);
+  const hoverHeld = useRef(false);
   // Near the bottom of the screen, where its panel can't fit below, the notch grows upward, with its bar at the bottom.
   const [anchor, setAnchor] = useState<NotchAnchor>('top');
   useEffect(() => {
@@ -262,7 +267,9 @@ export function FridayPresence(props: Props) {
   const background = !engaged && visible.length > 0;
   // A live camera keeps the panel open: its video stays on screen for as long as the camera is on.
   const expanded =
-    !props.controlling && !background && (cameraOn || typing || hovered || (autoOpen && dismissed !== contentKey));
+    !props.controlling &&
+    !background &&
+    (cameraOn || typing || (!dragging && (hovered || (autoOpen && dismissed !== contentKey))));
   const conversation = props.tasks
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -422,6 +429,12 @@ export function FridayPresence(props: Props) {
       const dx = Math.round(event.screenX - origin.x);
       const dy = Math.round(event.screenY - origin.y);
       if (!moved && Math.hypot(dx, dy) < 6) return;
+      if (!moved) {
+        if (leaveTimer.current) clearTimeout(leaveTimer.current);
+        hoverHeld.current = draggingRef.current = true;
+        setHovered(false);
+        setDragging(true);
+      }
       moved = true;
       event.preventDefault();
       if (!panelRef.current?.hasPointerCapture?.(event.pointerId))
@@ -435,7 +448,16 @@ export function FridayPresence(props: Props) {
         panelRef.current.releasePointerCapture(event.pointerId);
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
-      if (moved) flush();
+      if (moved) {
+        flush();
+        draggingRef.current = false;
+        setHovered(false);
+        setDragging(false);
+        // Dropped away from the pointer, there is no leave to wait for: hover works on the next visit.
+        requestAnimationFrame(() => {
+          if (!panelRef.current?.matches(':hover')) hoverHeld.current = false;
+        });
+      }
       origin = undefined;
       base = undefined;
       moved = false;
@@ -461,9 +483,10 @@ export function FridayPresence(props: Props) {
 
   function enter() {
     if (leaveTimer.current) clearTimeout(leaveTimer.current);
-    setHovered(true);
+    if (!hoverHeld.current) setHovered(true);
   }
   function leave() {
+    if (!draggingRef.current) hoverHeld.current = false;
     if (leaveTimer.current) clearTimeout(leaveTimer.current);
     leaveTimer.current = setTimeout(() => {
       if (!keyboardFocus.current || !panelRef.current?.contains(document.activeElement)) {
