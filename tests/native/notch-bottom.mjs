@@ -69,6 +69,42 @@ try {
   await pause(300);
   assert.equal(await evaluate("Boolean(document.querySelector('.presence-root.anchor-bottom'))"), true);
   assert.equal(await evaluate(opacity), '1', 'the pill reappears in its new layout');
+  // Crossing back before the first switch has shown the pill again must not reveal it early.
+  await evaluate("window.buddy.switchAnchor('top')");
+  await pause(60);
+  await evaluate("fixture.calls = fixture.calls.filter(c => c[0] !== 'anchorReady'); window.buddy.finishAnchor()");
+  await pause(40);
+  await evaluate("window.buddy.switchAnchor('bottom')");
+  await pause(300);
+  assert.equal(await evaluate(opacity), '0', 'a stale reveal must not show the pill mid-switch');
+  assert.equal(await evaluate("fixture.calls.some(c => c[0] === 'anchorReady')"), true, 'the second switch is acked');
+  await evaluate('window.buddy.finishAnchor()');
+  await pause(300);
+  assert.equal(await evaluate(opacity), '1');
+
+  // A bottom-anchored pill keeps its natural height in a short window, so opening the camera
+  // asks main for the taller camera canvas instead of staying squeezed into the hover one.
+  // On a 1080p screen the camera panel is taller than the hover canvas.
+  await call('Emulation.setDeviceMetricsOverride', {
+    width: 1920,
+    height: 1080,
+    screenWidth: 1920,
+    screenHeight: 1080,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await call('Page.navigate', {
+    url: `${process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5178'}/tests/presence-preview.html?state=quiet&anchor=bottom`,
+  });
+  for (let i = 0; i < 60 && !(await evaluate("Boolean(document.querySelector('.anchor-bottom .presence-bar'))")); i++)
+    await pause(100);
+  await pause(800);
+  // The real window is the 432px hover canvas when the camera opens.
+  await evaluate("document.querySelector('#root').style.setProperty('height', '432px', 'important')");
+  await evaluate("fixture.surfaceChanges = []; fixture.runtime.camera = 'live'; fixture.emit()");
+  await pause(800);
+  const requested = await evaluate('Math.max(0, ...fixture.surfaceChanges.map(c => c.height ?? 0))');
+  assert(requested > 432, `the camera panel must ask for more than the 432px hover canvas, asked ${requested}`);
   console.log('Notch bottom: the panel opened upward with its bar fixed under the pointer, and stayed open.');
   console.log('Notch bottom: switching edges hid the pill until the window was re-placed, then showed it.');
 } finally {

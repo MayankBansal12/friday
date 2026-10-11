@@ -597,6 +597,9 @@
 }
 .anchor-bottom .friday-presence {
   flex-direction: column-reverse;
+  /* Never squeeze the pill to the current window: its natural height is how main learns it needs
+     the taller camera canvas. */
+  flex-shrink: 0;
 }
 .anchor-bottom .presence-body {
   border-top: 0;

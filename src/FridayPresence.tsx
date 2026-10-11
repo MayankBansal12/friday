@@ -25,7 +25,7 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
-import { anchorNotch, notchCanvasHeight, restingBarHeight } from '../electron/notch-placement';
+import { bottomCanvas } from '../electron/notch-placement';
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
@@ -40,8 +40,7 @@ function cameraMaxAbove(offsetY?: number) {
     y: (window.screen as Screen & { availTop?: number }).availTop ?? 0,
     height: window.screen.availHeight,
   };
-  const { barTop } = anchorNotch(area, offsetY);
-  return Math.min(cameraMax, Math.min(notchCanvasHeight, barTop + restingBarHeight - area.y) - 12);
+  return Math.min(cameraMax, bottomCanvas(area, offsetY ?? 0, Infinity) - 12);
 }
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
@@ -157,33 +156,41 @@ export function FridayPresence(props: Props) {
     let disposed = false;
     let frame = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const settle = (done: () => void) => {
+    let reveal: (() => void) | undefined;
+    // Each switch starts clean: a reveal still pending from the last one must not show the pill early.
+    const reset = () => {
       cancelAnimationFrame(frame);
-      // Two frames: the first commits the change, the second is on screen.
+      clearTimeout(timer);
+      if (reveal) window.removeEventListener('resize', reveal);
+      reveal = undefined;
+    };
+    // Two frames: the first commits the change, the second is on screen.
+    const settle = (done: () => void) => {
       frame = requestAnimationFrame(() => (frame = requestAnimationFrame(done)));
     };
     const removePrepare = window.buddy.onNotchAnchorPrepare(() => {
+      reset();
       setReanchoring(true);
       settle(() => window.buddy.notchAnchorReady());
     });
     const removeAnchor = window.buddy.onNotchAnchor((next) => {
+      reset();
       setAnchor(next);
-      // Show the pill once the window has its new size; a switch back to the same edge has none.
-      const reveal = () => {
-        window.removeEventListener('resize', reveal);
-        clearTimeout(timer);
+      // Show the pill once the window has its new size; a switch back to the same size has none.
+      const show = () => {
+        reset();
         settle(() => setReanchoring(false));
       };
-      window.addEventListener('resize', reveal);
-      timer = setTimeout(reveal, 120);
+      reveal = show;
+      window.addEventListener('resize', show);
+      timer = setTimeout(show, 120);
     });
     void window.buddy.notchAnchor().then((value) => {
       if (!disposed) setAnchor(value);
     });
     return () => {
       disposed = true;
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
+      reset();
       removePrepare();
       removeAnchor();
     };

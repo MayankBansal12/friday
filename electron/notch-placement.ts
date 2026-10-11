@@ -27,23 +27,38 @@ export const hoverCanvasHeight = hoverPanelHeight + 12;
 export const notchCanvasHeight = 712;
 
 /**
+ * A bottom-anchored camera canvas. A bottom-anchored bar always has at least this much room above
+ * it, so like the hover canvas it stays one height while the pill is dragged around (670px on a
+ * 1080p screen; the renderer caps the camera panel to it).
+ */
+export function cameraCanvasHeight(areaHeight: number) {
+  return Math.max(hoverCanvasHeight, Math.min(notchCanvasHeight, areaHeight - hoverPanelHeight + restingBarHeight));
+}
+
+/** A bottom-anchored window's height for content `height` tall: its canvas, or the room above the bar. */
+export function bottomCanvas(area: { y: number; height: number }, offsetY: number, height: number) {
+  const { barTop } = anchorNotch(area, offsetY);
+  const canvas = height > hoverCanvasHeight ? cameraCanvasHeight(area.height) : hoverCanvasHeight;
+  return Math.min(canvas, barTop + restingBarHeight - area.y);
+}
+
+/**
  * Where a dragged notch window goes for content `height` tall, and how much of it is visible.
  *
  * Top-anchored windows grow downward from a fixed top edge. Bottom-anchored windows keep a fixed
- * canvas whose bottom edge is the bar's: room for the hover panel, or for the camera panel while
- * that is open (`tall`). Only their input shape follows the content, so opening the panel or
- * dragging the pill never resizes them. On X11 a resize keeps the old frame at the window's
- * top-left until Chromium repaints, which would flash the bottom-aligned pill out of place.
+ * canvas whose bottom edge is the bar's (`bottomCanvas`), and only their input shape follows the
+ * content, so opening the panel or dragging the pill only moves them. On X11 a resize keeps the old
+ * frame at the window's top-left until Chromium repaints, which would flash the bottom-aligned
+ * pill out of place.
  *
- * main passes its current `anchor` and `tall` while a switch is pending; they default to the
- * ones the bar's position and the content call for.
+ * While a switch is pending, main passes the `anchor` and `canvas` currently in effect.
  */
 export function notchFrame(
   area: { y: number; height: number },
   offsetY: number,
   height: number,
   anchor = anchorNotch(area, offsetY).anchor,
-  tall = height > hoverCanvasHeight,
+  canvas = bottomCanvas(area, offsetY, height),
 ) {
   const { barTop } = anchorNotch(area, offsetY);
   if (anchor === 'top')
@@ -53,6 +68,6 @@ export function notchFrame(
       visibleHeight: height,
     };
   const bottom = barTop + restingBarHeight;
-  const canvas = Math.min(tall ? notchCanvasHeight : hoverCanvasHeight, bottom - area.y);
-  return { y: bottom - canvas, height: canvas, visibleHeight: Math.min(height, canvas) };
+  const y = Math.max(area.y, bottom - canvas);
+  return { y, height: bottom - y, visibleHeight: Math.min(height, bottom - y) };
 }

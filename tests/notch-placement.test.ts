@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorNotch,
+  cameraCanvasHeight,
   hoverCanvasHeight,
   hoverPanelHeight,
-  notchCanvasHeight,
   notchFrame,
   restingBarHeight,
 } from '../electron/notch-placement.js';
@@ -36,8 +36,10 @@ describe('notch anchoring', () => {
     }
     expect(frames.map((frame) => frame.visibleHeight)).toEqual([54, 66, 420]);
     // The camera panel gets the taller canvas, still ending at the bar (main hides the pill to switch).
-    const camera = notchFrame(area, 900, 700);
-    expect(camera).toMatchObject({ height: notchCanvasHeight, visibleHeight: 700 });
+    // The renderer caps the camera panel to it; 670px is all a bottom-anchored bar always has above.
+    const camera = notchFrame(area, 900, 660);
+    expect(cameraCanvasHeight(area.height)).toBe(670);
+    expect(camera).toMatchObject({ height: 670, visibleHeight: 660 });
     expect(camera.y + camera.height).toBe(frames[0].y + frames[0].height);
     // Low on a short screen the canvas still ends at the bar and never rises above the work area.
     const low = notchFrame({ y: 0, height: 500 }, 5000, 420);
@@ -54,14 +56,20 @@ describe('notch anchoring', () => {
     ['1440p', { y: 32, height: 1408 }],
   ])('only moves a bottom-anchored window while it is dragged around the bottom of a %s screen', (_, screen) => {
     // Every drag position in the bottom zone gets the same canvas height: a drag never resizes.
-    const heights = new Set<number>();
-    for (let offset = 0; offset < screen.height; offset += 7) {
-      if (anchorNotch(screen, offset).anchor !== 'bottom') continue;
-      const frame = notchFrame(screen, offset, 66);
-      heights.add(frame.height);
-      expect(frame.y + frame.height).toBe(anchorNotch(screen, offset).barTop + restingBarHeight);
+    // That holds for the hover canvas and, while the camera panel is open, for the camera canvas.
+    for (const [content, canvas] of [
+      [66, hoverCanvasHeight],
+      [660, cameraCanvasHeight(screen.height)],
+    ]) {
+      const heights = new Set<number>();
+      for (let offset = 0; offset < screen.height; offset += 7) {
+        if (anchorNotch(screen, offset).anchor !== 'bottom') continue;
+        const frame = notchFrame(screen, offset, content);
+        heights.add(frame.height);
+        expect(frame.y + frame.height).toBe(anchorNotch(screen, offset).barTop + restingBarHeight);
+      }
+      expect([...heights]).toEqual([canvas]);
     }
-    expect([...heights]).toEqual([hoverCanvasHeight]);
   });
 
   it('never places a bottom-anchored window above the work area, even on a short screen', () => {

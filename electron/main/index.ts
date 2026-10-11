@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { Camera, type CameraFrame } from '../camera.js';
-import { anchorNotch, hoverCanvasHeight, notchFrame } from '../notch-placement.js';
+import { anchorNotch, bottomCanvas, notchFrame } from '../notch-placement.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -136,8 +136,8 @@ let placementTimer: NodeJS.Timeout | undefined;
 let notchOffset: { x: number; y: number } | undefined;
 /** Which edge of the notch stays put while it resizes; the renderer lays out to match. */
 let notchAnchor: NotchAnchor = 'top';
-/** A bottom-anchored notch uses its taller canvas while the camera panel needs it. */
-let notchTall = false;
+/** The bottom-anchored window height in effect; it only changes behind the hide handshake below. */
+let notchCanvas = 0;
 let notchPersistTimer: NodeJS.Timeout | undefined;
 let pointerTimer: NodeJS.Timeout | undefined;
 let lastPointer = '';
@@ -201,7 +201,7 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
     const frame = notch
-      ? notchFrame(area, notchOffset.y, height, notchAnchor, notchTall)
+      ? notchFrame(area, notchOffset.y, height, notchAnchor, notchCanvas)
       : {
           y: Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height),
           height,
@@ -224,8 +224,8 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   const layoutChanged = layout !== surface;
   surface = layout;
   surfaceHeight = contentHeight;
-  const anchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
-  if (anchor !== notchAnchor || wantsTall(anchor) !== notchTall) switchCanvas(anchor);
+  const target = notchTarget();
+  if (target.anchor !== notchAnchor || target.canvas !== notchCanvas) switchCanvas(target);
   surfaceWidth = contentWidth;
   const { visibleHeight, ...bounds } = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
@@ -277,14 +277,20 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
  * re-placed, then shown in its new layout; the pill blinks instead of jumping across the window.
  */
 let anchorSwitch: NodeJS.Timeout | undefined;
-const wantsTall = (anchor: NotchAnchor) => anchor === 'bottom' && (surfaceHeight ?? 0) > hoverCanvasHeight;
-// The same applies to a bottom-anchored notch growing its canvas for the camera panel.
-function switchCanvas(next: NotchAnchor) {
+/** The edge and bottom canvas the bar's position and content call for. */
+function notchTarget() {
+  const area = screen.getPrimaryDisplay().workArea;
+  const anchor = anchorNotch(area, notchOffset?.y).anchor;
+  const canvas = anchor === 'bottom' ? bottomCanvas(area, notchOffset?.y ?? 0, surfaceHeight ?? 0) : 0;
+  return { anchor, canvas };
+}
+// The same applies to any other height change of a bottom-anchored window, like the camera canvas.
+function switchCanvas(next: { anchor: NotchAnchor; canvas: number }) {
   if (!window || window.isDestroyed()) return;
   if (!['quiet', 'bar', 'panel'].includes(surface) || !window.isVisible()) {
-    notchAnchor = next;
-    notchTall = wantsTall(next);
-    window.webContents.send('window:anchor', next);
+    notchCanvas = next.canvas;
+    if (next.anchor !== notchAnchor) window.webContents.send('window:anchor', next.anchor);
+    notchAnchor = next.anchor;
     return;
   }
   if (anchorSwitch) return;
@@ -297,8 +303,7 @@ function finishAnchorSwitch() {
   clearTimeout(anchorSwitch);
   anchorSwitch = undefined;
   // The pointer may have crossed back while the pill was hiding; it is shown again either way.
-  notchAnchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
-  notchTall = wantsTall(notchAnchor);
+  ({ anchor: notchAnchor, canvas: notchCanvas } = notchTarget());
   setSurface(surface, surfaceHeight, surfaceWidth);
   window.webContents.send('window:anchor', notchAnchor);
 }

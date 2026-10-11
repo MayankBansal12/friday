@@ -299,7 +299,14 @@
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
-        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: true }),
+        getSettings: async () => ({
+          wakeWord: 'Friday',
+          cameraEnabled: true,
+          // ?anchor=bottom places the pill where main would anchor it: low on the screen.
+          ...(new URLSearchParams(location.search).get('anchor') === 'bottom'
+            ? { notchOffset: { x: 0, y: screen.availHeight - 100 } }
+            : {}),
+        }),
         updateSettings: async (next) => {
           fixture.calls.push(['settings', next]);
           return { wakeWord: 'Friday', ...next };
