@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { Camera, type CameraFrame } from '../camera.js';
+import { anchorNotch, bottomCanvas, notchFrame } from '../notch-placement.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -29,6 +30,7 @@ import {
   cameraStatus,
   type BuddySettings,
   type ListeningState,
+  type NotchAnchor,
   type SurfaceLayout,
   type TaskRecord,
   type VoiceGate,
@@ -59,6 +61,7 @@ if (debugEnabled()) {
     'tasks:list',
     'window:surface',
     'window:notch-offset',
+    'window:anchor',
   ]);
   ipcMain.handle = (channel, listener) =>
     register(channel, async (event, ...args) => {
@@ -131,6 +134,10 @@ let surfaceWidth: number | undefined;
 let nativePlacement: string | undefined;
 let placementTimer: NodeJS.Timeout | undefined;
 let notchOffset: { x: number; y: number } | undefined;
+/** Which edge of the notch stays put while it resizes; the renderer lays out to match. */
+let notchAnchor: NotchAnchor = 'top';
+/** The bottom-anchored window height in effect; it only changes behind the hide handshake below. */
+let notchCanvas = 0;
 let notchPersistTimer: NodeJS.Timeout | undefined;
 let pointerTimer: NodeJS.Timeout | undefined;
 let lastPointer = '';
@@ -193,11 +200,18 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   const y = area.y + (notch ? 5 : 12);
   if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
-    const nextY = Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height);
-    if (nextX < 0 || nextY < 0 || !Number.isFinite(nextX) || !Number.isFinite(nextY)) return { x, y, width, height };
-    return { x: nextX, y: nextY, width, height };
+    const frame = notch
+      ? notchFrame(area, notchOffset.y, height, notchAnchor, notchCanvas)
+      : {
+          y: Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height),
+          height,
+          visibleHeight: height,
+        };
+    if (nextX < 0 || frame.y < 0 || !Number.isFinite(nextX) || !Number.isFinite(frame.y))
+      return { x, y, width, height, visibleHeight: height };
+    return { x: nextX, width, ...frame };
   }
-  return { x, y, width, height };
+  return { x, y, width, height, visibleHeight: height };
 }
 
 function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?: number) {
@@ -210,8 +224,10 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   const layoutChanged = layout !== surface;
   surface = layout;
   surfaceHeight = contentHeight;
+  const target = notchTarget();
+  if (target.anchor !== notchAnchor || target.canvas !== notchCanvas) switchCanvas(target);
   surfaceWidth = contentWidth;
-  const bounds = surfaceBounds(layout, contentHeight);
+  const { visibleHeight, ...bounds } = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
   const boundsChanged = Object.entries(bounds).some(([key, value]) => current[key as keyof typeof bounds] !== value);
   if (boundsChanged) window.setBounds(bounds);
@@ -219,6 +235,8 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   // Keep a small margin for the shadow and the bridge into the hover panel.
   if (process.platform === 'linux' && !bridge?.controlling) {
     const { width, height } = bounds;
+    // A bottom-anchored notch shows its content at the bottom of a taller, fixed canvas.
+    const visibleTop = height - visibleHeight;
     const notchWidth = Math.max(1, Math.min(width, Math.ceil((contentWidth ?? (layout === 'quiet' ? 360 : 500)) + 20)));
     const regions =
       layout === 'tasks'
@@ -230,7 +248,7 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
           ? [{ x: width - 84, y: 4, width: 80, height: 80 }]
           : layout === 'details'
             ? [{ x: 0, y: 0, width, height }]
-            : [{ x: Math.floor((width - notchWidth) / 2), y: 0, width: notchWidth, height }];
+            : [{ x: Math.floor((width - notchWidth) / 2), y: visibleTop, width: notchWidth, height: visibleHeight }];
     window.setShape(regions);
   }
   const placement = JSON.stringify({ layout, ...bounds });
@@ -242,12 +260,52 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
         layout,
         width: bounds.width,
         height: bounds.height,
-        ...(surface === layout && notchOffset ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y } : {}),
+        ...(surface === layout && notchOffset
+          ? { notchOffsetX: notchOffset.x, notchOffsetY: notchOffset.y, anchor: notchAnchor }
+          : {}),
       })
       .then((result) => {
         if (result.placed) nativePlacement = placement;
       })
       .catch((error) => console.warn('Friday window placement requires the updated GNOME extension:', error.message));
+}
+
+/**
+ * Switching which edge the notch grows from moves and resizes the window, and the renderer must
+ * flip its layout to match. Neither is atomic on X11: a resize shows the old frame at the window's
+ * top-left, and the new layout arrives one IPC later. So a visible notch is hidden first, then
+ * re-placed, then shown in its new layout; the pill blinks instead of jumping across the window.
+ */
+let anchorSwitch: NodeJS.Timeout | undefined;
+/** The edge and bottom canvas the bar's position and content call for. */
+function notchTarget() {
+  const area = screen.getPrimaryDisplay().workArea;
+  const anchor = anchorNotch(area, notchOffset?.y).anchor;
+  const canvas = anchor === 'bottom' ? bottomCanvas(area, notchOffset?.y ?? 0, surfaceHeight ?? 0) : 0;
+  return { anchor, canvas };
+}
+// The same applies to any other height change of a bottom-anchored window, like the camera canvas.
+function switchCanvas(next: { anchor: NotchAnchor; canvas: number }) {
+  if (!window || window.isDestroyed()) return;
+  if (!['quiet', 'bar', 'panel'].includes(surface) || !window.isVisible()) {
+    notchCanvas = next.canvas;
+    if (next.anchor !== notchAnchor) window.webContents.send('window:anchor', next.anchor);
+    notchAnchor = next.anchor;
+    return;
+  }
+  if (anchorSwitch) return;
+  // The renderer answers once its hidden frame is on screen; never wait longer than this.
+  anchorSwitch = setTimeout(finishAnchorSwitch, 150);
+  window.webContents.send('window:anchor-prepare');
+}
+function finishAnchorSwitch() {
+  if (!anchorSwitch || !window || window.isDestroyed()) return;
+  clearTimeout(anchorSwitch);
+  anchorSwitch = undefined;
+  // The pointer may have crossed back while the pill was hiding; it is shown again either way.
+  ({ anchor: notchAnchor, canvas: notchCanvas } = notchTarget());
+  setSurface(surface, surfaceHeight, surfaceWidth);
+  window.webContents.send('window:anchor', notchAnchor);
 }
 
 function reanchorSurface() {
@@ -819,6 +877,18 @@ if (hasSingleInstanceLock)
       window?.setFocusable(true);
       window?.show();
       window?.focus();
+    });
+    ipcMain.handle('window:anchor', (event) => {
+      fromWindow(event);
+      return notchAnchor;
+    });
+    ipcMain.on('window:anchor-ready', (event) => {
+      try {
+        fromWindow(event);
+      } catch {
+        return;
+      }
+      finishAnchorSwitch();
     });
     ipcMain.handle('window:notch-offset', (event, value: unknown) => {
       fromWindow(event);

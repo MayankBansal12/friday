@@ -195,7 +195,12 @@ export default class FridayDesktop extends Extension {
       // A user drag offset applies only to notch surfaces and is clamped to the work area.
       if (notch && Number.isFinite(Number(c.notchOffsetX)) && Number.isFinite(Number(c.notchOffsetY))) {
         x = Math.min(Math.max(x + Number(c.notchOffsetX), area.x), area.x + area.width - width);
-        y = Math.min(Math.max(y + Number(c.notchOffsetY), area.y), area.y + area.height - height);
+        if (c.anchor === 'bottom') {
+          // Lower-half notches grow upward, keeping their 42px resting bar's bottom edge fixed
+          // (mirrors electron/notch-placement.ts).
+          const barTop = Math.min(Math.max(y + Number(c.notchOffsetY), area.y), area.y + area.height - 54);
+          y = Math.max(area.y, barTop + 42 - height);
+        } else y = Math.min(Math.max(y + Number(c.notchOffsetY), area.y), area.y + area.height - height);
       }
       win.move_resize_frame(false, x, y, width, height);
       return { placed: true, layout: c.layout, x, y, width, height };

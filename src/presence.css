@@ -586,3 +586,28 @@
     padding-top: 10px;
   }
 }
+
+/* A notch too low for its panel to fit below grows upward: the window keeps its bottom edge, the bar
+   sits at the bottom under the pointer, and the panel opens above it. */
+.presence-root.anchor-bottom {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 10px 10px 0;
+}
+.anchor-bottom .friday-presence {
+  flex-direction: column-reverse;
+  /* Never squeeze the pill to the current window: its natural height is how main learns it needs
+     the taller camera canvas. */
+  flex-shrink: 0;
+}
+.anchor-bottom .presence-body {
+  border-top: 0;
+  border-bottom: 1px solid #ffffff0b;
+}
+
+/* Hidden for the few frames it takes to move the window to the other edge (no transition, so the
+   frame on screen during the switch is empty rather than the pill in the wrong place). */
+.presence-root.is-reanchoring .friday-presence {
+  opacity: 0;
+}

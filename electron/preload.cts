@@ -7,6 +7,7 @@ import type {
   LiveKitSession,
   FridayState,
   ListeningState,
+  NotchAnchor,
   SurfaceLayout,
   RequestContext,
   TaskRecord,
@@ -49,6 +50,18 @@ contextBridge.exposeInMainWorld('buddy', {
   setSurface: (layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void> =>
     invoke('window:surface', 10_000, layout, height, contentWidth),
   setNotchOffset: (offset?: { x: number; y: number }): Promise<void> => invoke('window:notch-offset', 10_000, offset),
+  notchAnchor: (): Promise<NotchAnchor> => invoke('window:anchor', 10_000),
+  notchAnchorReady: () => ipcRenderer.send('window:anchor-ready'),
+  onNotchAnchorPrepare: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('window:anchor-prepare', handler);
+    return () => ipcRenderer.removeListener('window:anchor-prepare', handler);
+  },
+  onNotchAnchor: (callback: (anchor: NotchAnchor) => void) => {
+    const handler = (_: unknown, anchor: NotchAnchor) => callback(anchor);
+    ipcRenderer.on('window:anchor', handler);
+    return () => ipcRenderer.removeListener('window:anchor', handler);
+  },
   onFridayState: (callback: (state: FridayState) => void) => {
     const handler = (_: unknown, state: FridayState) => callback(state);
     ipcRenderer.on('friday:state', handler);

@@ -21,9 +21,11 @@ import {
   cameraStatus,
   type FridayState,
   type ListeningState,
+  type NotchAnchor,
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
+import { bottomCanvas } from '../electron/notch-placement';
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
@@ -32,6 +34,14 @@ import { useCameraLine } from './useCameraLine';
 
 /** The camera panel never grows past the screen; Friday's window sits 5px below the top panel. */
 const cameraMax = Math.min(690, window.screen.availHeight - 40);
+/** Opening upward, the camera panel must also fit the room above the bar. */
+function cameraMaxAbove(offsetY?: number) {
+  const area = {
+    y: (window.screen as Screen & { availTop?: number }).availTop ?? 0,
+    height: window.screen.availHeight,
+  };
+  return Math.min(cameraMax, bottomCanvas(area, offsetY ?? 0, Infinity) - 12);
+}
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -133,6 +143,58 @@ export function FridayPresence(props: Props) {
   const cameraChanging = state?.camera === 'opening' || state?.camera === 'closing';
   const reducedMotion = Boolean(useReducedMotion());
   const [hovered, setHovered] = useState(false);
+  // Moving the pill is not asking to see it: a drag closes the hover panel, and the pointer must
+  // leave and come back before hovering opens it again.
+  const [dragging, setDragging] = useState(false);
+  const draggingRef = useRef(false);
+  const hoverHeld = useRef(false);
+  // Near the bottom of the screen, where its panel can't fit below, the notch grows upward, with its bar at the bottom.
+  const [anchor, setAnchor] = useState<NotchAnchor>('top');
+  // Switching edges hides the pill while the window is re-placed, so it never flashes at the old edge.
+  const [reanchoring, setReanchoring] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let frame = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reveal: (() => void) | undefined;
+    // Each switch starts clean: a reveal still pending from the last one must not show the pill early.
+    const reset = () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      if (reveal) window.removeEventListener('resize', reveal);
+      reveal = undefined;
+    };
+    // Two frames: the first commits the change, the second is on screen.
+    const settle = (done: () => void) => {
+      frame = requestAnimationFrame(() => (frame = requestAnimationFrame(done)));
+    };
+    const removePrepare = window.buddy.onNotchAnchorPrepare(() => {
+      reset();
+      setReanchoring(true);
+      settle(() => window.buddy.notchAnchorReady());
+    });
+    const removeAnchor = window.buddy.onNotchAnchor((next) => {
+      reset();
+      setAnchor(next);
+      // Show the pill once the window has its new size; a switch back to the same size has none.
+      const show = () => {
+        reset();
+        settle(() => setReanchoring(false));
+      };
+      reveal = show;
+      window.addEventListener('resize', show);
+      timer = setTimeout(show, 120);
+    });
+    void window.buddy.notchAnchor().then((value) => {
+      if (!disposed) setAnchor(value);
+    });
+    return () => {
+      disposed = true;
+      reset();
+      removePrepare();
+      removeAnchor();
+    };
+  }, []);
   const [showTasks, setShowTasks] = useState(false);
   const { typing, onTypingChange: setTyping } = props;
   const { draft: text, onDraftChange: setText } = props;
@@ -248,7 +310,9 @@ export function FridayPresence(props: Props) {
   const background = !engaged && visible.length > 0;
   // A live camera keeps the panel open: its video stays on screen for as long as the camera is on.
   const expanded =
-    !props.controlling && !background && (cameraOn || typing || hovered || (autoOpen && dismissed !== contentKey));
+    !props.controlling &&
+    !background &&
+    (cameraOn || typing || (!dragging && (hovered || (autoOpen && dismissed !== contentKey))));
   const conversation = props.tasks
     .filter((item) => item.role !== 'child' && item.conversationId === state?.parentId)
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -408,6 +472,12 @@ export function FridayPresence(props: Props) {
       const dx = Math.round(event.screenX - origin.x);
       const dy = Math.round(event.screenY - origin.y);
       if (!moved && Math.hypot(dx, dy) < 6) return;
+      if (!moved) {
+        if (leaveTimer.current) clearTimeout(leaveTimer.current);
+        hoverHeld.current = draggingRef.current = true;
+        setHovered(false);
+        setDragging(true);
+      }
       moved = true;
       event.preventDefault();
       if (!panelRef.current?.hasPointerCapture?.(event.pointerId))
@@ -421,7 +491,16 @@ export function FridayPresence(props: Props) {
         panelRef.current.releasePointerCapture(event.pointerId);
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
-      if (moved) flush();
+      if (moved) {
+        flush();
+        draggingRef.current = false;
+        setHovered(false);
+        setDragging(false);
+        // Dropped away from the pointer, there is no leave to wait for: hover works on the next visit.
+        requestAnimationFrame(() => {
+          if (!panelRef.current?.matches(':hover')) hoverHeld.current = false;
+        });
+      }
       origin = undefined;
       base = undefined;
       moved = false;
@@ -447,9 +526,10 @@ export function FridayPresence(props: Props) {
 
   function enter() {
     if (leaveTimer.current) clearTimeout(leaveTimer.current);
-    setHovered(true);
+    if (!hoverHeld.current) setHovered(true);
   }
   function leave() {
+    if (!draggingRef.current) hoverHeld.current = false;
     if (leaveTimer.current) clearTimeout(leaveTimer.current);
     leaveTimer.current = setTimeout(() => {
       if (!keyboardFocus.current || !panelRef.current?.contains(document.activeElement)) {
@@ -573,7 +653,7 @@ export function FridayPresence(props: Props) {
 
   return (
     <main
-      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''}`}
+      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''} ${anchor === 'bottom' && !background ? 'anchor-bottom' : ''} ${reanchoring ? 'is-reanchoring' : ''}`}
       data-surface={surface}
       onMouseEnter={enter}
       onMouseLeave={leave}
@@ -627,7 +707,13 @@ export function FridayPresence(props: Props) {
         <motion.section
           ref={panelRef}
           className={`friday-presence ${expanded ? 'is-expanded' : ''} ${cameraOn && expanded ? 'is-camera' : ''}`}
-          style={cameraOn ? ({ '--camera-max': `${cameraMax}px` } as CSSProperties) : undefined}
+          style={
+            cameraOn
+              ? ({
+                  '--camera-max': `${anchor === 'bottom' ? cameraMaxAbove(props.notchOffset?.y) : cameraMax}px`,
+                } as CSSProperties)
+              : undefined
+          }
           aria-label="Friday companion"
           initial={false}
           animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}

@@ -299,7 +299,14 @@
         guidance: async () => fixture.guiding,
         controlling: async () => fixture.controlling,
         listTasks: async () => tasks,
-        getSettings: async () => ({ wakeWord: 'Friday', cameraEnabled: true }),
+        getSettings: async () => ({
+          wakeWord: 'Friday',
+          cameraEnabled: true,
+          // ?anchor=bottom places the pill where main would anchor it: low on the screen.
+          ...(new URLSearchParams(location.search).get('anchor') === 'bottom'
+            ? { notchOffset: { x: 0, y: screen.availHeight - 100 } }
+            : {}),
+        }),
         updateSettings: async (next) => {
           fixture.calls.push(['settings', next]);
           return { wakeWord: 'Friday', ...next };
@@ -327,7 +334,11 @@
           const root = document.querySelector('#root');
           const w = { orb: 96, tasks: 400, quiet: 520, bar: 520, panel: 520, details: 760 }[layout];
           root.style.width = `min(${w}px, calc(100vw - 24px))`;
-          root.style.top = ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '5px';
+          const bottom =
+            new URLSearchParams(location.search).get('anchor') === 'bottom' &&
+            ['quiet', 'bar', 'panel'].includes(layout);
+          root.style.top = bottom ? 'auto' : ['orb', 'tasks', 'details'].includes(layout) ? '12px' : '5px';
+          root.style.bottom = bottom ? '5px' : 'auto';
           root.style.left = ['orb', 'tasks'].includes(layout) ? 'auto' : '50%';
           root.style.right = ['orb', 'tasks'].includes(layout) ? '18px' : 'auto';
           root.style.transform = ['orb', 'tasks'].includes(layout) ? 'none' : 'translateX(-50%)';
@@ -388,6 +399,20 @@
           callbacks.onExpanded?.(v);
         },
         hide: noop,
+        /** ?anchor=bottom previews a notch dragged too low for its panel to open downward. */
+        notchAnchor: async () => new URLSearchParams(location.search).get('anchor') ?? 'top',
+        notchAnchorReady: () => fixture.calls.push(['anchorReady']),
+        /** Plays main's edge switch: hide, wait for the renderer, re-place, show. */
+        switchAnchor(next) {
+          callbacks.onNotchAnchorPrepare?.();
+          fixture.pendingAnchor = next;
+        },
+        finishAnchor() {
+          callbacks.onNotchAnchor?.(fixture.pendingAnchor);
+        },
+        setNotchOffset: async (offset) => {
+          fixture.calls.push(['notchOffset', offset]);
+        },
         setCamera: async (on) => {
           fixture.calls.push(['camera', on]);
           runtime.camera = on ? 'live' : 'off';
@@ -404,6 +429,8 @@
         'onGuidance',
         'onControlling',
         'onCameraFrame',
+        'onNotchAnchor',
+        'onNotchAnchorPrepare',
       ])
         window.buddy[name] = (fn) => {
           callbacks[name] = fn;

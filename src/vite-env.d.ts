@@ -7,6 +7,7 @@ import type {
   LiveKitSession,
   FridayState,
   ListeningState,
+  NotchAnchor,
   SurfaceLayout,
   RequestContext,
   TaskRecord,
@@ -26,6 +27,10 @@ declare global {
       stopForeground(): Promise<void>;
       setSurface(layout: SurfaceLayout, height?: number, contentWidth?: number): Promise<void>;
       setNotchOffset(offset?: { x: number; y: number }): Promise<void>;
+      notchAnchor(): Promise<NotchAnchor>;
+      onNotchAnchor(callback: (anchor: NotchAnchor) => void): () => void;
+      notchAnchorReady(): void;
+      onNotchAnchorPrepare(callback: () => void): () => void;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;
