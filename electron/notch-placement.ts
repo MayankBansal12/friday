@@ -20,20 +20,32 @@ export function anchorNotch(
   return { anchor: barTop + hoverPanelHeight > area.y + area.height ? 'bottom' : 'top', barTop };
 }
 
+/** A bottom-anchored window's height for the hover panel, plus its shadow margin. */
+export const hoverCanvasHeight = hoverPanelHeight + 12;
+
 /** The tallest notch surface (the camera panel) plus its shadow margin. */
 export const notchCanvasHeight = 712;
 
 /**
  * Where a dragged notch window goes for content `height` tall, and how much of it is visible.
  *
- * Top-anchored windows grow downward from a fixed top edge. Bottom-anchored windows never move
- * or resize while the panel opens or closes: they keep one tall canvas whose bottom edge is the
- * bar's, and only their input shape follows the content. On X11 a resize keeps the old frame at
- * the window's top-left until Chromium repaints, so moving the top edge on every hover would
- * flash the bottom-aligned panel out of place for a frame.
+ * Top-anchored windows grow downward from a fixed top edge. Bottom-anchored windows keep a fixed
+ * canvas whose bottom edge is the bar's: room for the hover panel, or for the camera panel while
+ * that is open (`tall`). Only their input shape follows the content, so opening the panel or
+ * dragging the pill never resizes them. On X11 a resize keeps the old frame at the window's
+ * top-left until Chromium repaints, which would flash the bottom-aligned pill out of place.
+ *
+ * main passes its current `anchor` and `tall` while a switch is pending; they default to the
+ * ones the bar's position and the content call for.
  */
-export function notchFrame(area: { y: number; height: number }, offsetY: number, height: number) {
-  const { anchor, barTop } = anchorNotch(area, offsetY);
+export function notchFrame(
+  area: { y: number; height: number },
+  offsetY: number,
+  height: number,
+  anchor = anchorNotch(area, offsetY).anchor,
+  tall = height > hoverCanvasHeight,
+) {
+  const { barTop } = anchorNotch(area, offsetY);
   if (anchor === 'top')
     return {
       y: Math.min(Math.max(area.y + 5 + offsetY, area.y), area.y + area.height - height),
@@ -41,6 +53,6 @@ export function notchFrame(area: { y: number; height: number }, offsetY: number,
       visibleHeight: height,
     };
   const bottom = barTop + restingBarHeight;
-  const canvas = Math.min(notchCanvasHeight, bottom - area.y);
+  const canvas = Math.min(tall ? notchCanvasHeight : hoverCanvasHeight, bottom - area.y);
   return { y: bottom - canvas, height: canvas, visibleHeight: Math.min(height, canvas) };
 }

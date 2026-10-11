@@ -48,7 +48,29 @@ try {
     const image = await call('Page.captureScreenshot', {});
     await writeFile(`${process.env.FRIDAY_SCREENSHOTS}/notch-bottom.png`, Buffer.from(image.data, 'base64'));
   }
+
+  // Crossing to the other edge hides the pill before the window is re-placed, then shows it in its
+  // new layout, so it never flashes at the old edge.
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 20 });
+  await call('Page.navigate', {
+    url: `${process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5178'}/tests/presence-preview.html?state=quiet`,
+  });
+  for (let i = 0; i < 60 && !(await evaluate("Boolean(document.querySelector('.presence-bar'))")); i++)
+    await pause(100);
+  await pause(800);
+  const opacity = "getComputedStyle(document.querySelector('.friday-presence')).opacity";
+  assert.equal(await evaluate("Boolean(document.querySelector('.anchor-bottom'))"), false);
+  await evaluate("window.buddy.switchAnchor('bottom')");
+  assert.equal(await evaluate(opacity), '0', 'the pill hides before the window moves');
+  for (let i = 0; i < 20 && !(await evaluate("fixture.calls.some(c => c[0] === 'anchorReady')")); i++) await pause(20);
+  assert.equal(await evaluate("fixture.calls.some(c => c[0] === 'anchorReady')"), true, 'main is told it is hidden');
+  assert.equal(await evaluate(opacity), '0', 'it stays hidden until main has re-placed the window');
+  await evaluate('window.buddy.finishAnchor()');
+  await pause(300);
+  assert.equal(await evaluate("Boolean(document.querySelector('.presence-root.anchor-bottom'))"), true);
+  assert.equal(await evaluate(opacity), '1', 'the pill reappears in its new layout');
   console.log('Notch bottom: the panel opened upward with its bar fixed under the pointer, and stayed open.');
+  console.log('Notch bottom: switching edges hid the pill until the window was re-placed, then showed it.');
 } finally {
   close();
 }

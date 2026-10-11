@@ -394,6 +394,15 @@
         hide: noop,
         /** ?anchor=bottom previews a notch dragged too low for its panel to open downward. */
         notchAnchor: async () => new URLSearchParams(location.search).get('anchor') ?? 'top',
+        notchAnchorReady: () => fixture.calls.push(['anchorReady']),
+        /** Plays main's edge switch: hide, wait for the renderer, re-place, show. */
+        switchAnchor(next) {
+          callbacks.onNotchAnchorPrepare?.();
+          fixture.pendingAnchor = next;
+        },
+        finishAnchor() {
+          callbacks.onNotchAnchor?.(fixture.pendingAnchor);
+        },
         setNotchOffset: async (offset) => {
           fixture.calls.push(['notchOffset', offset]);
         },
@@ -414,6 +423,7 @@
         'onControlling',
         'onCameraFrame',
         'onNotchAnchor',
+        'onNotchAnchorPrepare',
       ])
         window.buddy[name] = (fn) => {
           callbacks[name] = fn;

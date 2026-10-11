@@ -29,6 +29,8 @@ declare global {
       setNotchOffset(offset?: { x: number; y: number }): Promise<void>;
       notchAnchor(): Promise<NotchAnchor>;
       onNotchAnchor(callback: (anchor: NotchAnchor) => void): () => void;
+      notchAnchorReady(): void;
+      onNotchAnchorPrepare(callback: () => void): () => void;
       onFridayState(callback: (state: FridayState) => void): () => void;
       listTasks(): Promise<TaskRecord[]>;
       submit(prompt: string, context?: RequestContext): Promise<TaskRecord>;

@@ -25,6 +25,7 @@ import {
   type SurfaceLayout,
   type TaskRecord,
 } from '../electron/types';
+import { anchorNotch, notchCanvasHeight, restingBarHeight } from '../electron/notch-placement';
 import { FridayMascot, type FridayMood } from './FridayMascot';
 import './presence.css';
 import { Conversation } from './Conversation';
@@ -33,6 +34,15 @@ import { useCameraLine } from './useCameraLine';
 
 /** The camera panel never grows past the screen; Friday's window sits 5px below the top panel. */
 const cameraMax = Math.min(690, window.screen.availHeight - 40);
+/** Opening upward, the camera panel must also fit the room above the bar. */
+function cameraMaxAbove(offsetY?: number) {
+  const area = {
+    y: (window.screen as Screen & { availTop?: number }).availTop ?? 0,
+    height: window.screen.availHeight,
+  };
+  const { barTop } = anchorNotch(area, offsetY);
+  return Math.min(cameraMax, Math.min(notchCanvasHeight, barTop + restingBarHeight - area.y) - 12);
+}
 
 const notchSpring = { type: 'spring', stiffness: 420, damping: 40, mass: 1 } as const;
 
@@ -141,15 +151,41 @@ export function FridayPresence(props: Props) {
   const hoverHeld = useRef(false);
   // Near the bottom of the screen, where its panel can't fit below, the notch grows upward, with its bar at the bottom.
   const [anchor, setAnchor] = useState<NotchAnchor>('top');
+  // Switching edges hides the pill while the window is re-placed, so it never flashes at the old edge.
+  const [reanchoring, setReanchoring] = useState(false);
   useEffect(() => {
     let disposed = false;
-    const remove = window.buddy.onNotchAnchor(setAnchor);
+    let frame = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (done: () => void) => {
+      cancelAnimationFrame(frame);
+      // Two frames: the first commits the change, the second is on screen.
+      frame = requestAnimationFrame(() => (frame = requestAnimationFrame(done)));
+    };
+    const removePrepare = window.buddy.onNotchAnchorPrepare(() => {
+      setReanchoring(true);
+      settle(() => window.buddy.notchAnchorReady());
+    });
+    const removeAnchor = window.buddy.onNotchAnchor((next) => {
+      setAnchor(next);
+      // Show the pill once the window has its new size; a switch back to the same edge has none.
+      const reveal = () => {
+        window.removeEventListener('resize', reveal);
+        clearTimeout(timer);
+        settle(() => setReanchoring(false));
+      };
+      window.addEventListener('resize', reveal);
+      timer = setTimeout(reveal, 120);
+    });
     void window.buddy.notchAnchor().then((value) => {
       if (!disposed) setAnchor(value);
     });
     return () => {
       disposed = true;
-      remove();
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      removePrepare();
+      removeAnchor();
     };
   }, []);
   const [showTasks, setShowTasks] = useState(false);
@@ -610,7 +646,7 @@ export function FridayPresence(props: Props) {
 
   return (
     <main
-      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''} ${anchor === 'bottom' && !background ? 'anchor-bottom' : ''}`}
+      className={`presence-root ${background ? 'background-root' : surface === 'quiet' ? 'quiet-root' : ''} ${anchor === 'bottom' && !background ? 'anchor-bottom' : ''} ${reanchoring ? 'is-reanchoring' : ''}`}
       data-surface={surface}
       onMouseEnter={enter}
       onMouseLeave={leave}
@@ -664,7 +700,13 @@ export function FridayPresence(props: Props) {
         <motion.section
           ref={panelRef}
           className={`friday-presence ${expanded ? 'is-expanded' : ''} ${cameraOn && expanded ? 'is-camera' : ''}`}
-          style={cameraOn ? ({ '--camera-max': `${cameraMax}px` } as CSSProperties) : undefined}
+          style={
+            cameraOn
+              ? ({
+                  '--camera-max': `${anchor === 'bottom' ? cameraMaxAbove(props.notchOffset?.y) : cameraMax}px`,
+                } as CSSProperties)
+              : undefined
+          }
           aria-label="Friday companion"
           initial={false}
           animate={{ width: resting ? 360 : 500, borderRadius: expanded ? 28 : resting ? 22 : 28 }}

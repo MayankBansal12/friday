@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadEnvironment } from 'dotenv';
 import { AgentService } from '../agent-service.js';
 import { Camera, type CameraFrame } from '../camera.js';
-import { anchorNotch, notchFrame } from '../notch-placement.js';
+import { anchorNotch, hoverCanvasHeight, notchFrame } from '../notch-placement.js';
 import { DesktopBridge } from '../desktop-bridge.js';
 import { createSpeakerFromEnvironment } from '../speaker.js';
 import { acknowledgementDirectory, Acknowledgements, loadAcknowledgements } from '../acknowledgement.js';
@@ -136,6 +136,8 @@ let placementTimer: NodeJS.Timeout | undefined;
 let notchOffset: { x: number; y: number } | undefined;
 /** Which edge of the notch stays put while it resizes; the renderer lays out to match. */
 let notchAnchor: NotchAnchor = 'top';
+/** A bottom-anchored notch uses its taller canvas while the camera panel needs it. */
+let notchTall = false;
 let notchPersistTimer: NodeJS.Timeout | undefined;
 let pointerTimer: NodeJS.Timeout | undefined;
 let lastPointer = '';
@@ -199,7 +201,7 @@ function surfaceBounds(layout: SurfaceLayout, contentHeight?: number) {
   if ((notch || layout === 'details') && notchOffset) {
     const nextX = Math.min(Math.max(x + notchOffset.x, area.x), area.x + area.width - width);
     const frame = notch
-      ? notchFrame(area, notchOffset.y, height)
+      ? notchFrame(area, notchOffset.y, height, notchAnchor, notchTall)
       : {
           y: Math.min(Math.max(y + notchOffset.y, area.y), area.y + area.height - height),
           height,
@@ -221,12 +223,9 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
   }
   const layoutChanged = layout !== surface;
   surface = layout;
-  const anchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
-  if (anchor !== notchAnchor) {
-    notchAnchor = anchor;
-    window.webContents.send('window:anchor', anchor);
-  }
   surfaceHeight = contentHeight;
+  const anchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
+  if (anchor !== notchAnchor || wantsTall(anchor) !== notchTall) switchCanvas(anchor);
   surfaceWidth = contentWidth;
   const { visibleHeight, ...bounds } = surfaceBounds(layout, contentHeight);
   const current = window.getBounds();
@@ -269,6 +268,39 @@ function setSurface(layout: SurfaceLayout, contentHeight?: number, contentWidth?
         if (result.placed) nativePlacement = placement;
       })
       .catch((error) => console.warn('Friday window placement requires the updated GNOME extension:', error.message));
+}
+
+/**
+ * Switching which edge the notch grows from moves and resizes the window, and the renderer must
+ * flip its layout to match. Neither is atomic on X11: a resize shows the old frame at the window's
+ * top-left, and the new layout arrives one IPC later. So a visible notch is hidden first, then
+ * re-placed, then shown in its new layout; the pill blinks instead of jumping across the window.
+ */
+let anchorSwitch: NodeJS.Timeout | undefined;
+const wantsTall = (anchor: NotchAnchor) => anchor === 'bottom' && (surfaceHeight ?? 0) > hoverCanvasHeight;
+// The same applies to a bottom-anchored notch growing its canvas for the camera panel.
+function switchCanvas(next: NotchAnchor) {
+  if (!window || window.isDestroyed()) return;
+  if (!['quiet', 'bar', 'panel'].includes(surface) || !window.isVisible()) {
+    notchAnchor = next;
+    notchTall = wantsTall(next);
+    window.webContents.send('window:anchor', next);
+    return;
+  }
+  if (anchorSwitch) return;
+  // The renderer answers once its hidden frame is on screen; never wait longer than this.
+  anchorSwitch = setTimeout(finishAnchorSwitch, 150);
+  window.webContents.send('window:anchor-prepare');
+}
+function finishAnchorSwitch() {
+  if (!anchorSwitch || !window || window.isDestroyed()) return;
+  clearTimeout(anchorSwitch);
+  anchorSwitch = undefined;
+  // The pointer may have crossed back while the pill was hiding; it is shown again either way.
+  notchAnchor = anchorNotch(screen.getPrimaryDisplay().workArea, notchOffset?.y).anchor;
+  notchTall = wantsTall(notchAnchor);
+  setSurface(surface, surfaceHeight, surfaceWidth);
+  window.webContents.send('window:anchor', notchAnchor);
 }
 
 function reanchorSurface() {
@@ -844,6 +876,14 @@ if (hasSingleInstanceLock)
     ipcMain.handle('window:anchor', (event) => {
       fromWindow(event);
       return notchAnchor;
+    });
+    ipcMain.on('window:anchor-ready', (event) => {
+      try {
+        fromWindow(event);
+      } catch {
+        return;
+      }
+      finishAnchorSwitch();
     });
     ipcMain.handle('window:notch-offset', (event, value: unknown) => {
       fromWindow(event);

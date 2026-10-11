@@ -602,3 +602,9 @@
   border-top: 0;
   border-bottom: 1px solid #ffffff0b;
 }
+
+/* Hidden for the few frames it takes to move the window to the other edge (no transition, so the
+   frame on screen during the switch is empty rather than the pill in the wrong place). */
+.presence-root.is-reanchoring .friday-presence {
+  opacity: 0;
+}

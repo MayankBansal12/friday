@@ -51,6 +51,12 @@ contextBridge.exposeInMainWorld('buddy', {
     invoke('window:surface', 10_000, layout, height, contentWidth),
   setNotchOffset: (offset?: { x: number; y: number }): Promise<void> => invoke('window:notch-offset', 10_000, offset),
   notchAnchor: (): Promise<NotchAnchor> => invoke('window:anchor', 10_000),
+  notchAnchorReady: () => ipcRenderer.send('window:anchor-ready'),
+  onNotchAnchorPrepare: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('window:anchor-prepare', handler);
+    return () => ipcRenderer.removeListener('window:anchor-prepare', handler);
+  },
   onNotchAnchor: (callback: (anchor: NotchAnchor) => void) => {
     const handler = (_: unknown, anchor: NotchAnchor) => callback(anchor);
     ipcRenderer.on('window:anchor', handler);
