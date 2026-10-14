@@ -19,7 +19,7 @@ You'll need:
 
 - A ChatGPT subscription. Friday thinks with it through [Pi](https://pi.dev), and uses [Codex](https://developers.openai.com/codex/cli) to control your computer.
 - A [Groq API key](https://console.groq.com/keys) for speech recognition (free tier works). Without one, Friday downloads a 670 MB offline model instead.
-- A [Rumik](https://rumik.ai) API key for a natural voice (optional). Without one, Friday uses a robotic offline voice.
+- A [Rumik API key](https://rumik.ai) for Friday's voice. Without one, she falls back to a robotic offline voice.
 
 Paste this into your coding agent (Claude Code, Codex, or similar):
 
@@ -33,8 +33,10 @@ Set up Friday on this laptop: https://github.com/MayankBansal12/friday
 3. Run `pnpm wake:setup`, `pnpm desktop:install`, and `pnpm build`.
 4. Copy `.env.example` to `.env`. Never ask me to paste API keys into this
    chat. Tell me which keys to add to `.env` myself: GROQ_API_KEY for speech
-   recognition and, optionally, RUMIK_API_KEY for a natural voice. If I have
-   no Groq key, run `pnpm stt:setup` for offline speech recognition instead.
+   recognition and RUMIK_API_KEY for Friday's voice. If I have no Groq key,
+   run `pnpm stt:setup` for offline speech recognition instead. If I have no
+   Rumik key, set LINUX_BUDDY_TTS_PROVIDER=espeak in `.env` for the offline
+   voice.
 5. I have to do some steps myself. Tell me when, and wait for me:
    - Sign Pi in to ChatGPT: run `pi`, type `/login`, and choose ChatGPT.
    - Sign Codex in for computer control: `codex login`.

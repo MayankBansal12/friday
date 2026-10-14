@@ -107,12 +107,14 @@ def main():
     else:
         report(False, "Speech recognition", f"unknown LINUX_BUDDY_STT_PROVIDER={stt}; use groq or parakeet")
 
-    tts = get("LINUX_BUDDY_TTS_PROVIDER", "rumik" if get("RUMIK_API_KEY") else "espeak")
+    # The app falls back to espeak without a key; doctor wants that to be a choice, not an accident.
+    tts = get("LINUX_BUDDY_TTS_PROVIDER", "rumik")
     if tts == "rumik":
-        report(bool(get("RUMIK_API_KEY")), "Voice", "Rumik" if get("RUMIK_API_KEY") else "add RUMIK_API_KEY to .env")
+        report(bool(get("RUMIK_API_KEY")), "Voice", "Rumik" if get("RUMIK_API_KEY") else
+               "add RUMIK_API_KEY to .env, or set LINUX_BUDDY_TTS_PROVIDER=espeak for the offline voice")
     elif tts == "espeak":
         espeak = bool(shutil.which("espeak-ng"))
-        report(espeak, "Voice", "espeak (add RUMIK_API_KEY for a natural voice)" if espeak else "install espeak-ng, or add RUMIK_API_KEY to .env")
+        report(espeak, "Voice", "offline espeak" if espeak else "install espeak-ng")
     else:
         report(False, "Voice", f"unknown LINUX_BUDDY_TTS_PROVIDER={tts}; use rumik or espeak")
 
