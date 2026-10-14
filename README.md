@@ -2,6 +2,8 @@
 
 Friday is a voice assistant that lives on your Linux desktop. Say "Hey Friday", ask for something, and she answers out loud, points things out on your screen, or does the work for you.
 
+![Friday drawing a heart on the screen](docs/images/demo.gif)
+
 ## What Friday can do
 
 - **Talks with you.** Say "Hey Friday" and just talk. Interrupt or correct her mid-sentence and she adapts. While she rests, on-device wake detection keeps your microphone audio on your laptop.
@@ -10,6 +12,13 @@ Friday is a voice assistant that lives on your Linux desktop. Say "Hey Friday", 
 - **Works in the background.** Hand off longer tasks and keep talking. Check on them from the small circle in the corner.
 - **Sees through your camera.** "What am I holding?" or "Watch while I turn this."
 - **Understands many languages,** including Hindi with Groq speech recognition.
+
+![Friday resting at the top of the screen, waiting for "Hey Friday"](docs/images/notch.png)
+
+<p>
+  <img src="docs/images/workspace.png" alt="Friday's workspace, ready for a request" width="49%">
+  <img src="docs/images/guide.png" alt="Friday watching through the camera and guiding a Rubik's cube move" width="49%">
+</p>
 
 ## Install
 
