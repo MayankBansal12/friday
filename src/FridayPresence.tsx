@@ -91,6 +91,8 @@ interface Props {
   /** The user's recognized words: live while they speak, final briefly after submission. */
   transcript?: { text: string; final: boolean };
   error?: string;
+  /** A brief recoverable voice notice ("please say that again"), shown in the status line. */
+  notice?: string;
   selectedChildId?: string;
   reportedChildren?: Record<string, number>;
   onSelectTask(id: string): void;
@@ -349,23 +351,25 @@ export function FridayPresence(props: Props) {
               ? 'Speaking…'
               : userWords
                 ? spokenLine(userWords.text, userWords.final)
-                : cameraLine
-                  ? cameraLine
-                  : listening === 'starting'
-                    ? 'Opening microphone…'
-                    : listening === 'transcribing'
-                      ? 'One moment…'
-                      : busy
-                        ? 'Working on it…'
-                        : listening === 'armed'
-                          ? 'Listening…'
-                          : listening === 'error'
-                            ? 'Check your microphone'
-                            : cameraOn
-                              ? 'Camera on · Ask me to look'
-                              : !props.micEnabled
-                                ? 'Microphone off'
-                                : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
+                : props.notice
+                  ? props.notice
+                  : cameraLine
+                    ? cameraLine
+                    : listening === 'starting'
+                      ? 'Opening microphone…'
+                      : listening === 'transcribing'
+                        ? 'One moment…'
+                        : busy
+                          ? 'Working on it…'
+                          : listening === 'armed'
+                            ? 'Listening…'
+                            : listening === 'error'
+                              ? 'Check your microphone'
+                              : cameraOn
+                                ? 'Camera on · Ask me to look'
+                                : !props.micEnabled
+                                  ? 'Microphone off'
+                                  : `Say “hey ${props.wakeWord.toLowerCase()}” to wake her up`;
 
   function motionStarted(part: string) {
     activeMotions.current.add(part);

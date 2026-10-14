@@ -49,11 +49,22 @@ export interface GroqOptions {
   model?: string;
   /** Whisper auto-detects when unset; a hint forces one language (e.g. `hi`). */
   language?: string;
+  /** Longest single attempt (default 8 s), always within the remaining budget. */
   timeoutMs?: number;
+  /**
+   * Total time for one transcription, retries and waits included (default 10 s). The renderer's
+   * recognition timeout allows two of these in a row, since a superseded segment's request can
+   * still be running when the next one queues behind it.
+   */
+  budgetMs?: number;
   // Dependency hooks are main-process only; never exposed over IPC.
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
+
+/** A retry needs at least this much of the budget left to be worth sending. */
+const minAttemptMs = 1500;
 
 interface Transcription {
   text: string;
@@ -120,12 +131,20 @@ export class GroqClient {
       if (language) data.append('language', language);
       return data;
     };
-    const started = Date.now();
+    const now = this.options.now ?? Date.now;
+    const started = now();
+    const budget = this.options.budgetMs ?? 10_000;
+    const remaining = () => budget - (now() - started);
+    // Retries are only worth it when the rest of the budget can still hold a real attempt.
+    const canRetry = (attempt: number, waitMs: number) => attempt < 2 && remaining() - waitMs >= minAttemptMs;
     // One retry covers rate limits, transient 5xx, and a lost connection; the
     // endpoint decision in the renderer survives a slow second attempt.
     for (let attempt = 1; ; attempt++) {
       const signal = new AbortController();
-      const deadline = setTimeout(() => signal.abort(), this.options.timeoutMs ?? 20_000);
+      const deadline = setTimeout(
+        () => signal.abort(),
+        Math.max(0, Math.min(this.options.timeoutMs ?? 8_000, remaining())),
+      );
       let response: Response;
       try {
         response = await (this.options.fetch ?? fetch)(endpoint, {
@@ -139,7 +158,7 @@ export class GroqClient {
         clearTimeout(deadline);
         if (signal.signal.aborted)
           throw new Error('Groq transcription timed out. Check the network.', { cause: error });
-        if (attempt < 2) {
+        if (canRetry(attempt, 250)) {
           await this.wait(250);
           continue;
         }
@@ -148,9 +167,21 @@ export class GroqClient {
           { cause: error },
         );
       }
-      clearTimeout(deadline);
       if (response.ok) {
-        const raw = await response.text();
+        let raw: string;
+        try {
+          // The deadline covers the body too; a stalled body must not outlive the budget.
+          raw = await response.text();
+        } catch (error) {
+          throw new Error(
+            signal.signal.aborted
+              ? 'Groq transcription timed out. Check the network.'
+              : 'Groq returned an invalid transcription response.',
+            { cause: error },
+          );
+        } finally {
+          clearTimeout(deadline);
+        }
         if (raw.length > maxResponseBytes) throw new Error('Groq returned an oversized transcription response.');
         let body: { text?: unknown; segments?: Segment[] };
         try {
@@ -159,13 +190,15 @@ export class GroqClient {
           throw new Error('Groq returned an invalid transcription response.', { cause: error });
         }
         if (typeof body.text !== 'string') throw new Error('Groq returned an invalid transcription response.');
-        return { text: heardText(body.text, body.segments), inferenceMs: Date.now() - started };
+        return { text: heardText(body.text, body.segments), inferenceMs: now() - started };
       }
+      clearTimeout(deadline);
       void response.body?.cancel().catch(() => {});
       if (response.status === 429 || response.status >= 500) {
-        if (attempt < 2) {
-          const after = Number(response.headers.get('retry-after'));
-          await this.wait(Math.min(Number.isFinite(after) && after >= 0 ? after : 1, 5) * 1000);
+        const after = Number(response.headers.get('retry-after'));
+        const waitMs = Math.min(Number.isFinite(after) && after >= 0 ? after : 1, 5) * 1000;
+        if (canRetry(attempt, waitMs)) {
+          await this.wait(waitMs);
           continue;
         }
         throw new Error('Speech service is busy. Try again shortly.');

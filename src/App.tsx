@@ -53,7 +53,17 @@ import { modelOptions } from './model-options';
 import { desktopErrorMessage, type DesktopStatus } from '../electron/desktop-status';
 import { PcmCapture, type FrameCapture } from './pcm-capture';
 import { LiveKitLink } from './livekit-link';
-import { NoiseFloor, ProgressiveTranscription } from './progressive-transcription';
+import { NoiseFloor, ProgressiveTranscription, RecognitionTimeout, TurnGuard } from './progressive-transcription';
+import {
+  FrameWatch,
+  RecentEvents,
+  captureRecoveryLimit,
+  captureRecoveryWindowMs,
+  openTurnState,
+  overrunFallbackCount,
+  overrunWindowMs,
+  replaceCapture,
+} from './voice-recovery';
 import { VoiceFollowUp } from './voice-follow-up';
 import { detectWakeCommand, fromWakeWord } from '../electron/wake-command';
 import { FridayPresence } from './FridayPresence';
@@ -77,6 +87,8 @@ const wakeChunkSamples = 1600;
 const wakeReplayFrames = 100;
 /** A wake with no speech after it lapses back to local listening. */
 const wakeSilenceMs = 3000;
+/** How long a recoverable voice notice stays in the status line. */
+const voiceNoticeMs = 6000;
 
 const starterIdeas = [
   'Look at my screen and explain what I am seeing',
@@ -794,7 +806,20 @@ export default function App() {
   const [acknowledging, setAcknowledging] = useState(false);
   // Room noise learned across segments, so each new segment starts calibrated.
   const noiseFloorRef = useRef(new NoiseFloor());
-  const voiceGateRef = useRef<VoiceGate>({ localWake: false, partials: true });
+  const voiceGateRef = useRef<VoiceGate>({ localWake: false, partials: true, recognitionMs: 22_000, trace: false });
+  // Engaged turns that hit the recording limit, and capture graphs rebuilt, recently.
+  const overrunsRef = useRef(new RecentEvents(overrunWindowMs));
+  const captureRecoveriesRef = useRef(new RecentEvents(captureRecoveryWindowMs));
+  const frameWatchRef = useRef(new FrameWatch());
+  // A sentence cut off mid-sound (recording limit, failed decode, rebuilt capture) is not
+  // resumed as a new request; shared across segments like the noise floor.
+  const turnGuardRef = useRef(new TurnGuard());
+  // A brief, recoverable voice notice in the compact status line ("please say that again").
+  const [voiceNotice, setVoiceNotice] = useState<string>();
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const recoverCaptureRef = useRef<
+    ((stream: MediaStream, failed: FrameCapture, generation: number) => void) | undefined
+  >(undefined);
   const lastVoiceRef = useRef<VoiceSubmission | undefined>(undefined);
   const taskStatusRef = useRef(new Map<string, string>());
   const childRequestRef = useRef(new Map<string, string>());
@@ -873,6 +898,18 @@ export default function App() {
     window.buddy.listening(state);
   }, []);
 
+  const showVoiceNotice = useCallback((text?: string) => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = text ? setTimeout(() => setVoiceNotice(undefined), voiceNoticeMs) : undefined;
+    setVoiceNotice(text);
+  }, []);
+  useEffect(() => () => clearTimeout(noticeTimerRef.current), []);
+
+  /** Segment diagnostics for the opt-in debug log: metadata only, validated again in main. */
+  const traceVoice = useCallback((event: string, fields: Record<string, unknown> = {}) => {
+    if (voiceGateRef.current.trace) window.buddy.voiceTrace({ event, atMs: performance.now(), ...fields });
+  }, []);
+
   const stopCapture = useCallback((release = true) => {
     generationRef.current += 1;
     transcriptionRef.current?.close();
@@ -891,6 +928,7 @@ export default function App() {
 
   const stopListening = useCallback(() => {
     micEnabledRef.current = false;
+    showVoiceNotice();
     setMicEnabled(false);
     voiceFollowUpRef.current.cancel();
     followUpPendingRef.current = false;
@@ -902,10 +940,11 @@ export default function App() {
     lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [updateListening, selectChild, stopCapture, showTranscript]);
+  }, [updateListening, selectChild, stopCapture, showTranscript, showVoiceNotice]);
 
   const disableMicrophone = useCallback(() => {
     micEnabledRef.current = false;
+    showVoiceNotice();
     setMicEnabled(false);
     voiceFollowUpRef.current.cancel();
     followUpPendingRef.current = false;
@@ -914,7 +953,7 @@ export default function App() {
     lastVoiceRef.current = undefined;
     stopCapture();
     updateListening('idle');
-  }, [stopCapture, updateListening, showTranscript]);
+  }, [stopCapture, updateListening, showTranscript, showVoiceNotice]);
 
   // Text interactions also expire when audio is explicitly off. Editing and active
   // work hold this timer; panel expansion is deliberately independent of it.
@@ -1012,18 +1051,69 @@ export default function App() {
         wakeWord: currentWakeWord(),
         speakingEndedAt: speakingRef.current ? undefined : speakingEndedAtRef.current,
       });
-      const failed = () => {
+      /**
+       * A turn never ended within the recording limit (room noise, babble, a monologue).
+       * Nothing was submitted. The microphone stays on; an engaged conversation that keeps
+       * overrunning falls back to wake-word listening. `restart` when the segment closed.
+       */
+      const overran = (restart: boolean) => {
         if (generation !== generationRef.current) return;
-        stopCapture();
-        micEnabledRef.current = false;
-        setMicEnabled(false);
-        setActionError('I couldn’t hear that. Please tap the microphone to try again.');
-        updateListening('error');
+        const heardWake = woken;
+        woken = false;
+        // The discarded turn is the latest activity: the idle timeout must not undo this recovery.
+        waitingSince = performance.now();
+        dropPartialTranscript();
+        if (!micEnabledRef.current) return;
+        if (directVoiceRef.current) {
+          // Push-to-talk is one activation; it ends as any other push-to-talk turn does.
+          stopListening();
+          setActionError('That was longer than I can take at once. Please try a shorter request.');
+          return;
+        }
+        if (
+          (conversationOpenRef.current || heardWake) &&
+          !interruptOnlyRef.current &&
+          !typingRef.current &&
+          !stoppingRef.current
+        ) {
+          // A first wake only opened capture: no validated request has engaged the conversation
+          // yet. If it overruns, explain the return to wake waiting instead of claiming to listen.
+          if (!conversationOpenRef.current || overrunsRef.current.record(Date.now()) >= overrunFallbackCount) {
+            overrunsRef.current.clear();
+            conversationOpenRef.current = false;
+            selectChild();
+            setHeard('');
+            showVoiceNotice(`Too noisy. Say “Hey ${currentWakeWord()}” to try again.`);
+            traceVoice('overrun-fallback');
+          } else {
+            showVoiceNotice('Too noisy to hear the end. Please say it again.');
+            traceVoice('overrun-retry');
+          }
+        }
+        updateListening(
+          interruptOnlyRef.current || typingRef.current || stoppingRef.current
+            ? 'paused'
+            : conversationOpenRef.current
+              ? 'armed'
+              : 'listening',
+        );
+        if (restart && stream.active) beginSegmentRef.current?.(stream, capture, generation);
       };
       const transcription = new ProgressiveTranscription({
         direct: directVoiceRef.current,
         partials: gate.partials,
+        recognitionTimeoutMs: gate.recognitionMs,
         floor: noiseFloorRef.current,
+        guard: turnGuardRef.current,
+        // Without a local detector, a tail is decoded so a fresh "Hey Friday" in it still counts.
+        verifyTail: !gate.localWake,
+        // Word-gap 'speech-end' events are too frequent to be useful in the log.
+        trace: gate.trace
+          ? (trace) => {
+              if (trace.event !== 'speech-end') window.buddy.voiceTrace({ ...trace });
+            }
+          : undefined,
+        overrun: () => overran(false),
         playback,
         decode: (request) => window.buddy.transcribePcm(request),
         speechStart: () => {
@@ -1053,36 +1143,39 @@ export default function App() {
           if ((engaged || addressed) && (bargedIn || !startedDuringPlayback)) showTranscript({ text, final: false });
         },
         endpoint: () => {
-          if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
+          if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current || woken))
             updateListening('transcribing');
         },
         endpointRevoked: () => {
           if (generation !== generationRef.current || !micEnabledRef.current || typingRef.current) return;
           updateListening(
-            interruptOnlyRef.current
-              ? 'paused'
-              : conversationOpenRef.current || directVoiceRef.current
-                ? 'armed'
-                : 'listening',
+            openTurnState({
+              interruptOnly: interruptOnlyRef.current,
+              engaged: conversationOpenRef.current || directVoiceRef.current,
+              woken,
+            }),
           );
         },
-        error: (_error, requireRestart) => {
+        error: (error, requireRestart) => {
           if (generation !== generationRef.current) return;
-          woken = false;
+          traceVoice('recognition-error', {
+            reason: requireRestart ? 'cap' : error instanceof RecognitionTimeout ? 'timeout' : 'error',
+          });
           if (requireRestart) {
-            // Ambient sound is not an engaged request. The capped controller is
-            // already closed, so drop its hypotheses and start a fresh segment
-            // on the existing capture graph. Never reactivate disabled audio.
-            if (interruptOnlyRef.current || (!conversationOpenRef.current && !directVoiceRef.current)) {
-              if (micEnabledRef.current && stream.active) beginSegmentRef.current?.(stream, capture, generation);
-              return;
-            }
-            failed();
-            setActionError('That request was too long. Tap the microphone and try a shorter request.');
+            // The recording limit closed the segment (push-to-talk, or no overrun handling).
+            overran(true);
             return;
           }
-          if (!interruptOnlyRef.current && (conversationOpenRef.current || directVoiceRef.current))
-            setActionError('I couldn’t hear that. Please try again.');
+          const addressed = conversationOpenRef.current || directVoiceRef.current || woken;
+          woken = false;
+          // The failed turn's live words are gone with it; the notice takes the status line.
+          dropPartialTranscript();
+          if (!interruptOnlyRef.current && addressed)
+            showVoiceNotice(
+              error instanceof RecognitionTimeout
+                ? 'Recognition timed out. Please say it again.'
+                : 'Didn’t catch that. Please say it again.',
+            );
           if (directVoiceRef.current) {
             stopListening();
             return;
@@ -1090,7 +1183,7 @@ export default function App() {
           updateListening(interruptOnlyRef.current ? 'paused' : conversationOpenRef.current ? 'armed' : 'listening');
           beginSegmentRef.current?.(stream, capture, generation);
         },
-        final: (heardText) => {
+        final: (heardText, tail) => {
           if (generation !== generationRef.current) return;
           waitingSince = performance.now();
           const heardWake = woken;
@@ -1119,6 +1212,13 @@ export default function App() {
             return;
           }
           const wake = detectWakeCommand(text, currentWakeWord(), false).result;
+          // The rest of a cut-off sentence counts only if it opens with a fresh wake phrase.
+          if (tail && !heardWake && !wake.wakeDetected) {
+            resume();
+            return;
+          }
+          // A fresh wake phrase opened this turn: whatever was cut off before is over.
+          if (tail) turnGuardRef.current.clear();
           const wasEngaged = conversationOpenRef.current || directVoiceRef.current;
           // A hesitation, or a lone "yeah" while Friday talks, must not replace the request.
           if (
@@ -1149,6 +1249,8 @@ export default function App() {
             command = merged ?? command.trim();
             const childId = merged ? previous?.childId : wake.wakeDetected ? undefined : spokenChildId;
             const submit = (request: string) => {
+              overrunsRef.current.clear();
+              showVoiceNotice();
               lastVoiceRef.current = { text: request, at: Date.now(), childId };
               showTranscript({ text: request, final: true });
               void runPrompt(request, true, { selectedChildId: childId });
@@ -1199,8 +1301,12 @@ export default function App() {
         },
       });
       transcriptionRef.current = transcription;
+      frameWatchRef.current.begin(performance.now());
+      // A failed graph is rebuilt on the same stream; see recoverCapture.
+      const captureFailed = () => recoverCaptureRef.current?.(stream, capture, generation);
       capture.start((frame) => {
         if (generation !== generationRef.current) return;
+        frameWatchRef.current.frame(performance.now());
         let sum = 0;
         for (const value of frame) sum += (value / 32768) ** 2;
         setVoiceLevel(Math.min(1, Math.sqrt(sum / frame.length) * 9));
@@ -1211,42 +1317,56 @@ export default function App() {
           !transcription.hasSpeech &&
           !directVoiceRef.current &&
           !conversationOpenRef.current;
+        // While a cut-off sentence may still be going on in an engaged conversation, the local
+        // detector listens too: "Hey Friday" is the explicit start of a fresh turn.
+        const vouching =
+          !gated && voiceGateRef.current.localWake && !woken && turnGuardRef.current.pending && !directVoiceRef.current;
         if (gated) {
           noiseFloorRef.current.add(sum / frame.length, true);
           replay.push(frame.slice());
           if (replay.length > wakeReplayFrames) replay.shift();
+        }
+        if (gated || vouching) {
           wakeChunk.set(frame, wakeFilled);
           wakeFilled += frame.length;
-          if (wakeFilled < wakeChunkSamples) return;
-          const chunk = wakeChunk;
-          wakeChunk = new Int16Array(wakeChunkSamples);
-          wakeFilled = 0;
-          void window.buddy.feedWakeWord(chunk.buffer).then(
-            (detected) => {
-              if (
-                !detected ||
-                woken ||
-                generation !== generationRef.current ||
-                transcriptionRef.current !== transcription
-              )
-                return;
-              woken = true;
-              wokenAt = performance.now();
-              // Replay the wake phrase and whatever followed it while the detector decided.
-              const frames = replay;
-              replay = [];
-              for (const item of frames) transcription.push(item);
-              if (!conversationOpenRef.current && !typingRef.current) updateListening('armed');
-            },
-            () => undefined,
-          );
-          return;
+          if (wakeFilled >= wakeChunkSamples) {
+            const chunk = wakeChunk;
+            wakeChunk = new Int16Array(wakeChunkSamples);
+            wakeFilled = 0;
+            void window.buddy.feedWakeWord(chunk.buffer).then(
+              (detected) => {
+                if (
+                  !detected ||
+                  woken ||
+                  generation !== generationRef.current ||
+                  transcriptionRef.current !== transcription
+                )
+                  return;
+                woken = true;
+                wokenAt = performance.now();
+                // The wake word vouches for this turn even right after a discarded one.
+                transcription.trustTurn();
+                if (gated) {
+                  // Replay the wake phrase and whatever followed it while the detector decided.
+                  const frames = replay;
+                  replay = [];
+                  for (const item of frames) transcription.push(item);
+                }
+                if (!conversationOpenRef.current && !typingRef.current) updateListening('armed');
+              },
+              () => undefined,
+            );
+          }
+          if (gated) return;
         }
         // A wake that never turned into speech (a knock, a cough) returns to local gating.
         if (woken && !transcription.hasSpeech && performance.now() - wokenAt > wakeSilenceMs) {
           woken = false;
-          updateListening(interruptOnlyRef.current ? 'paused' : 'listening');
-          return;
+          // An engaged conversation was never gated; it keeps listening as it was.
+          if (!conversationOpenRef.current) {
+            updateListening(interruptOnlyRef.current ? 'paused' : 'listening');
+            return;
+          }
         }
         transcription.push(frame);
         if (transcription.hasSpeech || directVoiceRef.current || interruptOnlyRef.current || stoppingRef.current)
@@ -1267,14 +1387,15 @@ export default function App() {
           setHeard('');
           updateListening('listening');
         }
-      }, failed);
+      }, captureFailed);
       if (directVoiceRef.current && !pttHeldRef.current) capture.flush(() => transcription.finish());
     },
     [
       runPrompt,
       stopListening,
-      stopCapture,
       updateListening,
+      traceVoice,
+      showVoiceNotice,
       selectChild,
       wakeWord,
       showTranscript,
@@ -1285,6 +1406,84 @@ export default function App() {
   useEffect(() => {
     beginSegmentRef.current = beginSegment;
   }, [beginSegment]);
+
+  /**
+   * The capture graph failed (worklet overflow after a renderer stall, LiveKit dropping the
+   * microphone, frames stopping) while the microphone itself is still live. Rebuild a direct
+   * graph on the same stream and start a fresh segment; the failed turn is not resubmitted.
+   * A disabled microphone is never reopened, and repeated failures turn it off with an error.
+   */
+  const recoverCapture = useCallback(
+    (stream: MediaStream, failed: FrameCapture, generation: number) => {
+      if (
+        generation !== generationRef.current ||
+        captureRef.current !== failed ||
+        streamRef.current !== stream ||
+        !micEnabledRef.current
+      )
+        return;
+      const fatal = (reason: string) => {
+        traceVoice('capture-failed', { reason });
+        stopCapture();
+        micEnabledRef.current = false;
+        setMicEnabled(false);
+        setActionError('The microphone stopped responding. Tap the microphone to try again.');
+        updateListening('error');
+      };
+      if (!stream.active || captureRecoveriesRef.current.record(Date.now()) > captureRecoveryLimit) {
+        fatal('budget');
+        return;
+      }
+      traceVoice('capture-recovering', { reason: 'capture' });
+      // Audio was lost: whatever the user says next may be the rest of an interrupted sentence.
+      const lostTurn = Boolean(transcriptionRef.current?.hasSpeech);
+      // The room as known before the loss (learning pauses while the guard is pending).
+      turnGuardRef.current.interrupt(noiseFloorRef.current.level);
+      // Fence the failed segment and its frames, then drop the graph before opening another.
+      stopCapture(false);
+      captureRef.current = undefined;
+      // Still wanted: the mic is on, this stream is still Friday's, and nothing else (a newer
+      // activation) has installed a graph meanwhile. A request submitted meanwhile only bumps
+      // the generation; listening must still resume for it.
+      const current = () => micEnabledRef.current && streamRef.current === stream && !captureRef.current;
+      void replaceCapture({ failed, stream, open: () => PcmCapture.open(stream), current }).then((result) => {
+        if (result.status !== 'replaced') {
+          if (result.status === 'failed' && current()) fatal('open');
+          return;
+        }
+        captureRef.current = result.capture;
+        traceVoice('capture-recovered');
+        // Stop restarts listening itself once Friday has stopped.
+        if (stoppingRef.current) return;
+        // The failed turn is gone: leave "transcribing" and any of its live words behind.
+        dropPartialTranscript();
+        if (lostTurn && conversationOpenRef.current && !interruptOnlyRef.current)
+          showVoiceNotice('Mic dropped out. Please say it again.');
+        updateListening(interruptOnlyRef.current ? 'paused' : conversationOpenRef.current ? 'armed' : 'listening');
+        beginSegmentRef.current?.(stream, result.capture, generationRef.current);
+      });
+    },
+    [stopCapture, traceVoice, updateListening, dropPartialTranscript, showVoiceNotice],
+  );
+
+  useEffect(() => {
+    recoverCaptureRef.current = recoverCapture;
+  }, [recoverCapture]);
+
+  // Frames stopping without an error (a stalled subscription or suspended audio graph) would
+  // leave Friday "listening" to nothing. Push-to-talk stops its own capture after release.
+  useEffect(() => {
+    if (!micEnabled) return;
+    const timer = setInterval(() => {
+      const stream = streamRef.current;
+      const capture = captureRef.current;
+      if (!stream || !capture || !transcriptionRef.current || directVoiceRef.current) return;
+      if (!frameWatchRef.current.stalled(performance.now())) return;
+      traceVoice('capture-stall', { reason: 'stall' });
+      recoverCaptureRef.current?.(stream, capture, generationRef.current);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [micEnabled, traceVoice]);
 
   // Friday's voice and the microphone travel over LiveKit when main has it configured.
   useEffect(() => {
@@ -1319,6 +1518,13 @@ export default function App() {
       setHeard('');
       showTranscript();
       lastVoiceRef.current = undefined;
+      overrunsRef.current.clear();
+      // An explicit activation starts a fresh turn, whatever was cut off before.
+      turnGuardRef.current.clear();
+      showVoiceNotice();
+      // A stream without a graph (mid-recovery) or a dead one is released, never leaked.
+      if ((streamRef.current || captureRef.current) && !(streamRef.current?.active && captureRef.current))
+        stopCapture();
       const generation = generationRef.current;
       if (streamRef.current?.active && captureRef.current) {
         updateListening(typingRef.current ? 'paused' : engaged || direct ? 'armed' : 'listening');
@@ -1385,7 +1591,7 @@ export default function App() {
         updateListening('error');
       }
     },
-    [updateListening, stopCapture, showTranscript],
+    [updateListening, stopCapture, showTranscript, showVoiceNotice],
   );
 
   useEffect(() => {
@@ -1933,6 +2139,7 @@ export default function App() {
           void runPrompt(ignored.text, true, { selectedChildId: ignored.childId });
         }}
         error={actionError}
+        notice={voiceNotice}
         selectedChildId={selectedChildId}
         reportedChildren={reportedChildren}
         typing={typing}

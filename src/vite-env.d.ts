@@ -47,6 +47,8 @@ declare global {
       approve(id: string, approved: boolean): Promise<void>;
       transcribePcm(request: PcmRequest): Promise<PcmResult>;
       voiceGate(): Promise<VoiceGate>;
+      /** Segment diagnostics for the opt-in debug log; main validates and keeps metadata only. */
+      voiceTrace(trace: Record<string, unknown>): void;
       feedWakeWord(audio: ArrayBuffer): Promise<boolean>;
       /** Undefined when no decision model is configured or it could not answer. */
       turnGate(turn: TurnInput): Promise<TurnDecision | undefined>;
