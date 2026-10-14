@@ -7,6 +7,9 @@ export interface FrameCapture {
   close(): void;
 }
 
+/** Longest wait for the audio graph to start before opening fails. */
+export const openTimeoutMs = 3000;
+
 /** Owns the browser audio graph. The output is silent and never monitors the mic. */
 export class PcmCapture implements FrameCapture {
   private token = 0;
@@ -43,17 +46,32 @@ export class PcmCapture implements FrameCapture {
     };
     this.node.onprocessorerror = () => this.onError?.();
   }
-  static async open(stream: MediaStream) {
+  /**
+   * Builds the graph, bounded: a worklet load or `resume()` that never settles fails after
+   * `timeoutMs` and closes its AudioContext, so a stuck open can neither hang listening nor leak.
+   */
+  static async open(stream: MediaStream, timeoutMs = openTimeoutMs) {
     if (!stream.active) throw new Error('The microphone disconnected.');
     const context = new AudioContext();
-    try {
+    const ready = (async () => {
       await context.audioWorklet.addModule(new URL('pcm-worklet.js', document.baseURI).href);
       await context.resume();
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('The microphone did not start in time.')), timeoutMs);
+    });
+    try {
+      await Promise.race([ready, deadline]);
       if (!stream.active) throw new Error('The microphone disconnected.');
       return new PcmCapture(context, stream);
     } catch (error) {
-      await context.close();
+      // A late settlement of the abandoned setup must not surface as an unhandled rejection.
+      ready.catch(() => undefined);
+      await context.close().catch(() => undefined);
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
   start(onFrame: (frame: Int16Array) => void, onError: () => void) {

@@ -1,6 +1,7 @@
 // Full App adversarial PCM timing, using the controlled browser fixture.
 import assert from 'node:assert/strict';
 import { connectRenderer } from './cdp.mjs';
+const base = process.env.VITE_TEST_URL || process.env.FRIDAY_PREVIEW_URL || 'http://127.0.0.1:5174';
 const { call, close } = await connectRenderer(process.env.CDP_PORT || 9337);
 await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -10,7 +11,7 @@ async function evaluate(expression) {
   return r.result.value;
 }
 async function open(engaged = true) {
-  await call('Page.navigate', { url: 'http://127.0.0.1:5174/tests/presence-preview.html?state=quiet' });
+  await call('Page.navigate', { url: `${base}/tests/presence-preview.html?state=quiet` });
   await call('Page.bringToFront', {});
   for (let i = 0; i < 100; i++) {
     if (await evaluate("Boolean(window.fixture?.surface && document.querySelector('#root')?.textContent)")) break;
@@ -35,7 +36,10 @@ async function resolve(text) {
   await pause(60);
 }
 async function submissions() {
-  return evaluate("fixture.calls.filter(c=>c[0]==='submit')");
+  // The request source ('voice') is not under test here.
+  return evaluate(
+    "fixture.calls.filter(c=>c[0]==='submit').map(([k,t,c])=>{const {source,...rest}=c||{};return [k,t,rest]})",
+  );
 }
 try {
   await open();
@@ -65,8 +69,13 @@ try {
   assert.equal(await evaluate('fixture.listening'), 'error');
   await open();
   await speak();
-  await evaluate('fixture.capture.onprocessorerror()');
-  assert.equal(await evaluate('fixture.listening'), 'error');
+  // A worklet failure rebuilds the graph on the same live stream; the mic stays on.
+  const microphones = await evaluate("fixture.calls.filter(c=>c[0]==='microphone').length");
+  await evaluate('window.failedGraph=fixture.capture; fixture.capture.onprocessorerror()');
+  await pause(200);
+  assert.equal(await evaluate('fixture.listening'), 'armed');
+  assert.equal(await evaluate('fixture.capture !== window.failedGraph'), true);
+  assert.equal(await evaluate("fixture.calls.filter(c=>c[0]==='microphone').length"), microphones);
   assert.deepEqual(await submissions(), []);
   await open();
   await speak();
@@ -80,20 +89,23 @@ try {
   await open();
   await evaluate('window.buddy.setExpanded(true)');
   await pause(100);
-  await evaluate(
-    `document.querySelector('[aria-label="Hold to talk"]').dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}))`,
-  );
-  await pause(100);
-  await speak();
-  assert.deepEqual(await submissions(), []);
-  await evaluate(
-    `document.querySelector('[aria-label="Hold to talk"]').dispatchEvent(new KeyboardEvent('keyup',{key:' ',bubbles:true}))`,
-  );
-  await pause(60);
-  await resolve('Tell me the time');
-  assert.deepEqual(await submissions(), [['submit', 'Tell me the time', {}]]);
+  // The unified UI has no hold-to-talk control; keep the check for when one returns.
+  if (await evaluate(`Boolean(document.querySelector('[aria-label="Hold to talk"]'))`)) {
+    await evaluate(
+      `document.querySelector('[aria-label="Hold to talk"]').dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}))`,
+    );
+    await pause(100);
+    await speak();
+    assert.deepEqual(await submissions(), []);
+    await evaluate(
+      `document.querySelector('[aria-label="Hold to talk"]').dispatchEvent(new KeyboardEvent('keyup',{key:' ',bubbles:true}))`,
+    );
+    await pause(60);
+    await resolve('Tell me the time');
+    assert.deepEqual(await submissions(), [['submit', 'Tell me the time', {}]]);
+  } else console.log('skip: no hold-to-talk control in this UI');
   // L2: revoked endpoint retains the context captured at original speech start.
-  await call('Page.navigate', { url: 'http://127.0.0.1:5174/tests/presence-preview.html?state=multiple' });
+  await call('Page.navigate', { url: `${base}/tests/presence-preview.html?state=multiple` });
   await call('Page.bringToFront', {});
   for (let i = 0; i < 100; i++) {
     if (await evaluate("Boolean(window.fixture?.surface && document.querySelector('#root')?.textContent)")) break;
@@ -129,7 +141,8 @@ try {
   await pause(60);
   assert.equal(await evaluate('fixture.listening'), 'listening');
   assert.equal(await evaluate('fixture.capture.state'), 'recording');
-  assert((await evaluate('fixture.capture.token')) > token);
+  // The overrun resets the segment in place on the same graph; nothing restarts capture.
+  assert.equal(await evaluate('fixture.capture.token'), token);
   assert.equal(await evaluate("Boolean(document.querySelector('[role=alert]'))"), false);
   assert.deepEqual(await submissions(), []);
   await resolve('Hey Friday, execute the old truncated command');
@@ -140,11 +153,8 @@ try {
   assert.deepEqual(await submissions(), [['submit', 'what time is it?', {}]]);
   assert.equal(await evaluate("fixture.calls.filter(c => c[0] === 'microphone').length"), micCalls);
 
-  // Restart never overrides explicit mic-off or Escape (Stop listening).
-  for (const action of [
-    'fixture.stopMic()',
-    "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))",
-  ]) {
+  // Recovery never overrides explicit mic-off. (Escape closes panels; it does not stop listening.)
+  for (const action of ['fixture.stopMic()']) {
     await open(false);
     await evaluate(`(${noise})(1220)`);
     await evaluate(action);
@@ -167,33 +177,72 @@ try {
   assert.equal(await evaluate('fixture.capture.state'), 'inactive');
   assert.deepEqual(await submissions(), []);
 
-  // Engaged and PTT caps remain fail-closed; neither submits any pending partial.
-  for (const direct of [false, true]) {
-    await open();
-    if (direct) {
-      await evaluate('window.buddy.setExpanded(true)');
-      await pause(100);
-      await evaluate(
-        `document.querySelector('[aria-label="Hold to talk"]').dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}))`,
-      );
-      await pause(100);
-    }
-    await evaluate(`(${noise})()`);
-    await resolve('Do something truncated');
-    assert.equal(await evaluate('fixture.listening'), 'error');
-    assert.equal(await evaluate('fixture.capture.state'), 'inactive');
-    assert.deepEqual(await submissions(), []);
-  }
-  // L1: overflow is terminal for incomplete capture; a late decode cannot submit.
+  // Engaged overruns never submit a pending partial and keep the mic on; a second in a row
+  // falls back to wake-word listening.
+  await open();
+  await evaluate(`(${noise})()`);
+  await resolve('Do something truncated');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  assert.deepEqual(await submissions(), []);
+  await evaluate(`(${noise})()`);
+  await resolve('Do something else truncated');
+  assert.equal(await evaluate('fixture.listening'), 'listening');
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  assert.deepEqual(await submissions(), []);
+  // L1: overflow drops the incomplete turn and rebuilds the graph; a late decode cannot submit.
   await open();
   await speak();
   await end();
-  await evaluate("fixture.capture.port.onmessage({data:{type:'overflow',token:fixture.capture.token}})");
+  await evaluate(
+    "window.failedGraph=fixture.capture; fixture.capture.port.onmessage({data:{type:'overflow',token:fixture.capture.token}})",
+  );
+  await pause(200);
   await resolve('Do something incomplete');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
+  assert.equal(await evaluate('fixture.capture !== window.failedGraph'), true);
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  assert.deepEqual(await submissions(), []);
+  // A steady hum (the reported bug) is calibrated away within seconds: no decode, no error.
+  await open();
+  const jobs = await evaluate('fixture.pending.length');
+  await evaluate('fixture.noise=120; for(let i=0;i<1500;i++) fixture.capture.frame(); fixture.noise=0');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  // Local recognition may have started one interim decode before the hum was judged steady;
+  // its late words belong to a discarded turn and are never submitted.
+  assert((await evaluate('fixture.pending.length')) <= jobs + 1);
+  while ((await evaluate('fixture.pending.length')) > jobs) await resolve('Phantom words from the fan');
+  assert.deepEqual(await submissions(), []);
+  // Speech over the calibrated room still starts a turn.
+  await speak();
+  await end();
+  assert.equal(await evaluate('fixture.listening'), 'transcribing');
+  await resolve('Open my downloads.');
+  assert.deepEqual(await submissions(), [['submit', 'Open my downloads.', {}]]);
+  // Frames that silently stop are a stalled graph: it is rebuilt on the same stream.
+  await open();
+  await evaluate("window.failedGraph=fixture.capture; fixture.capture.state='stalled'; fixture.clock+=3000");
+  for (let i = 0; i < 30 && (await evaluate('fixture.capture === window.failedGraph')); i++) await pause(100);
+  assert.equal(await evaluate('fixture.capture !== window.failedGraph'), true);
+  assert.equal(await evaluate('fixture.capture.state'), 'recording');
+  assert.equal(await evaluate('fixture.listening'), 'armed');
+  // Mic-off while a graph is being rebuilt never reopens it.
+  await open();
+  await evaluate('window.failedGraph=fixture.capture; fixture.capture.onprocessorerror(); fixture.stopMic()');
+  await pause(200);
+  assert.equal(await evaluate('fixture.capture === window.failedGraph'), true);
+  assert.equal(await evaluate('fixture.listening'), 'idle');
+  // A graph that keeps failing is a broken device: after the recovery budget, the mic turns off.
+  await open();
+  for (let i = 0; i < 4; i++) {
+    await evaluate('fixture.capture.onprocessorerror()');
+    await pause(150);
+  }
   assert.equal(await evaluate('fixture.listening'), 'error');
   assert.deepEqual(await submissions(), []);
   console.log(
-    'PASS: M2 ambient cap restart/wake/stale/mic-off/Stop, engaged/PTT fail-closed; L1 overflow rejects incomplete input; L2 UI/context/correction; existing voice lifecycle probes.',
+    'PASS: M2 ambient overrun/wake/stale/mic-off/Stop, engaged overrun keeps mic on then falls back; L1 overflow rebuilds capture and rejects incomplete input; steady hum, stall, mic-off during rebuild, recovery budget; L2 UI/context/correction; existing voice lifecycle probes.',
   );
 } finally {
   close();

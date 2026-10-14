@@ -22,6 +22,7 @@ import { GnomeClient } from '../gnome-client.js';
 import { SpeechService } from '../speech-service.js';
 import { WakeWordSpotter } from '../wake-word.js';
 import { JevClient, validTurn } from '../jev-client.js';
+import { validVoiceTrace } from '../voice-trace.js';
 import { TaskStore } from '../store.js';
 import { configureDebugLog, debugEnabled, debugId, debugLog, debugUrl, installDebugFetch } from '../debug-log.js';
 import { stageRuntimeExtension } from '../runtime-extension.js';
@@ -817,7 +818,24 @@ if (hasSingleInstanceLock)
     });
     ipcMain.handle('voice:wake-status', (event): VoiceGate => {
       fromWindow(event);
-      return { localWake: !wake.unavailable, partials: speech.provider !== 'groq' };
+      return {
+        localWake: !wake.unavailable,
+        partials: speech.provider !== 'groq',
+        // Groq: two 10 s budgets (a superseded request can still be running ahead of this one).
+        // Parakeet: model startup plus one request, each bounded by its own worker timeouts.
+        recognitionMs: speech.provider === 'groq' ? 22_000 : 125_000,
+        trace: debugEnabled(),
+      };
+    });
+    ipcMain.on('voice:trace', (event, trace: unknown) => {
+      try {
+        fromWindow(event);
+        if (!debugEnabled()) return;
+        const valid = validVoiceTrace(trace);
+        if (valid) debugLog('VOICE', 'segment', { ...valid });
+      } catch {
+        /* Ignore forged one-way renderer messages. */
+      }
     });
     ipcMain.handle('voice:wake-feed', (event, audio: unknown) => {
       fromWindow(event);
