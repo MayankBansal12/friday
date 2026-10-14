@@ -67,14 +67,19 @@ def main():
     print("Friday doctor\n")
 
     _, text = run("gnome-shell", "--version")
-    report(version(text)[0] == 49, "GNOME Shell 49", text or "not found")
+    if text:
+        # Built and tested on 49; other versions may need the extension adapted.
+        report(version(text)[0] == 49, "GNOME Shell 49", text if version(text)[0] == 49 else
+               f"{text}; Friday's extension targets 49 and may need adapting", False)
+    else:
+        report(False, "GNOME Shell", "not found; Friday's screen features need GNOME")
     _, text = run("node", "--version")
     report((22, 12) <= version(text) < (23,) or version(text) >= (24,), "Node.js 22.12+", text or "not found; install nodejs")
     report(bool(shutil.which("pnpm")), "pnpm", "found" if shutil.which("pnpm") else "not found; run: npm install -g pnpm")
     report(sys.version_info >= (3, 12), "Python 3.12+", sys.version.split()[0])
     gi = run(sys.executable, "-c", "import gi")[0] == 0
-    report(gi, "PyGObject", "found" if gi else "not found; install python3-gobject")
-    for command, package in (("ffmpeg", "ffmpeg-free"), ("pw-cat", "pipewire-utils")):
+    report(gi, "PyGObject", "found" if gi else "not found; install PyGObject for this Python")
+    for command, package in (("ffmpeg", "ffmpeg"), ("pw-cat", "PipeWire's command-line tools")):
         report(bool(shutil.which(command)), command, "found" if shutil.which(command) else f"not found; install {package}")
     report((root / "node_modules").is_dir(), "Dependencies", "installed" if (root / "node_modules").is_dir() else "run: pnpm install")
 
