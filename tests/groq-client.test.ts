@@ -129,6 +129,54 @@ describe('Groq transcription', () => {
     expect(busy.calls).toHaveLength(2);
   });
 
+  it('keeps retries and waits inside one total budget', async () => {
+    let clock = 0;
+    const sleeps: number[] = [];
+    // A slow first attempt leaves too little budget for a 5 s retry-after: fail now, not later.
+    const tracked = trackFetch(() => {
+      clock += 4000;
+      return jsonResponse({}, 503, { 'retry-after': '5' });
+    });
+    const client = new GroqClient({
+      apiKey: 'k',
+      fetch: tracked.fetchFn,
+      budgetMs: 10_000,
+      now: () => clock,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+        return Promise.resolve();
+      },
+    });
+    clients.push(client);
+    await expect(client.transcribePcm(new Int16Array([1, -1]).buffer)).rejects.toThrow('Speech service is busy');
+    expect(tracked.calls).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('aborts a hung request at the budget, including a stalled response body', async () => {
+    const hang = (init: RequestInit) =>
+      new Promise<Response>((_, reject) => init.signal!.addEventListener('abort', () => reject(new Error('aborted'))));
+    const hung = trackFetch((call) => hang(call.init));
+    const client = new GroqClient({ apiKey: 'k', fetch: hung.fetchFn, budgetMs: 40 });
+    clients.push(client);
+    await expect(client.transcribePcm(new Int16Array([1, -1]).buffer)).rejects.toThrow('timed out');
+    expect(hung.calls).toHaveLength(1);
+    const stalled = trackFetch(
+      (call) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              call.init.signal!.addEventListener('abort', () => controller.error(new Error('aborted')));
+            },
+          }),
+        ),
+    );
+    const slowBody = new GroqClient({ apiKey: 'k', fetch: stalled.fetchFn, budgetMs: 40 });
+    clients.push(slowBody);
+    await expect(slowBody.transcribePcm(new Int16Array([1, -1]).buffer)).rejects.toThrow('timed out');
+  });
+
   it('retries a network failure once, then fails with context', async () => {
     const fetchFn = vi
       .fn<typeof fetch>()

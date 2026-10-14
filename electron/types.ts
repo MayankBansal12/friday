@@ -160,6 +160,10 @@ export interface VoiceGate {
   localWake: boolean;
   /** Interim re-decodes while speaking; off for hosted recognition, billed per request. */
   partials: boolean;
+  /** Longest wait for one recognition result before the turn fails recoverably, in ms. */
+  recognitionMs: number;
+  /** Opt-in debug logging is on: send segment diagnostics (metadata only) to main. */
+  trace: boolean;
 }
 
 export interface TranscriptResult {

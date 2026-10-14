@@ -71,9 +71,8 @@ try {
   );
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
   await pause(500);
-  await evaluate(
-    `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Type instead')).click()`,
-  );
+  await until('Boolean(document.querySelector("button.presence-composer.is-idle"))', 'The composer must be visible');
+  await evaluate('document.querySelector("button.presence-composer.is-idle").click()');
   await pause(250);
   const opened = await evaluate('fixture.calls');
   assert(!opened.some((c) => /silence|interrupt|stop/i.test(c[0])), 'Opening the text composer interrupted the reply');

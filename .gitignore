@@ -11,3 +11,5 @@ coverage/
 __pycache__/
 *.py[cod]
 .venv-stt/
+# Nested git worktrees for other branches; never part of this checkout.
+.worktrees/
