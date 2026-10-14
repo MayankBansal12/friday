@@ -1,12 +1,38 @@
 #!/usr/bin/env python3
-"""Install Friday's isolated CPU STT runtime; reuse models already downloaded by Handy."""
+"""Install Friday's offline speech recognition: a CPU ONNX runtime and Parakeet V3 (~670 MB)."""
 
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 import venv
+
+MODEL = "parakeet-tdt-0.6b-v3-int8"
+REPO = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+FILES = ("config.json", "vocab.txt", "decoder_joint-model.int8.onnx", "encoder-model.int8.onnx")
+
+
+def installed(directory):
+    return all((directory / name).is_file() for name in FILES)
+
+
+def download(target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Download beside the target and rename at the end, so an interrupted run leaves no partial model.
+    temp = Path(tempfile.mkdtemp(prefix=f".{MODEL}-", dir=target.parent))
+    try:
+        for name in FILES:
+            print(f"Downloading {name}")
+            with urllib.request.urlopen(f"{REPO}/{name}", timeout=60) as response, (temp / name).open("wb") as out:
+                shutil.copyfileobj(response, out, 1 << 20)
+        shutil.rmtree(target, ignore_errors=True)
+        temp.rename(target)
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
 
 
 def main():
@@ -24,11 +50,20 @@ def main():
         str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir",
         "-r", str(requirements),
     ], check=True)
-    model = Path(os.environ.get("LINUX_BUDDY_STT_MODEL", data / "com.pais.handy/models/parakeet-tdt-0.6b-v3-int8"))
     print(f"STT Python: {python}")
-    print(f"Parakeet model: {model} ({'found' if model.is_dir() else 'missing; download Parakeet V3 in Handy'})")
     if directory != data / "friday/stt-venv":
         print(f"Set LINUX_BUDDY_STT_PYTHON={python} when launching Friday.")
+
+    own = data / "friday" / MODEL
+    handy = data / "com.pais.handy/models" / MODEL
+    if os.environ.get("LINUX_BUDDY_STT_MODEL"):
+        model = Path(os.environ["LINUX_BUDDY_STT_MODEL"]).expanduser()
+        print(f"Parakeet model: {model} ({'found' if installed(model) else 'missing files'})")
+    elif installed(own) or installed(handy):
+        print(f"Parakeet model: {own if installed(own) else handy} (already installed)")
+    else:
+        download(own)
+        print(f"Parakeet model: {own}")
 
 
 if __name__ == "__main__":
