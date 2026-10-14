@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +30,17 @@ interface Worker {
   };
 }
 
+const MODEL = 'parakeet-tdt-0.6b-v3-int8';
+const MODEL_FILES = ['config.json', 'vocab.txt', 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx'];
+
+/** The copy from pnpm stt:setup, else one Handy already downloaded. */
+function defaultModel(data: string): string {
+  const own = join(data, 'friday', MODEL);
+  const handy = join(data, 'com.pais.handy/models', MODEL);
+  const has = (directory: string) => MODEL_FILES.every((name) => existsSync(join(directory, name)));
+  return has(own) || !has(handy) ? own : handy;
+}
+
 /** One model process shared by successive utterances, with crash/timeout recovery. */
 export class ParakeetClient {
   private worker?: Worker;
@@ -42,10 +54,7 @@ export class ParakeetClient {
     const data = process.env.XDG_DATA_HOME || join(homedir(), '.local/share');
     const python =
       this.options.pythonPath || process.env.LINUX_BUDDY_STT_PYTHON || join(data, 'friday/stt-venv/bin/python');
-    const model =
-      this.options.modelDirectory ||
-      process.env.LINUX_BUDDY_STT_MODEL ||
-      join(data, 'com.pais.handy/models/parakeet-tdt-0.6b-v3-int8');
+    const model = this.options.modelDirectory || process.env.LINUX_BUDDY_STT_MODEL || defaultModel(data);
     let resolveReady!: () => void;
     let rejectReady!: (error: Error) => void;
     const ready = new Promise<void>((resolve, reject) => {

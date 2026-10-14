@@ -17,6 +17,7 @@
     "dev:sandboxed": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "desktop:build": "tsc -p tsconfig.node.json",
     "desktop:install": "pnpm desktop:build && python3 scripts/install-desktop.py",
+    "doctor": "python3 scripts/doctor.py",
     "desktop:status": "python3 scripts/desktop-command.py",
     "stt:setup": "python3 scripts/setup-stt.py",
     "wake:setup": "python3 scripts/setup-wake-word.py",
