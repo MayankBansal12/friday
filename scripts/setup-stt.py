@@ -13,11 +13,17 @@ import venv
 
 MODEL = "parakeet-tdt-0.6b-v3-int8"
 REPO = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
-FILES = ("config.json", "vocab.txt", "decoder_joint-model.int8.onnx", "encoder-model.int8.onnx")
+# Exact sizes catch a download the server cut short.
+FILES = {
+    "config.json": 97,
+    "vocab.txt": 93939,
+    "decoder_joint-model.int8.onnx": 18202004,
+    "encoder-model.int8.onnx": 652183999,
+}
 
 
 def installed(directory):
-    return all((directory / name).is_file() for name in FILES)
+    return all((directory / name).is_file() and (directory / name).stat().st_size == size for name, size in FILES.items())
 
 
 def download(target):
@@ -29,6 +35,8 @@ def download(target):
             print(f"Downloading {name}")
             with urllib.request.urlopen(f"{REPO}/{name}", timeout=60) as response, (temp / name).open("wb") as out:
                 shutil.copyfileobj(response, out, 1 << 20)
+        if not installed(temp):
+            raise SystemExit("The Parakeet download was incomplete. Run pnpm stt:setup again.")
         shutil.rmtree(target, ignore_errors=True)
         temp.rename(target)
     finally:
@@ -58,7 +66,9 @@ def main():
     handy = data / "com.pais.handy/models" / MODEL
     if os.environ.get("LINUX_BUDDY_STT_MODEL"):
         model = Path(os.environ["LINUX_BUDDY_STT_MODEL"]).expanduser()
-        print(f"Parakeet model: {model} ({'found' if installed(model) else 'missing files'})")
+        if not installed(model):
+            raise SystemExit(f"LINUX_BUDDY_STT_MODEL={model} is missing Parakeet V3 int8 files. Unset it to download the model.")
+        print(f"Parakeet model: {model}")
     elif installed(own) or installed(handy):
         print(f"Parakeet model: {own if installed(own) else handy} (already installed)")
     else:

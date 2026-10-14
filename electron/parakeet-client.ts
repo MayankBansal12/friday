@@ -31,12 +31,13 @@ interface Worker {
 }
 
 const MODEL = 'parakeet-tdt-0.6b-v3-int8';
+const MODEL_FILES = ['config.json', 'vocab.txt', 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx'];
 
 /** The copy from pnpm stt:setup, else one Handy already downloaded. */
 function defaultModel(data: string): string {
   const own = join(data, 'friday', MODEL);
   const handy = join(data, 'com.pais.handy/models', MODEL);
-  const has = (directory: string) => existsSync(join(directory, 'encoder-model.int8.onnx'));
+  const has = (directory: string) => MODEL_FILES.every((name) => existsSync(join(directory, name)));
   return has(own) || !has(handy) ? own : handy;
 }
 

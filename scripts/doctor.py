@@ -10,8 +10,8 @@ import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
 failed = False
+config = {}
 
 
 def report(ok, name, detail, required=True):
@@ -23,7 +23,7 @@ def report(ok, name, detail, required=True):
 
 def run(*command):
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20, env=config)
         return result.returncode, (result.stdout + result.stderr).strip()
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
@@ -34,30 +34,42 @@ def version(text):
     return tuple(int(part or 0) for part in match.groups()) if match else (0,)
 
 
-def env():
+def load_config():
+    """Like the app's dotenv: .env fills in only what the environment does not already set."""
     values = {}
     path = root / ".env"
     if path.is_file():
         for line in path.read_text().splitlines():
-            key, sep, value = line.strip().partition("=")
-            if sep and not key.startswith("#"):
-                values[key.strip()] = value.strip().strip("'\"")
-    # Like the app: the real environment wins over .env.
-    return values | {key: value for key, value in os.environ.items() if value}
+            key, sep, value = line.strip().removeprefix("export ").partition("=")
+            if not sep or key.startswith("#"):
+                continue
+            value = value.strip()
+            quote = value[:1]
+            if quote in ("'", '"') and quote in value[1:]:
+                value = value[1:value.index(quote, 1)]
+            else:
+                value = re.sub(r"(^|\s)#.*", "", value).strip()
+            values[key.strip()] = value
+    return values | dict(os.environ)
+
+
+def get(key, default=""):
+    return config.get(key) or default
 
 
 def has_files(directory, *names):
-    return all((directory / name).is_file() for name in names)
+    return all((Path(directory) / name).is_file() for name in names)
 
 
 def main():
-    keys = env()
+    config.update(load_config())
+    data = Path(get("XDG_DATA_HOME", Path.home() / ".local/share"))
     print("Friday doctor\n")
 
     _, text = run("gnome-shell", "--version")
     report(version(text)[0] == 49, "GNOME Shell 49", text or "not found")
     _, text = run("node", "--version")
-    report(version(text)[0] >= 22, "Node.js 22+", text or "not found; install nodejs")
+    report((22, 12) <= version(text) < (23,) or version(text) >= (24,), "Node.js 22.12+", text or "not found; install nodejs")
     report(bool(shutil.which("pnpm")), "pnpm", "found" if shutil.which("pnpm") else "not found; run: npm install -g pnpm")
     report(sys.version_info >= (3, 12), "Python 3.12+", sys.version.split()[0])
     gi = run(sys.executable, "-c", "import gi")[0] == 0
@@ -66,37 +78,52 @@ def main():
         report(bool(shutil.which(command)), command, "found" if shutil.which(command) else f"not found; install {package}")
     report((root / "node_modules").is_dir(), "Dependencies", "installed" if (root / "node_modules").is_dir() else "run: pnpm install")
 
-    pi = keys.get("LINUX_BUDDY_PI_BIN", "pi")
-    _, text = run(pi, "--version")
+    _, text = run(get("LINUX_BUDDY_PI_BIN", "pi"), "--version")
     report(version(text) >= (0, 85, 1), "Pi 0.85.1+", text or "not found; run: npm install -g @earendil-works/pi-coding-agent")
-    auth = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi/agent")) / "auth.json"
     try:
-        signed_in = "openai-codex" in json.loads(auth.read_text())
+        auth = json.loads((Path(get("PI_CODING_AGENT_DIR", Path.home() / ".pi/agent")) / "auth.json").read_text())
     except (OSError, ValueError):
-        signed_in = False
-    report(signed_in, "ChatGPT sign-in for Pi", "found" if signed_in else "run pi, type /login and choose ChatGPT (Codex)")
-
-    provider = keys.get("LINUX_BUDDY_STT_PROVIDER", "groq" if keys.get("GROQ_API_KEY") else "parakeet")
-    if provider == "groq":
-        report(bool(keys.get("GROQ_API_KEY")), "Speech recognition", "Groq" if keys.get("GROQ_API_KEY") else "add GROQ_API_KEY to .env")
+        auth = {}
+    # The app runs the default model through ChatGPT and every other model through OpenCode Go.
+    # A model chosen in Friday's Settings is not visible here.
+    if get("LINUX_BUDDY_MODEL", "gpt-6.1-sol") == "gpt-6.1-sol":
+        ok = bool(auth.get("openai-codex"))
+        report(ok, "ChatGPT sign-in for Pi", "found" if ok else "run pi, type /login and choose ChatGPT (Codex)")
     else:
-        stt_python = Path(keys.get("LINUX_BUDDY_STT_PYTHON", data / "friday/stt-venv/bin/python"))
+        ok = bool(get("OPENCODE_API_KEY") or auth.get("opencode-go"))
+        report(ok, "OpenCode Go for Pi", "found" if ok else "add OPENCODE_API_KEY to .env")
+
+    stt = get("LINUX_BUDDY_STT_PROVIDER", "groq" if get("GROQ_API_KEY") else "parakeet")
+    if stt == "groq":
+        report(bool(get("GROQ_API_KEY")), "Speech recognition", "Groq" if get("GROQ_API_KEY") else "add GROQ_API_KEY to .env")
+    elif stt == "parakeet":
         files = ("config.json", "vocab.txt", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx")
-        models = [Path(keys["LINUX_BUDDY_STT_MODEL"])] if keys.get("LINUX_BUDDY_STT_MODEL") else [
+        models = [get("LINUX_BUDDY_STT_MODEL")] if get("LINUX_BUDDY_STT_MODEL") else [
             data / "friday/parakeet-tdt-0.6b-v3-int8", data / "com.pais.handy/models/parakeet-tdt-0.6b-v3-int8"]
-        ready = stt_python.is_file() and any(has_files(model, *files) for model in models)
+        python = get("LINUX_BUDDY_STT_PYTHON", data / "friday/stt-venv/bin/python")
+        ready = any(has_files(model, *files) for model in models) and \
+            run(str(python), "-c", "import numpy, onnxruntime, onnx_asr")[0] == 0
         report(ready, "Speech recognition", "offline Parakeet" if ready else "add GROQ_API_KEY to .env, or run: pnpm stt:setup")
-
-    tts = keys.get("LINUX_BUDDY_TTS_PROVIDER", "rumik" if keys.get("RUMIK_API_KEY") else "espeak")
-    if tts == "rumik":
-        report(bool(keys.get("RUMIK_API_KEY")), "Voice", "Rumik" if keys.get("RUMIK_API_KEY") else "add RUMIK_API_KEY to .env")
     else:
+        report(False, "Speech recognition", f"unknown LINUX_BUDDY_STT_PROVIDER={stt}; use groq or parakeet")
+
+    tts = get("LINUX_BUDDY_TTS_PROVIDER", "rumik" if get("RUMIK_API_KEY") else "espeak")
+    if tts == "rumik":
+        report(bool(get("RUMIK_API_KEY")), "Voice", "Rumik" if get("RUMIK_API_KEY") else "add RUMIK_API_KEY to .env")
+    elif tts == "espeak":
         espeak = bool(shutil.which("espeak-ng"))
         report(espeak, "Voice", "espeak (add RUMIK_API_KEY for a natural voice)" if espeak else "install espeak-ng, or add RUMIK_API_KEY to .env")
+    else:
+        report(False, "Voice", f"unknown LINUX_BUDDY_TTS_PROVIDER={tts}; use rumik or espeak")
 
-    wake = Path(keys.get("LINUX_BUDDY_WAKE_MODEL", data / "friday/wake-word/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"))
-    ready = has_files(wake, "tokens.txt", "bpe.model")
-    report(ready, "Wake word", "installed" if ready else "run: pnpm wake:setup")
+    # Without the detector, Friday transcribes all speech to find the wake word, through Groq when that is selected.
+    wake = get("LINUX_BUDDY_WAKE_MODEL", data / "friday/wake-word/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01")
+    ready = has_files(wake, "bpe.model", "tokens.txt", "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                      "decoder-epoch-12-avg-2-chunk-16-left-64.onnx", "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+    if get("LINUX_BUDDY_WAKE_DETECTOR") == "off":
+        report(False, "On-device wake word", "turned off by LINUX_BUDDY_WAKE_DETECTOR; all speech is transcribed", False)
+    else:
+        report(ready, "On-device wake word", "installed" if ready else "run: pnpm wake:setup")
 
     code, text = run(sys.executable, str(root / "scripts/desktop-command.py"))
     try:
@@ -113,15 +140,14 @@ def main():
         report(False, "Desktop extension", status.get("actionRequired") or
                "run: pnpm desktop:install, then sign out of GNOME and back in once")
 
-    built = (root / "dist-electron/main/index.js").is_file()
+    built = has_files(root, "dist-electron/main/index.js", "dist/index.html")
     report(built, "Build", "done" if built else "run: pnpm build")
 
     print()
-    codex = keys.get("LINUX_BUDDY_CODEX_BIN", "codex")
-    code, _ = run(codex, "login", "status")
+    code, _ = run(get("LINUX_BUDDY_CODEX_BIN", "codex"), "login", "status")
     report(code == 0, "Computer control (optional)", "Codex signed in" if code == 0 else
            "install Codex CLI and run: codex login", False)
-    report(bool(keys.get("TYPESAFE_API_KEY")), "Ignore background talk (optional)", "TypeSafe" if keys.get("TYPESAFE_API_KEY") else
+    report(bool(get("TYPESAFE_API_KEY")), "Ignore background talk (optional)", "TypeSafe" if get("TYPESAFE_API_KEY") else
            "add TYPESAFE_API_KEY to .env", False)
 
     print("\nReady. Run: pnpm start:desktop" if not failed else "\nFix the ✗ items above, then run pnpm doctor again.")

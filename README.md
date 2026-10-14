@@ -4,12 +4,12 @@ Friday is a voice assistant that lives on your Linux desktop. Say "Hey Friday", 
 
 ## What Friday can do
 
-- **Talks with you.** Say "Hey Friday" and just talk. Interrupt or correct her mid-sentence and she adapts. The wake word is detected on your laptop, so nothing leaves it until you call her.
+- **Talks with you.** Say "Hey Friday" and just talk. Interrupt or correct her mid-sentence and she adapts. While she rests, she listens for her name on your laptop and sends nothing anywhere.
 - **Shows you where.** Ask how to do something and she circles, points, and numbers the steps right on your screen.
 - **Does it for you.** She can click and type through short tasks on your desktop. Press Escape twice to take back control.
 - **Works in the background.** Hand off longer tasks and keep talking. Check on them from the small circle in the corner.
 - **Sees through your camera.** "What am I holding?" or "Watch while I turn this."
-- **Understands many languages,** including Hindi.
+- **Understands many languages,** including Hindi with Groq speech recognition.
 
 ## Install
 
@@ -26,8 +26,9 @@ Paste this into your coding agent (Claude Code, Codex, or similar):
 ```text
 Set up Friday on this laptop: https://github.com/MayankBansal12/friday
 
-1. Clone the repo, run `pnpm install`, then run `pnpm doctor`. Doctor is the
-   checklist: it lists every missing piece and how to fix it.
+1. Install git, Node.js 22.12+, and pnpm if they are missing. Clone the repo,
+   run `pnpm install`, then run `pnpm doctor`. Doctor is the checklist: it
+   lists every missing piece and how to fix it.
 2. Install missing system packages with dnf. Ask me before using sudo.
 3. Run `pnpm wake:setup`, `pnpm desktop:install`, and `pnpm build`.
 4. Copy `.env.example` to `.env`. Never ask me to paste API keys into this
