@@ -69,7 +69,7 @@ def main():
         if not installed(model):
             raise SystemExit(f"LINUX_BUDDY_STT_MODEL={model} is missing Parakeet V3 int8 files. Unset it to download the model.")
         print(f"Parakeet model: {model}")
-    elif installed(own) or installed(handy):
+    elif installed(own) or (installed(handy) and not own.exists()):
         print(f"Parakeet model: {own if installed(own) else handy} (already installed)")
     else:
         download(own)

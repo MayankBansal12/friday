@@ -4,7 +4,7 @@ Friday is a voice assistant that lives on your Linux desktop. Say "Hey Friday", 
 
 ## What Friday can do
 
-- **Talks with you.** Say "Hey Friday" and just talk. Interrupt or correct her mid-sentence and she adapts. While she rests, she listens for her name on your laptop and sends nothing anywhere.
+- **Talks with you.** Say "Hey Friday" and just talk. Interrupt or correct her mid-sentence and she adapts. While she rests, on-device wake detection keeps your microphone audio on your laptop.
 - **Shows you where.** Ask how to do something and she circles, points, and numbers the steps right on your screen.
 - **Does it for you.** She can click and type through short tasks on your desktop. Press Escape twice to take back control.
 - **Works in the background.** Hand off longer tasks and keep talking. Check on them from the small circle in the corner.
@@ -25,8 +25,11 @@ Paste this into your coding agent (Claude Code, Codex, or similar):
 Set up Friday on this laptop: https://github.com/MayankBansal12/friday
 
 Friday was built on Fedora 43 with GNOME 49 on Wayland and a 1920×1080
-display at 100% scale. If this machine is different, adapt the setup to make
-it work here, and tell me what you changed and anything that can't work.
+display at 100% scale. If this machine is different, make local changes so it
+works here. The assumptions live in native/gnome-extension/metadata.json
+(GNOME versions), native/gnome-extension/extension.js (display), and
+scripts/start-desktop.py (launch). Tell me what you changed. If a feature
+can't work here, stop and tell me why instead of retrying.
 
 1. Install git, Node.js 22.12+, and pnpm if they are missing. Clone the repo,
    run `pnpm install`, then run `pnpm doctor`. Doctor is the checklist: it

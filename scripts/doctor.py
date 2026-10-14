@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check that this machine is ready to run Friday. Read-only; never prints credential values."""
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,9 @@ import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("setup_stt", root / "scripts/setup-stt.py")
+stt_setup = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stt_setup)
 failed = False
 config = {}
 
@@ -45,10 +49,10 @@ def load_config():
                 continue
             value = value.strip()
             quote = value[:1]
-            if quote in ("'", '"') and quote in value[1:]:
+            if quote in ("'", '"', "`") and quote in value[1:]:
                 value = value[1:value.index(quote, 1)]
             else:
-                value = re.sub(r"(^|\s)#.*", "", value).strip()
+                value = value.split("#")[0].strip()
             values[key.strip()] = value
     return values | dict(os.environ)
 
@@ -70,7 +74,7 @@ def main():
     if text:
         # Built and tested on 49; other versions may need the extension adapted.
         report(version(text)[0] == 49, "GNOME Shell 49", text if version(text)[0] == 49 else
-               f"{text}; Friday's extension targets 49 and may need adapting", False)
+               f"{text}; add it to shell-version in native/gnome-extension/metadata.json", False)
     else:
         report(False, "GNOME Shell", "not found; Friday's screen features need GNOME")
     _, text = run("node", "--version")
@@ -102,11 +106,13 @@ def main():
     if stt == "groq":
         report(bool(get("GROQ_API_KEY")), "Speech recognition", "Groq" if get("GROQ_API_KEY") else "add GROQ_API_KEY to .env")
     elif stt == "parakeet":
-        files = ("config.json", "vocab.txt", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx")
-        models = [get("LINUX_BUDDY_STT_MODEL")] if get("LINUX_BUDDY_STT_MODEL") else [
-            data / "friday/parakeet-tdt-0.6b-v3-int8", data / "com.pais.handy/models/parakeet-tdt-0.6b-v3-int8"]
+        # Pick the model the way Friday does, then check it against the pinned download.
+        files = stt_setup.FILES
+        own, handy = data / "friday" / stt_setup.MODEL, data / "com.pais.handy/models" / stt_setup.MODEL
+        model = Path(get("LINUX_BUDDY_STT_MODEL") or (own if has_files(own, *files) or not has_files(handy, *files) else handy))
         python = get("LINUX_BUDDY_STT_PYTHON", data / "friday/stt-venv/bin/python")
-        ready = any(has_files(model, *files) for model in models) and \
+        complete = has_files(model, *files) if get("LINUX_BUDDY_STT_MODEL") else stt_setup.installed(model)
+        ready = complete and \
             run(str(python), "-c", "import numpy, onnxruntime, onnx_asr")[0] == 0
         report(ready, "Speech recognition", "offline Parakeet" if ready else "add GROQ_API_KEY to .env, or run: pnpm stt:setup")
     else:
@@ -144,8 +150,12 @@ def main():
         report(size == (1920, 1080, 1), "Display 1920×1080 at 100%", "yes" if size == (1920, 1080, 1) else
                f"{size[0]}×{size[1]} at {round((size[2] or 1) * 100)}%; drawings and computer control may be misplaced", False)
     else:
-        report(False, "Desktop extension", status.get("actionRequired") or
-               "run: pnpm desktop:install, then sign out of GNOME and back in once")
+        error = status.get("error", "")
+        if "display" in error:
+            report(False, "Desktop extension", f"{error}; adapt _display() in native/gnome-extension/extension.js")
+        else:
+            report(False, "Desktop extension", error or status.get("actionRequired") or
+                   "run: pnpm desktop:install, then sign out of GNOME and back in once")
 
     built = has_files(root, "dist-electron/main/index.js", "dist/index.html")
     report(built, "Build", "done" if built else "run: pnpm build")
